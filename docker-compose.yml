@@ -1,0 +1,38 @@
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - earn-proxy-data:/var/lib/earn-proxy
+    expose:
+      - "8000"
+
+  checker:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "-m", "app.check_service"]
+    volumes:
+      - earn-proxy-data:/var/lib/earn-proxy
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      - web
+    environment:
+      EARN_PROXY_DOMAIN: ${EARN_PROXY_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  earn-proxy-data:
+  caddy-data:
+  caddy-config:

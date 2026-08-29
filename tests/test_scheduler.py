@@ -1,0 +1,194 @@
+from datetime import UTC, datetime, timedelta
+
+from app.check_service import CheckRunner, SchedulerState
+
+
+def test_scheduler_has_independent_health_and_earnapp_due_windows():
+    runner = CheckRunner(state=SchedulerState(interval_minutes=60, concurrency=5))
+    assert runner.health_due is True
+    assert runner.earnapp_due is True
+    runner.mark_health_sweep(datetime(2026, 8, 29, 8, 0, tzinfo=UTC))
+    assert runner.health_due is False
+    assert runner.earnapp_due is True
+
+
+def test_health_due_reopens_after_the_configured_window():
+    closed_at = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    runner = CheckRunner(state=SchedulerState(interval_minutes=60, concurrency=5, last_sweep_at=closed_at))
+    assert runner.health_due is False
+    assert runner.next_wait_seconds(now=closed_at + timedelta(minutes=59)) == 60
+    assert runner.health_due is False
+    assert runner.next_wait_seconds(now=closed_at + timedelta(minutes=60)) == 0
+    assert runner.health_due is True
+
+
+def test_empty_health_batch_does_not_move_a_closed_window(app):
+    closed_at = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    runner = CheckRunner(app=app, state=SchedulerState(interval_minutes=60, concurrency=5))
+    runner.mark_health_sweep(closed_at)
+
+    assert runner.run_batch() == 0
+    assert runner.state.last_health_sweep_at == closed_at
+    assert runner.health_due is False
+
+
+def test_run_forever_keeps_database_context_while_calculating_batch_spacing(app, monkeypatch):
+    runner = CheckRunner(app=app, state=SchedulerState(interval_minutes=60, concurrency=5))
+
+    def one_batch():
+        runner.stop()
+        return 1
+
+    def spacing(db, *, due_count):
+        # Accessing the connection proves it has not been closed by a context
+        # teardown before the spacing calculation.
+        assert db.execute("SELECT 1").fetchone()[0] == 1
+        return 0
+
+    monkeypatch.setattr(runner, "run_batch", one_batch)
+    monkeypatch.setattr("app.check_service.batch_spacing_seconds", spacing)
+    runner.run_forever()
+
+
+def test_run_forever_sleeps_until_next_health_window_after_last_batch(app, monkeypatch):
+    runner = CheckRunner(app=app, state=SchedulerState(interval_minutes=60, concurrency=5))
+    finished_at = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    calls = 0
+    waits = []
+
+    def batch():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            runner.mark_health_sweep(finished_at)
+            return 1
+        runner.stop()
+        return 0
+
+    monkeypatch.setattr(runner, "run_batch", batch)
+    monkeypatch.setattr(runner._stop, "wait", lambda seconds: waits.append(seconds))
+    runner.run_forever()
+
+    assert waits and waits[0] >= 3500
+
+
+def test_runner_refreshes_interval_and_concurrency_from_admin_settings(app):
+    runner = CheckRunner(app=app, state=SchedulerState(interval_minutes=60, concurrency=5))
+    with app.app_context():
+        db = __import__("app.db", fromlist=["get_db"]).get_db()
+        db.execute("UPDATE settings SET value='120' WHERE key='health_interval_minutes'")
+        db.execute("UPDATE settings SET value='2' WHERE key='health_concurrency'")
+        db.commit()
+        runner.refresh_settings(db)
+    assert runner.state.interval_minutes == 120
+    assert runner.state.concurrency == 2
+
+
+def test_newly_added_due_proxy_is_processed_during_health_cooldown(app, monkeypatch):
+    from app.db import get_db
+    from app.services.proxies import add_proxy
+    from app.services.users import create_user
+
+    closed_at = datetime.now(UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "new-proxy@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "new.example:9000:u:p")
+        db.execute(
+            "UPDATE proxies SET next_check_at=? WHERE id=?",
+            (closed_at.isoformat(), proxy_id),
+        )
+        db.commit()
+    runner = CheckRunner(app=app, state=SchedulerState(interval_minutes=60, concurrency=1))
+    runner.mark_health_sweep(closed_at - timedelta(minutes=1))
+    monkeypatch.setattr(
+        runner,
+        "_check_one",
+        lambda row, parsed=None: (
+            int(row["id"]),
+            {"status": "inconclusive", "error": "test"},
+        ),
+    )
+    runner.run_forever = runner.run_forever
+    # The durable queue must override the cooldown for newly-created work.
+    calls = []
+    original_batch = runner.run_batch
+
+    def batch():
+        calls.append(True)
+        result = original_batch()
+        runner.stop()
+        return result
+
+    monkeypatch.setattr(runner, "run_batch", batch)
+    runner.run_forever()
+    assert calls
+
+
+def test_earnapp_worker_failure_is_recorded_and_claim_is_released(app, monkeypatch):
+    from datetime import datetime
+
+    from app.db import get_db
+    from app.services.proxies import add_proxy
+    from app.services.users import create_user
+
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "earn-failure@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "earn.example:9000:u:p")
+        db.execute(
+            "UPDATE proxies SET status='online', detected_protocol='socks5', earnapp_next_check_at=? WHERE id=?",
+            (datetime.now(UTC).isoformat(), proxy_id),
+        )
+        db.commit()
+
+    async def fail_probe(*args, **kwargs):
+        raise RuntimeError("simulated earnapp failure")
+
+    monkeypatch.setattr("app.check_service.probe_earnapp_proxy", fail_probe)
+    runner = CheckRunner(app=app, state=SchedulerState(interval_minutes=60, concurrency=5))
+    assert runner.run_earnapp_batch() == 1
+    with app.app_context():
+        row = (
+            get_db()
+            .execute(
+                "SELECT earnapp_claimed_until, eligibility, earnapp_reason FROM proxies WHERE id=?",
+                (proxy_id,),
+            )
+            .fetchone()
+        )
+    assert row["earnapp_claimed_until"] is None
+    assert row["eligibility"] == "pending"
+    assert "simulated earnapp failure" in row["earnapp_reason"]
+
+
+def test_unknown_protocol_qualification_clears_claim_and_is_rescheduled(app):
+    from datetime import datetime, timezone
+
+    from app.db import get_db
+    from app.services.proxies import add_proxy
+    from app.services.users import create_user
+
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "unknown@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "unknown.example:9000:u:p")
+        db.execute(
+            "UPDATE proxies SET status='online', earnapp_next_check_at=? WHERE id=?",
+            (datetime.now(timezone.utc).isoformat(), proxy_id),
+        )
+        db.commit()
+    runner = CheckRunner(app=app, state=SchedulerState(interval_minutes=60, concurrency=5))
+    assert runner.run_earnapp_batch() == 1
+    with app.app_context():
+        row = (
+            get_db()
+            .execute(
+                "SELECT earnapp_claimed_until, earnapp_next_check_at, eligibility FROM proxies WHERE id=?",
+                (proxy_id,),
+            )
+            .fetchone()
+        )
+    assert row["earnapp_claimed_until"] is None
+    assert row["earnapp_next_check_at"]
+    assert row["eligibility"] == "pending"

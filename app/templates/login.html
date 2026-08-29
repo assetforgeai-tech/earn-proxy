@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Sign in - Earn Proxy{% endblock %}
+{% block content %}
+<section class="auth-card">
+  <p class="eyebrow">EARN PROXY</p>
+  <h1>Keep your proxy fleet earning.</h1>
+  <p class="muted">Sign in to monitor masked endpoints and balance.</p>
+  <form method="post" action="{{ url_for('auth.login') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="ui" value="1">
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" autocomplete="email" required>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+    <button class="button primary" type="submit">Sign in</button>
+  </form>
+  <p class="muted">New contributor? <a href="{{ url_for('auth.register') }}">Create an account</a></p>
+</section>
+{% endblock %}

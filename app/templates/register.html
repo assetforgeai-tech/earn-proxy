@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Register - Earn Proxy{% endblock %}
+{% block content %}
+<section class="auth-card">
+  <p class="eyebrow">CONTRIBUTOR ACCESS</p>
+  <h1>Start with a manual review.</h1>
+  <p class="muted">Your account stays pending until an administrator approves it.</p>
+  <form method="post" action="{{ url_for('auth.register') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="ui" value="1">
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" autocomplete="email" required>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" minlength="8" autocomplete="new-password" required>
+    <button class="button primary" type="submit">Register</button>
+  </form>
+  <p class="muted"><a href="{{ url_for('auth.login') }}">Back to sign in</a></p>
+</section>
+{% endblock %}

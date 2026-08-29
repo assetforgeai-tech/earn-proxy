@@ -1,0 +1,72 @@
+from conftest import login, login_admin, register
+
+from app.db import get_db
+from app.services.proxies import add_proxy
+from app.services.users import create_user
+
+
+def _activate_user(app, client):
+    register(client, "ui-user@example.com", "member-password")
+    login_admin(client)
+    with app.app_context():
+        user_id = get_db().execute("SELECT id FROM users WHERE email='ui-user@example.com'").fetchone()["id"]
+    client.post(f"/admin/users/{user_id}/approve")
+    client.post("/logout")
+    login(client, "ui-user@example.com", "member-password")
+    return user_id
+
+
+def test_user_dashboard_shows_safe_proxy_controls_uptime_and_payout_history(app, client):
+    user_id = _activate_user(app, client)
+    with app.app_context():
+        db = get_db()
+        proxy_id = add_proxy(db, user_id, "safe.example:9000:private-user:private-pass")
+        db.execute(
+            "UPDATE proxies SET status='online', detected_protocol='socks5', eligibility='allow', online_since=datetime('now') WHERE id=?",
+            (proxy_id,),
+        )
+        db.commit()
+    page = client.get("/dashboard").get_data(as_text=True)
+    assert "Replace" in page
+    assert "Remove" in page
+    assert "Online hours" in page
+    assert "Payout" in page
+    assert "private-user" not in page
+    assert "private-pass" not in page
+
+
+def test_admin_dashboard_exposes_create_delete_and_payout_controls(app, client):
+    register(client, "admin-ui-user@example.com", "member-password")
+    client.post("/logout")
+    login_admin(client)
+    page = client.get("/admin").get_data(as_text=True)
+    assert 'action="/admin/users"' in page
+    assert "Delete" in page
+    assert "Payout queue" in page
+    assert "Approve payout" in page or "Mark sent" in page
+    assert "Transaction hash" in page
+
+
+def test_internal_api_json_mode_labels_allow_and_risk(app, client):
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "json@example.com", "password", status="active")
+        first = add_proxy(db, user_id, "json-allow.example:9000:u:a")
+        second = add_proxy(db, user_id, "json-risk.example:9001:u:r")
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', detected_protocol='socks5' WHERE id=?",
+            (first,),
+        )
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='risk', detected_protocol='http' WHERE id=?",
+            (second,),
+        )
+        db.commit()
+    response = client.get(
+        "/internal/api/v1/proxies?format=json",
+        headers={"X-API-Key": "internal-test-key"},
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert [item["status"] for item in payload] == ["Allow", "Risk"]
+    assert payload[0]["raw"] == "json-allow.example:9000:u:a"
