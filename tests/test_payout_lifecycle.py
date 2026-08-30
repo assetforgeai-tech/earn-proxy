@@ -47,6 +47,35 @@ def test_payout_requires_admin_approval_before_marking_sent(app):
     assert (row["status"], row["tx_hash"]) == ("sent", "0xapproved")
 
 
+def test_payout_keeps_the_wallet_address_that_was_requested(app):
+    now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    first_address = "0x1111111111111111111111111111111111111111"
+    second_address = "0x2222222222222222222222222222222222222222"
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "wallet-snapshot@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "snapshot.example:9000:u:p")
+        set_wallet(db, user_id, first_address, now=now - timedelta(hours=49))
+        db.execute(
+            "INSERT INTO earnings_ledger(user_id,proxy_id,started_at,ended_at,micro_usd,bucket,created_at) "
+            "VALUES(?,?,?, ?,?,'available',?)",
+            (
+                user_id,
+                proxy_id,
+                (now - timedelta(hours=3)).isoformat(),
+                (now - timedelta(hours=2)).isoformat(),
+                1_000_000,
+                now.isoformat(),
+            ),
+        )
+        db.commit()
+        payout_id = request_payout(db, user_id, 500_000, now=now)
+        set_wallet(db, user_id, second_address, now=now + timedelta(hours=49))
+        payout = db.execute("SELECT wallet_address FROM payouts WHERE id=?", (payout_id,)).fetchone()
+
+    assert payout["wallet_address"] == first_address
+
+
 def test_concurrent_payout_requests_cannot_reserve_more_than_available(app, monkeypatch):
     now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
     with app.app_context():

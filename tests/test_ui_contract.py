@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 from conftest import login, login_admin, register
 
 from app.db import get_db
@@ -53,13 +55,14 @@ def test_internal_api_json_mode_labels_allow_and_risk(app, client):
         user_id = create_user(db, "json@example.com", "password", status="active")
         first = add_proxy(db, user_id, "json-allow.example:9000:u:a")
         second = add_proxy(db, user_id, "json-risk.example:9001:u:r")
+        success_at = datetime.now(UTC).isoformat()
         db.execute(
-            "UPDATE proxies SET status='online', eligibility='allow', detected_protocol='socks5' WHERE id=?",
-            (first,),
+            "UPDATE proxies SET status='online', eligibility='allow', detected_protocol='socks5', last_success_at=? WHERE id=?",
+            (success_at, first),
         )
         db.execute(
-            "UPDATE proxies SET status='online', eligibility='risk', detected_protocol='http' WHERE id=?",
-            (second,),
+            "UPDATE proxies SET status='online', eligibility='risk', detected_protocol='http', last_success_at=? WHERE id=?",
+            (success_at, second),
         )
         db.commit()
     response = client.get(

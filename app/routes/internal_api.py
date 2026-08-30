@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hmac
+from datetime import UTC, datetime, timedelta
 
 from flask import Blueprint, Response, current_app, jsonify, request
 
 from app.db import get_db
+from app.services.checks import checker_settings
 from app.services.proxies import reveal_proxy
 from app.services.settings import get_setting
 
@@ -26,26 +28,34 @@ def list_proxies():
     if not enabled:
         return Response("", mimetype="text/plain")
     placeholders = ",".join("?" for _ in enabled)
+    stale_cutoff = (datetime.now(UTC) - timedelta(minutes=checker_settings(db).health_stale_minutes)).isoformat()
     rows = db.execute(
         f"""
         SELECT p.* FROM proxies p JOIN users u ON u.id=p.user_id
         WHERE p.archived_at IS NULL AND p.status='online' AND p.duplicate_of IS NULL
           AND p.eligibility IN ({placeholders}) AND u.status='active'
+          AND p.last_success_at IS NOT NULL AND p.last_success_at >= ?
         ORDER BY p.id
         """,
-        enabled,
+        [*enabled, stale_cutoff],
     ).fetchall()
+    distributable = []
+    for row in rows:
+        try:
+            distributable.append((row, reveal_proxy(row)))
+        except ValueError:
+            current_app.logger.error("Skipping proxy %s because its credential cannot be decrypted", row["id"])
     if request.args.get("format", "").lower() == "json":
         return jsonify(
             [
                 {
-                    "raw": reveal_proxy(row).raw,
+                    "raw": parsed.raw,
                     "status": str(row["eligibility"]).capitalize(),
                     "protocol": row["detected_protocol"],
                     "endpoint": f"{row['host']}:{row['port']}",
                 }
-                for row in rows
+                for row, parsed in distributable
             ]
         )
-    body = "\n".join(reveal_proxy(row).raw for row in rows)
+    body = "\n".join(parsed.raw for _row, parsed in distributable)
     return Response(body + ("\n" if body else ""), mimetype="text/plain")

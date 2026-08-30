@@ -47,9 +47,15 @@ CREATE TABLE IF NOT EXISTS proxies (
     online_since TEXT,
     offline_since TEXT,
     last_checked_at TEXT,
+    last_success_at TEXT,
     next_check_at TEXT,
     check_claimed_until TEXT,
     check_claim_token TEXT,
+    health_mode TEXT NOT NULL DEFAULT 'strong',
+    next_probe_index INTEGER NOT NULL DEFAULT 0,
+    last_probe_endpoint TEXT NOT NULL DEFAULT '',
+    last_latency_ms INTEGER,
+    failure_kind TEXT NOT NULL DEFAULT '',
     accrual_cursor_at TEXT,
     probation_started_at TEXT,
     accumulated_online_seconds INTEGER NOT NULL DEFAULT 0,
@@ -101,6 +107,7 @@ CREATE TABLE IF NOT EXISTS payouts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES users(id),
     wallet_id INTEGER NOT NULL REFERENCES wallets(id),
+    wallet_address TEXT NOT NULL DEFAULT '',
     amount_micro_usd INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'requested',
     tx_hash TEXT NOT NULL DEFAULT '',
@@ -134,9 +141,15 @@ PROXY_MIGRATION_COLUMNS = {
     "online_since": "TEXT",
     "offline_since": "TEXT",
     "last_checked_at": "TEXT",
+    "last_success_at": "TEXT",
     "next_check_at": "TEXT",
     "check_claimed_until": "TEXT",
     "check_claim_token": "TEXT",
+    "health_mode": "TEXT NOT NULL DEFAULT 'strong'",
+    "next_probe_index": "INTEGER NOT NULL DEFAULT 0",
+    "last_probe_endpoint": "TEXT NOT NULL DEFAULT ''",
+    "last_latency_ms": "INTEGER",
+    "failure_kind": "TEXT NOT NULL DEFAULT ''",
     "accrual_cursor_at": "TEXT",
     "probation_started_at": "TEXT",
     "accumulated_online_seconds": "INTEGER NOT NULL DEFAULT 0",
@@ -150,6 +163,10 @@ PROXY_MIGRATION_COLUMNS = {
 USER_MIGRATION_COLUMNS = {
     "earn_paused": "INTEGER NOT NULL DEFAULT 0",
     "session_version": "INTEGER NOT NULL DEFAULT 1",
+}
+
+PAYOUT_MIGRATION_COLUMNS = {
+    "wallet_address": "TEXT NOT NULL DEFAULT ''",
 }
 
 
@@ -170,70 +187,108 @@ def _add_missing_columns(db, table: str, definitions: dict[str, str]) -> None:
 
 def migrate_db(db) -> None:
     """Upgrade earlier SQLite layouts before creating indexes that depend on new columns."""
-    if _table_exists(db, "users"):
-        _add_missing_columns(db, "users", USER_MIGRATION_COLUMNS)
-    if not _table_exists(db, "proxies"):
-        return
-    legacy_columns = _columns(db, "proxies")
-    _add_missing_columns(db, "proxies", PROXY_MIGRATION_COLUMNS)
-    now = "1970-01-01T00:00:00+00:00"
-    db.execute(
-        "UPDATE proxies SET updated_at=COALESCE(NULLIF(updated_at,''), created_at, ?)",
-        (now,),
-    )
-    db.execute(
-        "UPDATE proxies SET next_check_at=COALESCE(next_check_at, created_at, ?)",
-        (now,),
-    )
-    db.execute(
-        "UPDATE proxies SET accrual_cursor_at=COALESCE(accrual_cursor_at, created_at, ?)",
-        (now,),
-    )
-    db.execute(
-        "UPDATE proxies SET probation_started_at=COALESCE(probation_started_at, created_at, ?)",
-        (now,),
-    )
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        if _table_exists(db, "users"):
+            _add_missing_columns(db, "users", USER_MIGRATION_COLUMNS)
+        if _table_exists(db, "payouts"):
+            _add_missing_columns(db, "payouts", PAYOUT_MIGRATION_COLUMNS)
+            if _table_exists(db, "wallets"):
+                db.execute(
+                    """
+                    UPDATE payouts
+                    SET wallet_address=COALESCE(
+                        NULLIF(wallet_address,''),
+                        (SELECT address FROM wallets WHERE wallets.id=payouts.wallet_id),
+                        ''
+                    )
+                    WHERE wallet_address=''
+                    """
+                )
+        if not _table_exists(db, "proxies"):
+            db.commit()
+            return
+        legacy_columns = _columns(db, "proxies")
+        _add_missing_columns(db, "proxies", PROXY_MIGRATION_COLUMNS)
+        now = "1970-01-01T00:00:00+00:00"
+        db.execute(
+            "UPDATE proxies SET updated_at=COALESCE(NULLIF(updated_at,''), created_at, ?)",
+            (now,),
+        )
+        db.execute(
+            "UPDATE proxies SET next_check_at=COALESCE(next_check_at, created_at, ?)",
+            (now,),
+        )
+        db.execute(
+            "UPDATE proxies SET accrual_cursor_at=COALESCE(accrual_cursor_at, created_at, ?)",
+            (now,),
+        )
+        db.execute(
+            "UPDATE proxies SET probation_started_at=COALESCE(probation_started_at, created_at, ?)",
+            (now,),
+        )
+        db.execute(
+            """
+            UPDATE proxies SET
+                health_mode=CASE
+                    WHEN status='online' AND detected_protocol IN ('http','socks5') THEN 'fast'
+                    ELSE COALESCE(NULLIF(health_mode,''), 'strong')
+                END
+            WHERE status='online'
+            """
+        )
 
-    if {"username", "password"}.issubset(legacy_columns):
-        from app.crypto import encrypt_secret
-        from app.proxy_parser import ParsedProxy
-        from app.services.proxies import credential_fingerprint
+        if {"username", "password"}.issubset(legacy_columns):
+            from app.crypto import encrypt_secret
+            from app.proxy_parser import ParsedProxy
+            from app.services.proxies import credential_fingerprint
 
-        rows = db.execute(
-            "SELECT * FROM proxies WHERE username_encrypted='' OR password_encrypted='' OR credential_fingerprint=''"
-        ).fetchall()
-        for row in rows:
-            parsed = ParsedProxy(
-                str(row["protocol_hint"] or "auto"),
-                str(row["host"]),
-                int(row["port"]),
-                str(row["username"] or ""),
-                str(row["password"] or ""),
-            )
-            db.execute(
-                "UPDATE proxies SET username_encrypted=?, password_encrypted=?, credential_fingerprint=? WHERE id=?",
-                (
-                    encrypt_secret(parsed.username),
-                    encrypt_secret(parsed.password),
-                    credential_fingerprint(parsed),
-                    row["id"],
-                ),
-            )
+            rows = db.execute(
+                "SELECT * FROM proxies WHERE username_encrypted='' OR password_encrypted='' OR credential_fingerprint=''"
+            ).fetchall()
+            for row in rows:
+                parsed = ParsedProxy(
+                    str(row["protocol_hint"] or "auto"),
+                    str(row["host"]),
+                    int(row["port"]),
+                    str(row["username"] or ""),
+                    str(row["password"] or ""),
+                )
+                db.execute(
+                    "UPDATE proxies SET username_encrypted=?, password_encrypted=?, credential_fingerprint=? WHERE id=?",
+                    (
+                        encrypt_secret(parsed.username),
+                        encrypt_secret(parsed.password),
+                        credential_fingerprint(parsed),
+                        row["id"],
+                    ),
+                )
 
-    db.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS proxies_credential_fingerprint_uidx ON proxies(credential_fingerprint)"
-    )
-    db.execute("CREATE INDEX IF NOT EXISTS proxies_due_idx ON proxies(archived_at,next_check_at,check_claimed_until)")
-    db.execute("CREATE INDEX IF NOT EXISTS proxies_exit_idx ON proxies(exit_ip,duplicate_of,created_at)")
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS proxies_distribution_idx ON proxies(status,eligibility,duplicate_of,archived_at)"
-    )
-    db.commit()
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS proxies_credential_fingerprint_uidx "
+            "ON proxies(credential_fingerprint) WHERE credential_fingerprint <> ''"
+        )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS proxies_due_idx ON proxies(archived_at,next_check_at,check_claimed_until)"
+        )
+        db.execute("CREATE INDEX IF NOT EXISTS proxies_exit_idx ON proxies(exit_ip,duplicate_of,created_at)")
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS proxies_distribution_idx "
+            "ON proxies(status,eligibility,duplicate_of,archived_at)"
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
 
 DEFAULT_SETTINGS = {
     "health_interval_minutes": "60",
     "health_concurrency": "5",
+    "health_per_host_concurrency": "2",
+    "health_retry_first_minutes": "5",
+    "health_retry_second_minutes": "15",
+    "health_stale_minutes": "120",
     "api_include_allow": "1",
     "api_include_risk": "1",
     "earnapp_refresh_hours": "168",

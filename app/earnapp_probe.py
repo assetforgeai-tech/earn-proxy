@@ -13,6 +13,8 @@ import ssl
 from datetime import UTC, datetime
 from typing import Any
 
+from app.network_safety import resolve_public_proxy_host
+
 WSS_HOST = "proxyjs.brdtnet.com"
 WSS_PORT = 443
 SDK = "1.617.813"
@@ -26,11 +28,7 @@ _WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
 def build_tls_context() -> ssl.SSLContext:
-    context = ssl.create_default_context()
-    # The supplied EarnApp probe accepts the proxy tunnel's interception certificate.
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
-    return context
+    return ssl.create_default_context()
 
 
 def classify_verdict(verdict: str, reason: str = "") -> str:
@@ -231,7 +229,11 @@ async def _open_wss_tunnel(
     password: str,
     timeout: float,
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
+    pinned_address = await asyncio.to_thread(resolve_public_proxy_host, host, port)
+    reader, writer = await asyncio.wait_for(
+        asyncio.open_connection(pinned_address, port, server_hostname=None),
+        timeout=timeout,
+    )
     try:
         if protocol == "socks5":
             await _connect_socks5(reader, writer, username=username, password=password, timeout=timeout)
@@ -298,6 +300,7 @@ async def probe_earnapp_proxy(
             timeout=min(15.0, wait_seconds),
         )
         identity = build_tunnel_identity()
+        tunnel_initialized = False
         deadline = asyncio.get_running_loop().time() + wait_seconds
         while True:
             remaining = deadline - asyncio.get_running_loop().time()
@@ -332,10 +335,15 @@ async def probe_earnapp_proxy(
                 )
                 break
             if msg_type == "ipc_post" and command == "cid_set":
-                result.update(verdict="CID_SET", reason=str(data.get("cid") or ""))
+                cid = str(data.get("cid") or "").strip()
+                if not tunnel_initialized or not cid:
+                    result.update(verdict="PROTOCOL_FAIL", reason="cid_set arrived before a valid tunnel_init")
+                    break
+                result.update(verdict="CID_SET", reason=cid)
                 break
             if msg_type == "ipc_call" and command == "tunnel_init":
                 result["exit_ip"] = str(data.get("ext_ip") or "")
+                tunnel_initialized = True
                 reply = {
                     "type": "ipc_result",
                     "cmd": command,

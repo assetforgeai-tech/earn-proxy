@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "GPL-3.0-or-later" }
 dependencies = [
-  "cryptography>=43,<47",
+  "cryptography>=50,<51",
   "flask>=3.1,<4",
   "gunicorn>=23,<24; platform_system != 'Windows'",
   "requests[socks]>=2.32,<3",
@@ -24,6 +24,7 @@ dev = [
 
 [project.scripts]
 earn-proxy-checker = "app.check_service:main"
+earn-proxy-maintenance = "app.maintenance_service:main"
 
 [tool.setuptools.packages.find]
 include = ["app*"]

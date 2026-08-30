@@ -1,7 +1,11 @@
+import asyncio
+
 from app.earnapp_probe import (
+    build_tls_context,
     build_tunnel_identity,
     classify_verdict,
     encode_client_frame,
+    probe_earnapp_proxy,
 )
 
 
@@ -22,3 +26,78 @@ def test_websocket_client_frame_is_masked_and_contains_payload():
 
 def test_unknown_transport_result_never_maps_to_allow():
     assert classify_verdict("TIMEOUT", "network") == "pending"
+
+
+def test_earnapp_tls_context_verifies_the_real_service_identity():
+    context = build_tls_context()
+
+    assert context.check_hostname is True
+    assert context.verify_mode.name == "CERT_REQUIRED"
+
+
+def test_earnapp_probe_requires_tunnel_init_before_accepting_cid(monkeypatch):
+    class Writer:
+        def write(self, _data):
+            return None
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            return None
+
+        async def wait_closed(self):
+            return None
+
+    async def fake_open(*_args, **_kwargs):
+        return object(), Writer()
+
+    async def forged_frame(*_args, **_kwargs):
+        return 1, True, b'{"type":"ipc_post","cmd":"cid_set","msg":{"cid":"forged"}}'
+
+    monkeypatch.setattr("app.earnapp_probe._open_wss_tunnel", fake_open)
+    monkeypatch.setattr("app.earnapp_probe.read_server_frame", forged_frame)
+
+    result = asyncio.run(probe_earnapp_proxy("8.8.8.8", 1080, protocol="socks5", timeout_ms=4000))
+
+    assert result["eligibility"] == "pending"
+    assert result["verdict"] != "CID_SET"
+
+
+def test_earnapp_probe_requires_a_nonempty_cid_after_tunnel_init(monkeypatch):
+    class Writer:
+        def write(self, _data):
+            return None
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            return None
+
+        async def wait_closed(self):
+            return None
+
+    frames = iter(
+        [
+            (1, True, b'{"type":"ipc_call","cmd":"tunnel_init","cookie":"c","msg":{"ext_ip":"203.0.113.5"}}'),
+            (1, True, b'{"type":"ipc_post","cmd":"cid_set","msg":{"cid":""}}'),
+        ]
+    )
+
+    async def fake_open(*_args, **_kwargs):
+        return object(), Writer()
+
+    async def next_frame(*_args, **_kwargs):
+        try:
+            return next(frames)
+        except StopIteration as exc:
+            raise TimeoutError from exc
+
+    monkeypatch.setattr("app.earnapp_probe._open_wss_tunnel", fake_open)
+    monkeypatch.setattr("app.earnapp_probe.read_server_frame", next_frame)
+
+    result = asyncio.run(probe_earnapp_proxy("8.8.8.8", 1080, protocol="socks5", timeout_ms=4000))
+
+    assert result["eligibility"] == "pending"
+    assert result["verdict"] != "CID_SET"

@@ -1,5 +1,5 @@
 [Unit]
-Description=Earn Proxy bounded health checker
+Description=Earn Proxy earnings and archival maintenance
 After=network-online.target earn-proxy-web.service
 Wants=network-online.target
 
@@ -9,7 +9,7 @@ User=earnproxy
 Group=earnproxy
 WorkingDirectory=/opt/earn-proxy
 EnvironmentFile=/etc/earn-proxy.env
-ExecStart=/opt/earn-proxy/.venv/bin/python -m app.check_service --worker health
+ExecStart=/opt/earn-proxy/.venv/bin/python -m app.maintenance_service
 Restart=always
 RestartSec=5
 NoNewPrivileges=true

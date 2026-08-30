@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 
 from cryptography.fernet import Fernet
 from flask import Flask, jsonify
@@ -91,7 +92,14 @@ def create_app(test_config: dict | None = None) -> Flask:
             if existing is None:
                 from app.services.users import create_user
 
-                create_user(database, admin_email, admin_password, status="active", role="admin")
+                try:
+                    create_user(database, admin_email, admin_password, status="active", role="admin")
+                except sqlite3.IntegrityError:
+                    existing = database.execute(
+                        "SELECT role,status FROM users WHERE email=?", (admin_email,)
+                    ).fetchone()
+                    if existing is None or existing["role"] != "admin" or existing["status"] != "active":
+                        raise
 
     @app.get("/healthz")
     def healthz():

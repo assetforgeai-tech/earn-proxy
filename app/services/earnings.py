@@ -3,10 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from app.services.settings import get_setting
+
 US_MONTHLY_MICRO_USD = 1_000_000
 NON_US_MONTHLY_MICRO_USD = 500_000
 MONTH_HOURS = 720
 PROBATION_HOURS = 168
+DEFAULT_HEALTH_STALE_MINUTES = 120
 
 
 @dataclass(frozen=True)
@@ -16,7 +19,22 @@ class Balances:
 
 
 def _parse(value: str | None) -> datetime | None:
-    return datetime.fromisoformat(value) if value else None
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        # A legacy/corrupt timestamp must not take the maintenance worker down;
+        # callers deliberately treat an invalid value as an unobserved interval.
+        return None
+
+
+def _health_stale_minutes(db) -> int:
+    try:
+        value = int(get_setting(db, "health_stale_minutes", str(DEFAULT_HEALTH_STALE_MINUTES)))
+    except (TypeError, ValueError):
+        value = DEFAULT_HEALTH_STALE_MINUTES
+    return max(60, min(1440, value))
 
 
 def expire_pending_cycle(db, proxy_id: int) -> None:
@@ -69,18 +87,35 @@ def _add_ledger_entry(
     )
 
 
-def _accrue_eligible_time_locked(db, *, current: datetime) -> None:
+def _accrue_eligible_time_locked(
+    db, *, current: datetime, proxy_id: int | None = None, include_suspect: bool = False
+) -> None:
+    statuses = ("online", "suspect") if include_suspect else ("online",)
+    placeholders = ",".join("?" for _ in statuses)
+    parameters: list[object] = [*statuses]
+    proxy_filter = ""
+    if proxy_id is not None:
+        proxy_filter = " AND p.id=?"
+        parameters.append(proxy_id)
     rows = db.execute(
-        """
+        f"""
         SELECT p.*, u.earn_paused, u.status AS user_status
         FROM proxies p JOIN users u ON u.id=p.user_id
-        WHERE p.archived_at IS NULL AND p.status='online' AND p.eligibility='allow'
-          AND p.duplicate_of IS NULL
-        """
+        WHERE p.archived_at IS NULL AND p.status IN ({placeholders}) AND p.eligibility='allow'
+          AND p.duplicate_of IS NULL{proxy_filter}
+        """,
+        parameters,
     ).fetchall()
+    stale_minutes = _health_stale_minutes(db)
     for row in rows:
         cursor = _parse(row["accrual_cursor_at"]) or current
-        end = current
+        last_success = _parse(row["last_success_at"])
+        # A status label alone is not proof that the proxy remained reachable.
+        # Legacy/operator rows start accruing only after the new checker records
+        # a successful health observation.
+        if last_success is None:
+            continue
+        end = min(current, last_success + timedelta(minutes=stale_minutes))
         if end <= cursor:
             continue
         if row["user_status"] != "active" or row["earn_paused"]:
@@ -149,6 +184,22 @@ def accrue_eligible_time(db, *, now: datetime | None = None) -> None:
             # processes so the same online interval cannot be paid twice.
             db.execute("BEGIN IMMEDIATE")
         _accrue_eligible_time_locked(db, current=current)
+        if owns_transaction:
+            db.commit()
+    except Exception:
+        if owns_transaction and db.in_transaction:
+            db.rollback()
+        raise
+
+
+def accrue_proxy_time(db, proxy_id: int, *, now: datetime | None = None) -> None:
+    """Accrue the last confirmed interval while a proxy transitions through suspect."""
+    current = now or datetime.now(UTC)
+    owns_transaction = not db.in_transaction
+    try:
+        if owns_transaction:
+            db.execute("BEGIN IMMEDIATE")
+        _accrue_eligible_time_locked(db, current=current, proxy_id=proxy_id, include_suspect=True)
         if owns_transaction:
             db.commit()
     except Exception:

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from urllib.parse import unquote, urlsplit
 
+from app.network_safety import UnsafeProxyTarget, validate_proxy_host
+
 
 class ProxyParseError(ValueError):
     pass
@@ -34,6 +36,10 @@ def _validate(protocol: str, host: str, port: int, username: str, password: str)
         raise ProxyParseError("Proxy port must be between 1 and 65535")
     if len(normalized_host) > 253:
         raise ProxyParseError("Proxy host is too long")
+    try:
+        normalized_host = validate_proxy_host(normalized_host)
+    except UnsafeProxyTarget as exc:
+        raise ProxyParseError(str(exc)) from exc
     if len(username) > 512:
         raise ProxyParseError("Proxy username is too long")
     if len(password) > 2048:

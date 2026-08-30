@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 from app.crypto import decrypt_secret, encrypt_secret
 from app.proxy_parser import ParsedProxy, parse_proxy
-from app.services.earnings import expire_pending_cycle
+from app.services.earnings import expire_pending_cycle, reset_probation
 
 
 class DuplicateCredential(ValueError):
@@ -82,7 +82,9 @@ def replace_proxy(db, proxy_id: int, user_id: int, raw_proxy: str, *, now: datet
             earnapp_verdict='', earnapp_reason='', earnapp_checked_at=NULL, earnapp_next_check_at=NULL,
             earnapp_claimed_until=NULL, earnapp_claim_token=NULL, egress_verified_at=NULL, exit_ip=NULL, country_code='',
             duplicate_of=NULL, consecutive_failures=0, online_since=NULL,
-            offline_since=NULL, last_checked_at=NULL, next_check_at=?, check_claimed_until=NULL, check_claim_token=NULL,
+            offline_since=NULL, last_checked_at=NULL, last_success_at=NULL, next_check_at=?,
+            check_claimed_until=NULL, check_claim_token=NULL, health_mode='strong', next_probe_index=0,
+            last_probe_endpoint='', last_latency_ms=NULL, failure_kind='',
             accrual_cursor_at=?, probation_started_at=?, last_error='', updated_at=?
         WHERE id=? AND user_id=? AND archived_at IS NULL
         """,
@@ -149,6 +151,7 @@ def promote_duplicate_if_due(db, canonical_id: int, *, now: datetime | None = No
         "UPDATE proxies SET duplicate_of=? WHERE duplicate_of=? AND id<>?",
         (promoted_id, canonical_id, promoted_id),
     )
+    reset_probation(db, promoted_id, current)
     db.commit()
     return promoted_id
 
@@ -163,7 +166,7 @@ def reveal_proxy(row) -> ParsedProxy:
     )
 
 
-def reconcile_exit_ip(db, proxy_id: int, exit_ip: str) -> None:
+def reconcile_exit_ip(db, proxy_id: int, exit_ip: str, *, commit: bool = True) -> None:
     normalized_exit = str(exit_ip or "").strip()
     if not normalized_exit:
         return
@@ -193,7 +196,8 @@ def reconcile_exit_ip(db, proxy_id: int, exit_ip: str) -> None:
     _canonicalize_exit_group(db, normalized_exit, prefer_verified_order=had_verified_timestamp)
     if previous_exit and previous_exit != normalized_exit:
         _canonicalize_exit_group(db, previous_exit)
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def _canonicalize_exit_group(

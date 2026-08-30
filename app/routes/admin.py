@@ -9,6 +9,7 @@ from app.db import get_db
 from app.routes.forms import form_error, form_success
 from app.services.checks import (
     MAX_HEALTH_CONCURRENCY,
+    MAX_PER_HOST_CONCURRENCY,
     checker_settings,
     operational_stats,
 )
@@ -50,11 +51,25 @@ def update_settings():
             1,
             min(MAX_HEALTH_CONCURRENCY, int(request.form.get("health_concurrency", "5"))),
         )
+        per_host = max(
+            1,
+            min(MAX_PER_HOST_CONCURRENCY, int(request.form.get("health_per_host_concurrency", "2"))),
+        )
+        retry_first = max(1, min(30, int(request.form.get("health_retry_first_minutes", "5"))))
+        retry_second = max(
+            retry_first + 1,
+            min(60, int(request.form.get("health_retry_second_minutes", "15"))),
+        )
+        stale = max(60, min(1440, int(request.form.get("health_stale_minutes", "120"))))
     except ValueError:
         return form_error("Checker settings must be numbers", 400, "admin.dashboard")
     db = get_db()
     set_setting(db, "health_interval_minutes", str(interval))
     set_setting(db, "health_concurrency", str(concurrency))
+    set_setting(db, "health_per_host_concurrency", str(per_host))
+    set_setting(db, "health_retry_first_minutes", str(retry_first))
+    set_setting(db, "health_retry_second_minutes", str(retry_second))
+    set_setting(db, "health_stale_minutes", str(stale))
     set_setting(db, "api_include_allow", "1" if request.form.get("api_include_allow") else "0")
     set_setting(db, "api_include_risk", "1" if request.form.get("api_include_risk") else "0")
     return form_success(

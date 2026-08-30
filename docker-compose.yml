@@ -8,11 +8,27 @@ services:
     expose:
       - "8000"
 
-  checker:
+  health-checker:
     build: .
     restart: unless-stopped
     env_file: .env
-    command: ["python", "-m", "app.check_service"]
+    command: ["python", "-m", "app.check_service", "--worker", "health"]
+    volumes:
+      - earn-proxy-data:/var/lib/earn-proxy
+
+  earnapp-checker:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "-m", "app.check_service", "--worker", "earnapp"]
+    volumes:
+      - earn-proxy-data:/var/lib/earn-proxy
+
+  maintenance:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "-m", "app.maintenance_service"]
     volumes:
       - earn-proxy-data:/var/lib/earn-proxy
 

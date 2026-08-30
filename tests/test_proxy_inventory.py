@@ -24,7 +24,7 @@ from app.services.users import create_user
             "user",
             "pass:with:colon",
         ),
-        ("user:pass@10.1.2.3:1080", "auto", "10.1.2.3", 1080, "user", "pass"),
+        ("user:pass@8.8.8.8:1080", "auto", "8.8.8.8", 1080, "user", "pass"),
         (
             "socks5://user:pass@proxy.example:1080",
             "socks5",
@@ -56,6 +56,24 @@ def test_proxy_parser_supports_common_formats(raw, protocol, host, port, usernam
 def test_proxy_parser_rejects_invalid_input():
     with pytest.raises(ProxyParseError):
         parse_proxy("not-a-proxy")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "127.0.0.1:8080",
+        "127.1:8080",
+        "10.1.2.3:1080",
+        "169.254.169.254:80",
+        "2130706433:8080",
+        "0x7f000001:8080",
+        "017700000001:8080",
+        "localhost:8080",
+    ],
+)
+def test_proxy_parser_rejects_local_or_noncanonical_network_targets(raw):
+    with pytest.raises(ProxyParseError):
+        parse_proxy(raw)
 
 
 def test_proxy_credentials_are_encrypted_and_duplicate_is_global(app):

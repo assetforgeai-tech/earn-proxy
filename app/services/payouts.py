@@ -30,8 +30,8 @@ def request_payout(db, user_id: int, amount_micro_usd: int, *, now: datetime | N
         if amount > available - int(reserved):
             raise ValueError("Payout amount exceeds available balance")
         cursor = db.execute(
-            "INSERT INTO payouts(user_id,wallet_id,amount_micro_usd,status,created_at,updated_at) VALUES(?,?,?,'requested',?,?)",
-            (user_id, wallet["id"], amount, current.isoformat(), current.isoformat()),
+            "INSERT INTO payouts(user_id,wallet_id,wallet_address,amount_micro_usd,status,created_at,updated_at) VALUES(?,?,?,?,'requested',?,?)",
+            (user_id, wallet["id"], wallet["address"], amount, current.isoformat(), current.isoformat()),
         )
         db.commit()
         return int(cursor.lastrowid)
