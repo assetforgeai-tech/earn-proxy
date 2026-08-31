@@ -3,6 +3,37 @@ from conftest import login, login_admin, register
 from app.db import get_db
 
 
+def test_root_redirects_anonymous_visitors_to_login(client):
+    response = client.get("/")
+
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/login")
+
+
+def test_root_redirects_admin_to_admin_dashboard(client):
+    login_admin(client)
+
+    response = client.get("/")
+
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/admin")
+
+
+def test_root_redirects_active_user_to_user_dashboard(app, client):
+    register(client)
+    login_admin(client)
+    with app.app_context():
+        user_id = get_db().execute("SELECT id FROM users WHERE email = ?", ("member@example.com",)).fetchone()["id"]
+    client.post(f"/admin/users/{user_id}/approve")
+    client.post("/logout")
+    login(client)
+
+    response = client.get("/")
+
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/dashboard")
+
+
 def test_registration_is_pending_until_admin_approves(app, client):
     response = register(client)
     assert response.status_code == 201

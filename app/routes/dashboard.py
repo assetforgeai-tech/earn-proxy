@@ -10,6 +10,15 @@ from app.services.uptime import uptime_hours
 bp = Blueprint("dashboard", __name__)
 
 
+@bp.get("/")
+def index():
+    if g.user is None:
+        return redirect(url_for("auth.login"))
+    if g.user["role"] == "admin":
+        return redirect(url_for("admin.dashboard"))
+    return redirect(url_for("dashboard.dashboard"))
+
+
 @bp.get("/dashboard")
 @login_required
 def dashboard():
