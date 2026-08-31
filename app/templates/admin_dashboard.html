@@ -1,25 +1,36 @@
 {% extends "base.html" %}
-{% block title %}Admin - Earn Proxy{% endblock %}
+{% block title %}{% if admin_section == 'checker' %}Checker policy{% elif admin_section == 'users' %}Users{% elif admin_section == 'payouts' %}Payouts{% else %}Admin overview{% endif %} - Earn Proxy{% endblock %}
 {% block content %}
 {% set error_focus = request.args.get('error_focus', '') %}
 
 <div class="page-head">
   <div>
     <p class="eyebrow">CONTROL ROOM</p>
-    <h1>Operate the pool without over-probing it.</h1>
-    <p class="muted">Transient failures remain inconclusive instead of immediately marking proxies offline.</p>
+    {% if admin_section == 'checker' %}
+      <h1>Tune health checks without over-probing.</h1>
+      <p class="muted">Set cadence, concurrency, retries, and which proxy classes the API distributes.</p>
+    {% elif admin_section == 'users' %}
+      <h1>Approve and manage contributors.</h1>
+      <p class="muted">Review account access and pause earnings when you need to investigate activity.</p>
+    {% elif admin_section == 'payouts' %}
+      <h1>Review payout requests.</h1>
+      <p class="muted">Approve requests and record the transaction hash after the transfer is complete.</p>
+    {% else %}
+      <h1>Operate the pool without over-probing it.</h1>
+      <p class="muted">See the current health picture, then open one focused workspace.</p>
+    {% endif %}
   </div>
 </div>
 
 <nav id="admin-nav" class="section-nav" aria-label="Admin sections">
-  <a href="#health-overview">Health</a>
-  <a href="#checker-policy">Checker policy</a>
-  <a href="#create-user">Create user</a>
-  <a href="#user-approvals">Users</a>
-  <a href="#payout-queue">Payouts</a>
+  <a href="{{ url_for('admin.dashboard') }}"{% if admin_section == 'overview' %} aria-current="page"{% endif %}>Overview</a>
+  <a href="{{ url_for('admin.checker') }}"{% if admin_section == 'checker' %} aria-current="page"{% endif %}>Checker</a>
+  <a href="{{ url_for('admin.users') }}"{% if admin_section == 'users' %} aria-current="page"{% endif %}>Users</a>
+  <a href="{{ url_for('admin.payouts') }}"{% if admin_section == 'payouts' %} aria-current="page"{% endif %}>Payouts</a>
+  <a href="{{ url_for('admin.integrations') }}"{% if admin_section == 'integrations' %} aria-current="page"{% endif %}>API &amp; integrations</a>
 </nav>
 
-{% if stats %}
+{% if admin_section == 'overview' and stats %}
   <section id="health-overview" class="section-target" aria-labelledby="health-overview-title">
     <div class="section-heading">
       <div>
@@ -43,6 +54,21 @@
   </section>
 {% endif %}
 
+{% if admin_section == 'overview' %}
+<section class="panel admin-quick-links" aria-labelledby="admin-quick-links-title">
+  <div class="panel-head">
+    <div><p class="eyebrow">WORKSPACES</p><h2 id="admin-quick-links-title">Choose an area to manage</h2></div>
+  </div>
+  <div class="quick-link-grid">
+    <a class="quick-link" href="{{ url_for('admin.checker') }}"><strong>Checker policy</strong><span>Cadence, concurrency, retries, and API classes.</span></a>
+    <a class="quick-link" href="{{ url_for('admin.users') }}"><strong>User approvals</strong><span>Approve, pause, block, or remove accounts.</span></a>
+    <a class="quick-link" href="{{ url_for('admin.payouts') }}"><strong>Payout queue</strong><span>Review requests and record transaction hashes.</span></a>
+    <a class="quick-link" href="{{ url_for('admin.integrations') }}"><strong>API &amp; integrations</strong><span>Connect another system to the live proxy feed.</span></a>
+  </div>
+</section>
+{% endif %}
+
+{% if admin_section == 'checker' %}
 <section id="checker-policy" class="panel section-target">
   <div class="panel-head">
     <div>
@@ -72,7 +98,9 @@
     <button class="button primary" type="submit" data-loading-label="Saving policy...">Save policy</button>
   </form>
 </section>
+{% endif %}
 
+{% if admin_section == 'users' %}
 <section id="create-user" class="panel section-target">
   <div class="panel-head">
     <div>
@@ -134,7 +162,9 @@
     <div class="empty">No contributor accounts waiting for review.</div>
   {% endif %}
 </section>
+{% endif %}
 
+{% if admin_section == 'payouts' %}
 <section id="payout-queue" class="panel section-target">
   <div class="panel-head"><div><h2>Payout queue</h2><p class="muted">Approve before entering a transaction hash.</p></div><span class="muted">{{ payouts|length }} request{{ '' if payouts|length == 1 else 's' }}</span></div>
   {% if payouts %}
@@ -172,4 +202,5 @@
     <div class="empty">No payout requests. New requests can be <strong>Approve payout</strong> here, then a <strong>Transaction hash</strong> can be entered with <strong>Mark sent</strong>.</div>
   {% endif %}
 </section>
+{% endif %}
 {% endblock %}

@@ -58,14 +58,21 @@ python -m app.check_service
 
 ## Internal API
 
-Authenticate with `X-API-Key`:
+Authenticate with `X-API-Key`. The canonical endpoint for new integrations is:
 
 ```text
-GET /internal/api/v1/proxies
-GET /internal/api/v1/proxies?format=json
+GET /api/v1/proxies
+GET /api/v1/proxies?format=json
 ```
 
-The text response is newline-delimited raw proxy data. JSON adds the public classification (`Allow` or `Risk`), detected protocol, and endpoint. Only online, canonical proxies belonging to active users are returned.
+The text response is newline-delimited raw proxy data. JSON adds the public classification (`Allow` or `Risk`), detected protocol, and endpoint. Only online, canonical proxies belonging to active users are returned. Existing clients may continue using `/internal/api/v1/proxies`, which is a compatibility alias with identical behavior.
+
+Example (keep the key in an environment variable):
+
+```bash
+curl -fsS -H "X-API-Key: ${EARN_PROXY_API_KEY}" "https://earn.proxy.acacondos.com/api/v1/proxies"
+curl -fsS -H "X-API-Key: ${EARN_PROXY_API_KEY}" "https://earn.proxy.acacondos.com/api/v1/proxies?format=json"
+```
 
 ## Production deployment
 

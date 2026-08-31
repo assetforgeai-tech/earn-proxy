@@ -99,6 +99,21 @@
     });
   });
 
+  const copyStatus = document.querySelector("#copy-status");
+  document.querySelectorAll("[data-copy-target]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const target = document.getElementById(button.dataset.copyTarget);
+      if (!target) return;
+      const value = target.textContent.trim();
+      try {
+        await navigator.clipboard.writeText(value);
+        if (copyStatus) copyStatus.textContent = "Copied to clipboard.";
+      } catch (_error) {
+        if (copyStatus) copyStatus.textContent = "Copy is unavailable here; select the text manually.";
+      }
+    });
+  });
+
   const invalidField = document.querySelector('[aria-invalid="true"]');
   if (invalidField instanceof HTMLElement) {
     window.requestAnimationFrame(() => invalidField.focus());

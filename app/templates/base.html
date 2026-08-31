@@ -10,8 +10,14 @@
 <body>
   <a class="skip-link" href="#main-content">Skip to main content</a>
   <header class="topbar">
-    <a class="brand" href="{{ url_for('dashboard.dashboard') if g.user else url_for('auth.login') }}">Earn Proxy</a>
-    {% if g.user %}<nav class="account-nav" aria-label="Account"><span class="account-email">{{ g.user.email }}</span><form method="post" action="{{ url_for('auth.logout') }}" data-submit-once="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button ghost" type="submit" data-loading-label="Signing out...">Sign out</button></form></nav>{% endif %}
+    <a class="brand" href="{{ url_for('admin.dashboard') if g.user and g.user.role == 'admin' else (url_for('dashboard.dashboard') if g.user else url_for('auth.login')) }}">Earn Proxy</a>
+    {% if g.user %}
+      <nav class="account-nav" aria-label="Account">
+        {% if g.user.role == 'admin' %}<a class="topbar-link" href="{{ url_for('admin.dashboard') }}">Admin home</a><a class="topbar-link" href="{{ url_for('admin.integrations') }}">API &amp; integrations</a>{% endif %}
+        <span class="account-email">{{ g.user.email }}</span>
+        <form method="post" action="{{ url_for('auth.logout') }}" data-submit-once="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button ghost" type="submit" data-loading-label="Signing out...">Sign out</button></form>
+      </nav>
+    {% endif %}
   </header>
   <main id="main-content" class="shell" tabindex="-1">
     {% with messages = get_flashed_messages(with_categories=true) %}

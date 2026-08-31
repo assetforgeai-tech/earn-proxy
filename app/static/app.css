@@ -217,6 +217,103 @@ p {
   background: var(--teal-soft);
 }
 
+.section-nav a[aria-current="page"] {
+  background: var(--ink);
+  color: #fff;
+}
+
+.topbar-link {
+  text-decoration: none;
+}
+
+.quick-link-grid,
+.integration-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.quick-link,
+.integration-card {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.68);
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.quick-link:hover,
+.quick-link:focus-visible {
+  border-color: var(--teal);
+  background: var(--teal-soft);
+}
+
+.quick-link span,
+.integration-card p {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.integration-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border-color: #9dcfbd;
+  background: linear-gradient(120deg, #e8f7f0, #fffdf6);
+}
+
+.copy-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.copy-value,
+.code-card,
+.integration-card code {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.copy-value,
+.code-card {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f1f5f0;
+}
+
+.integration-card code {
+  min-height: 70px;
+  padding: 10px;
+  border-radius: 9px;
+  background: #f1f5f0;
+  font-size: 0.82rem;
+}
+
+.copy-status {
+  min-height: 1.5em;
+  margin: 12px 0 0;
+  color: var(--teal-dark);
+  font-weight: 700;
+}
+
+.integration-rules {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding-left: 20px;
+}
+
 .section-target {
   scroll-margin-top: 76px;
 }
@@ -683,7 +780,15 @@ thead th {
   .stats,
   .admin-stats,
   .inline-form,
-  .settings-grid {
+  .settings-grid,
+  .quick-link-grid,
+  .integration-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .integration-hero,
+  .copy-field {
+    display: grid;
     grid-template-columns: 1fr;
   }
 

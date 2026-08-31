@@ -141,3 +141,32 @@ def test_api_skips_corrupt_credentials_without_failing_the_distribution_batch(ap
     assert json_response.status_code == 200
     assert [item["endpoint"] for item in json_response.get_json()] == ["healthy.example:9001"]
     assert healthy != corrupt
+
+
+def test_canonical_api_alias_matches_legacy_endpoint(app, client):
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "canonical-api@example.com", "password", status="active")
+        _online_proxy(db, user_id, "canonical.example:9001:u:p", "allow", "198.51.100.50")
+
+    headers = {"X-API-Key": "internal-test-key"}
+    canonical = client.get("/api/v1/proxies?format=json", headers=headers)
+    legacy = client.get("/internal/api/v1/proxies?format=json", headers=headers)
+
+    assert canonical.status_code == 200
+    assert canonical.get_json() == legacy.get_json()
+    assert canonical.headers["Cache-Control"] == "no-store"
+
+
+def test_canonical_api_alias_requires_the_same_key(client):
+    response = client.get("/api/v1/proxies")
+    assert response.status_code == 401
+
+
+def test_legacy_api_alias_also_disables_caching(client):
+    response = client.get(
+        "/internal/api/v1/proxies",
+        headers={"X-API-Key": "internal-test-key"},
+    )
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"

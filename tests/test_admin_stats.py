@@ -30,8 +30,10 @@ def test_admin_dashboard_shows_operational_counts_and_sweep_lag(app, client):
     assert "Sweep lag" in page
     assert "Healthy" in page and "Suspect" in page and "Stale" in page
     assert "Average latency" in page and "Checks/minute" in page
-    assert "Per-host concurrency" in page
     assert len(re.findall(r'class="stats admin-stats', page)) == 1
+
+    checker_page = client.get("/admin/checker").get_data(as_text=True)
+    assert "Per-host concurrency" in checker_page
 
 
 def test_operational_stats_include_health_pipeline_observability(app):

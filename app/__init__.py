@@ -5,6 +5,7 @@ import sqlite3
 
 from cryptography.fernet import Fernet
 from flask import Flask, g, jsonify, render_template, request
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from app import auth, db, security
 
@@ -72,6 +73,8 @@ def create_app(test_config: dict | None = None) -> Flask:
     db.init_app(app)
     security.init_app(app)
     app.before_request(auth.load_logged_in_user)
+    # Caddy terminates TLS; trust only its forwarded scheme for secure links.
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1)
 
     from app.routes import admin, dashboard, internal_api, proxies, wallets
     from app.routes import auth as auth_routes
@@ -81,6 +84,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     app.register_blueprint(dashboard.bp)
     app.register_blueprint(proxies.bp)
     app.register_blueprint(internal_api.bp)
+    app.register_blueprint(internal_api.api_bp)
     app.register_blueprint(wallets.bp)
 
     def _wants_json_error() -> bool:

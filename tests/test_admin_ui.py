@@ -5,7 +5,7 @@ from app.db import get_db
 
 def test_admin_ui_exposes_health_interval_concurrency_and_api_status_toggles(app, client):
     login_admin(client)
-    page = client.get("/admin").get_data(as_text=True)
+    page = client.get("/admin/checker").get_data(as_text=True)
 
     assert 'name="health_interval_minutes"' in page
     assert 'value="60"' in page
@@ -17,6 +17,14 @@ def test_admin_ui_exposes_health_interval_concurrency_and_api_status_toggles(app
     assert 'name="health_stale_minutes"' in page
     assert 'name="api_include_allow"' in page
     assert 'name="api_include_risk"' in page
+
+
+def test_checker_workspace_contains_only_checker_controls(client):
+    login_admin(client)
+    page = client.get("/admin/checker").get_data(as_text=True)
+    assert 'name="health_interval_minutes"' in page
+    assert 'id="user-approvals"' not in page
+    assert 'id="payout-queue"' not in page
 
 
 def test_admin_can_update_checker_settings_and_api_toggles(app, client):

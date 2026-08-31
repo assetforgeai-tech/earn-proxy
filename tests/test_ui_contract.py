@@ -41,12 +41,13 @@ def test_admin_dashboard_exposes_create_delete_and_payout_controls(app, client):
     register(client, "admin-ui-user@example.com", "member-password")
     client.post("/logout")
     login_admin(client)
-    page = client.get("/admin").get_data(as_text=True)
-    assert 'action="/admin/users"' in page
-    assert "Delete" in page
-    assert "Payout queue" in page
-    assert "Approve payout" in page or "Mark sent" in page
-    assert "Transaction hash" in page
+    users_page = client.get("/admin/users").get_data(as_text=True)
+    payouts_page = client.get("/admin/payouts").get_data(as_text=True)
+    assert 'action="/admin/users"' in users_page
+    assert "Delete" in users_page
+    assert "Payout queue" in payouts_page
+    assert "Approve payout" in payouts_page or "Mark sent" in payouts_page
+    assert "Transaction hash" in payouts_page
 
 
 def test_internal_api_json_mode_labels_allow_and_risk(app, client):

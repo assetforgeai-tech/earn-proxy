@@ -11,9 +11,11 @@ from app.services.proxies import reveal_proxy
 from app.services.settings import get_setting
 
 bp = Blueprint("internal_api", __name__, url_prefix="/internal/api/v1")
+api_bp = Blueprint("api", __name__, url_prefix="/api/v1")
 
 
 @bp.get("/proxies")
+@api_bp.get("/proxies")
 def list_proxies():
     supplied = str(request.headers.get("X-API-Key") or "")
     expected = str(current_app.config.get("INTERNAL_API_KEY") or "")
@@ -59,3 +61,10 @@ def list_proxies():
         )
     body = "\n".join(parsed.raw for _row, parsed in distributable)
     return Response(body + ("\n" if body else ""), mimetype="text/plain")
+
+
+@bp.after_request
+@api_bp.after_request
+def prevent_credential_caching(response):
+    response.headers["Cache-Control"] = "no-store"
+    return response

@@ -23,6 +23,10 @@ with sync_playwright() as playwright:
 
     desktop = browser.new_page(viewport={"width": 1440, "height": 1000})
     sign_in(desktop)
+    assert desktop.get_by_role("link", name="API & integrations", exact=True).first.is_visible()
+    assert desktop.locator("#checker-policy").count() == 0
+    desktop.goto(f"{BASE_URL}/admin/checker")
+    desktop.wait_for_load_state("networkidle")
     assert desktop.get_by_label("Health interval (minutes)").input_value() == "60"
     assert desktop.get_by_label("Health concurrency (max 20)").input_value() == "5"
     assert desktop.get_by_label("Per-host concurrency (max 3)").input_value() == "2"
@@ -47,9 +51,25 @@ with sync_playwright() as playwright:
 
     mobile = browser.new_page(viewport={"width": 375, "height": 812})
     sign_in(mobile)
-    assert mobile.get_by_role("heading", name="Operate the pool without over-probing it.").is_visible()
+    mobile.goto(f"{BASE_URL}/admin/checker")
+    mobile.wait_for_load_state("networkidle")
+    assert mobile.get_by_role("heading", name="Tune health checks without over-probing.").is_visible()
     assert mobile.get_by_role("button", name="Save policy").is_visible()
     assert mobile.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    mobile.goto(f"{BASE_URL}/admin/integrations")
+    mobile.wait_for_load_state("networkidle")
+    mobile.get_by_role("heading", name="Connect your distribution client.").wait_for(state="visible")
+    assert mobile.get_by_role("heading", name="Connect your distribution client.").is_visible()
+    assert mobile.get_by_role("button", name="Copy canonical API endpoint").is_visible()
+    assert mobile.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+
+    desktop.goto(f"{BASE_URL}/admin/integrations")
+    desktop.wait_for_load_state("networkidle")
+    desktop.get_by_role("heading", name="Connect your distribution client.").wait_for(state="visible")
+    assert desktop.get_by_role("heading", name="Connect your distribution client.").is_visible()
+    assert desktop.locator("#canonical-endpoint").inner_text().endswith("/api/v1/proxies")
+    assert desktop.get_by_role("button", name="Copy canonical API endpoint").is_visible()
+    assert desktop.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
 
     browser.close()
 

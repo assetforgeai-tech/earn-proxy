@@ -71,7 +71,7 @@ def test_dashboard_exposes_progressive_forms_confirmation_and_freshness(app, cli
 def test_admin_dashboard_uses_accessible_confirmation_and_section_navigation(client):
     register(client, "admin-table@example.com", "member-password")
     login_admin(client)
-    page = client.get("/admin").get_data(as_text=True)
+    page = client.get("/admin/users").get_data(as_text=True)
     assert "data-confirm-dialog" in page
     assert "data-confirm-trigger" in page
     assert "confirm(" not in page

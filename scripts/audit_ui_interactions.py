@@ -44,6 +44,8 @@ with sync_playwright() as playwright:
     assert page.evaluate("document.activeElement.id") == "password"
 
     sign_in(page)
+    page.goto(f"{BASE_URL}/admin/users")
+    page.wait_for_load_state("networkidle")
     block_form = page.locator("form[data-confirm-title='Block user?']").first
     block_form.locator("button[type='submit']").click()
     dialog = page.locator("#confirm-dialog")
@@ -96,6 +98,8 @@ with sync_playwright() as playwright:
     page.get_by_role("button", name="Sign out").click()
     page.wait_for_url(f"{BASE_URL}/login")
     sign_in(page)
+    page.goto(f"{BASE_URL}/admin/checker")
+    page.wait_for_load_state("networkidle")
     settings_form = page.locator('form[action="/admin/settings"]')
     settings_form.evaluate("form => form.addEventListener('submit', event => event.preventDefault(), {once: true})")
     save_button = settings_form.locator('button[type="submit"]')

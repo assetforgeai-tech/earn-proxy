@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}API &amp; integrations - Earn Proxy{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">DEVELOPER ACCESS</p>
+    <h1>Connect your distribution client.</h1>
+    <p class="muted">Use the read-only proxy feed below. Credentials are returned only to an authenticated machine client, never displayed in this admin page.</p>
+  </div>
+</div>
+
+<nav class="section-nav" aria-label="Admin sections">
+  <a href="{{ url_for('admin.dashboard') }}">Overview</a>
+  <a href="{{ url_for('admin.checker') }}">Checker</a>
+  <a href="{{ url_for('admin.users') }}">Users</a>
+  <a href="{{ url_for('admin.payouts') }}">Payouts</a>
+  <a href="{{ url_for('admin.integrations') }}" aria-current="page">API &amp; integrations</a>
+</nav>
+
+<section class="panel integration-hero" aria-labelledby="integration-status-title">
+  <div>
+    <p class="eyebrow">READ-ONLY FEED</p>
+    <h2 id="integration-status-title">Your API connection</h2>
+    <p class="muted">{{ 'API key configured' if api_key_configured else 'API key not configured' }}. Keep the key in your client secret store.</p>
+  </div>
+  <span class="badge {{ 'active' if api_key_configured else 'pending' }}">{{ 'Ready' if api_key_configured else 'Needs setup' }}</span>
+</section>
+
+<section class="panel" aria-labelledby="endpoint-title">
+  <div class="panel-head"><div><h2 id="endpoint-title">1. Endpoint</h2><p class="muted">Use this canonical URL for new integrations.</p></div></div>
+  <div class="copy-field">
+    <code id="canonical-endpoint" class="copy-value">{{ canonical_endpoint }}</code>
+    <button class="button ghost" type="button" data-copy-target="canonical-endpoint" aria-label="Copy canonical API endpoint">Copy endpoint</button>
+  </div>
+  <p class="field-hint">Legacy clients may continue using <code>{{ legacy_endpoint }}</code>; both paths return the same data.</p>
+</section>
+
+<section class="panel" aria-labelledby="auth-title">
+  <div class="panel-head"><div><h2 id="auth-title">2. Authenticate</h2><p class="muted">Send the API key in the request header. It is not part of the URL.</p></div></div>
+  <div class="code-card"><code>X-API-Key: &lt;your-api-key&gt;</code></div>
+  <p class="field-hint">The server environment variable is <code>EARN_PROXY_INTERNAL_API_KEY</code>. Never paste the real value into a browser URL or source repository.</p>
+</section>
+
+<section class="panel" aria-labelledby="format-title">
+  <div class="panel-head"><div><h2 id="format-title">3. Choose a response format</h2><p class="muted">Text is easiest for line-based consumers; JSON includes safe metadata.</p></div></div>
+  <div class="integration-grid">
+    <article class="integration-card"><h3>Raw text</h3><p>One proxy per line, ready for import.</p><code id="text-example">curl -fsS -H "X-API-Key: $EARN_PROXY_API_KEY" "{{ canonical_endpoint }}"</code><button class="button small ghost" type="button" data-copy-target="text-example" aria-label="Copy raw text example">Copy example</button></article>
+    <article class="integration-card"><h3>JSON</h3><p>Add <code>?format=json</code> for status, protocol, and endpoint fields.</p><code id="json-example">curl -fsS -H "X-API-Key: $EARN_PROXY_API_KEY" "{{ canonical_endpoint }}?format=json"</code><button class="button small ghost" type="button" data-copy-target="json-example" aria-label="Copy JSON example">Copy example</button></article>
+  </div>
+  <p id="copy-status" class="copy-status" aria-live="polite"></p>
+</section>
+
+<section class="panel" aria-labelledby="rules-title">
+  <div class="panel-head"><div><h2 id="rules-title">What the feed returns</h2><p class="muted">The API applies the current distribution policy automatically.</p></div></div>
+  <ul class="integration-rules">
+    <li><strong>Classes:</strong> {{ 'Allow' if api_include_allow else 'Allow disabled' }} and {{ 'Risk' if api_include_risk else 'Risk disabled' }} by admin policy.</li>
+    <li><strong>Availability:</strong> only active-user, online, canonical (non-duplicate) proxies are returned.</li>
+    <li><strong>Freshness:</strong> a successful health check must be no older than {{ health_stale_minutes }} minutes.</li>
+    <li><strong>Security:</strong> responses are marked <code>Cache-Control: no-store</code>; keep your API key private.</li>
+  </ul>
+</section>
+{% endblock %}

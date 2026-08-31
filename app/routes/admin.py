@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from flask import Blueprint, render_template, request
+from flask import Blueprint, current_app, render_template, request, url_for
 
 from app.auth import admin_required
 from app.db import get_db
@@ -23,22 +23,67 @@ bp = Blueprint("admin", __name__, url_prefix="/admin")
 @bp.get("")
 @admin_required
 def dashboard():
-    db = get_db()
-    settings = checker_settings(db)
     return render_template(
         "admin_dashboard.html",
-        users=db.execute("SELECT * FROM users WHERE role='user' ORDER BY created_at DESC").fetchall(),
-        proxies=db.execute("SELECT * FROM proxies ORDER BY created_at DESC LIMIT 100").fetchall(),
-        payouts=db.execute(
+        stats=operational_stats(get_db()),
+        admin_section="overview",
+    )
+
+
+@bp.get("/checker")
+@admin_required
+def checker():
+    db = get_db()
+    return render_template(
+        "admin_dashboard.html",
+        checker=checker_settings(db),
+        api_include_allow=get_setting(db, "api_include_allow", "1") == "1",
+        api_include_risk=get_setting(db, "api_include_risk", "1") == "1",
+        admin_section="checker",
+    )
+
+
+@bp.get("/users")
+@admin_required
+def users():
+    return render_template(
+        "admin_dashboard.html",
+        users=get_db().execute("SELECT * FROM users WHERE role='user' ORDER BY created_at DESC").fetchall(),
+        admin_section="users",
+    )
+
+
+@bp.get("/payouts")
+@admin_required
+def payouts():
+    return render_template(
+        "admin_dashboard.html",
+        payouts=get_db()
+        .execute(
             """
             SELECT p.*, u.email FROM payouts p JOIN users u ON u.id=p.user_id
             ORDER BY p.created_at DESC LIMIT 100
             """
-        ).fetchall(),
-        checker=settings,
-        stats=operational_stats(db),
+        )
+        .fetchall(),
+        admin_section="payouts",
+    )
+
+
+@bp.get("/integrations")
+@admin_required
+def integrations():
+    db = get_db()
+    settings = checker_settings(db)
+    return render_template(
+        "admin_integrations.html",
+        canonical_endpoint=url_for("api.list_proxies", _external=True),
+        legacy_endpoint=url_for("internal_api.list_proxies", _external=True),
+        api_key_configured=bool(str(current_app.config.get("INTERNAL_API_KEY") or "")),
         api_include_allow=get_setting(db, "api_include_allow", "1") == "1",
         api_include_risk=get_setting(db, "api_include_risk", "1") == "1",
+        health_stale_minutes=settings.health_stale_minutes,
+        admin_section="integrations",
     )
 
 
@@ -65,7 +110,7 @@ def update_settings():
         return form_error(
             "Checker settings must be numbers",
             400,
-            "admin.dashboard",
+            "admin.checker",
             field="health_interval_minutes",
             focus="health_interval_minutes",
         )
@@ -80,7 +125,7 @@ def update_settings():
     set_setting(db, "api_include_risk", "1" if request.form.get("api_include_risk") else "0")
     return form_success(
         {"status": "saved"},
-        endpoint="admin.dashboard",
+        endpoint="admin.checker",
         message="Checker policy saved.",
     )
 
@@ -95,7 +140,7 @@ def _change_user(
     db = get_db()
     row = db.execute("SELECT * FROM users WHERE id=? AND role='user'", (user_id,)).fetchone()
     if row is None:
-        return form_error("User not found", 404, "admin.dashboard")
+        return form_error("User not found", 404, "admin.users")
     new_status = status if status is not None else row["status"]
     new_paused = earn_paused if earn_paused is not None else row["earn_paused"]
     bump = 1 if new_status == "blocked" else 0
@@ -106,7 +151,7 @@ def _change_user(
     db.commit()
     return form_success(
         {"id": user_id, "status": new_status, "earn_paused": bool(new_paused)},
-        endpoint="admin.dashboard",
+        endpoint="admin.users",
         message=message,
     )
 
@@ -144,7 +189,7 @@ def create_admin_user():
         return form_error(
             "A valid email and password of at least 8 characters are required",
             400,
-            "admin.dashboard",
+            "admin.users",
             field="email" if "@" not in email else "password",
             focus="new-user-email" if "@" not in email else "new-user-password",
         )
@@ -154,14 +199,14 @@ def create_admin_user():
         return form_error(
             "Email is already registered",
             409,
-            "admin.dashboard",
+            "admin.users",
             field="email",
             focus="new-user-email",
         )
     return form_success(
         {"id": user_id, "status": "active"},
         status=201,
-        endpoint="admin.dashboard",
+        endpoint="admin.users",
         message="User created and activated.",
     )
 
@@ -172,7 +217,7 @@ def delete_user(user_id: int):
     db = get_db()
     row = db.execute("SELECT id FROM users WHERE id=? AND role='user'", (user_id,)).fetchone()
     if row is None:
-        return form_error("User not found", 404, "admin.dashboard")
+        return form_error("User not found", 404, "admin.users")
     db.execute(
         "UPDATE users SET status='deleted', session_version=session_version+1, earn_paused=1 WHERE id=?",
         (user_id,),
@@ -180,7 +225,7 @@ def delete_user(user_id: int):
     db.commit()
     return form_success(
         {"id": user_id, "status": "deleted"},
-        endpoint="admin.dashboard",
+        endpoint="admin.users",
         message="User deleted. Historical records are retained.",
     )
 
@@ -191,10 +236,10 @@ def approve_payout_route(payout_id: int):
     try:
         approve_payout(get_db(), payout_id)
     except LookupError as exc:
-        return form_error(str(exc), 400, "admin.dashboard")
+        return form_error(str(exc), 400, "admin.payouts")
     return form_success(
         {"id": payout_id, "status": "approved"},
-        endpoint="admin.dashboard",
+        endpoint="admin.payouts",
         message="Payout approved.",
     )
 
@@ -208,12 +253,12 @@ def payout_sent(payout_id: int):
         return form_error(
             str(exc),
             400,
-            "admin.dashboard",
+            "admin.payouts",
             field="tx_hash",
             focus=f"tx-{payout_id}",
         )
     return form_success(
         {"id": payout_id, "status": "sent"},
-        endpoint="admin.dashboard",
+        endpoint="admin.payouts",
         message="Payout marked as sent.",
     )
