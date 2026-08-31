@@ -19,7 +19,7 @@ def update_wallet():
     try:
         wallet = set_wallet(get_db(), g.user["id"], request.form.get("address", ""))
     except (ValueError, WalletInUse, WalletLocked) as exc:
-        return form_error(str(exc), 400, "dashboard.dashboard")
+        return form_error(str(exc), 400, "dashboard.dashboard", field="address", focus="address")
     return form_success(
         {"address": wallet.address, "locked_until": wallet.locked_until},
         endpoint="dashboard.dashboard",
@@ -48,7 +48,7 @@ def create_payout():
     try:
         payout_id = request_payout(get_db(), g.user["id"], _requested_micro_usd())
     except (ValueError, TypeError) as exc:
-        return form_error(str(exc), 400, "dashboard.dashboard")
+        return form_error(str(exc), 400, "dashboard.dashboard", field="amount_usd", focus="amount_usd")
     return form_success(
         {"id": payout_id, "status": "requested"},
         status=201,

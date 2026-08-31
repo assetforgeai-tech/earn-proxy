@@ -1,10 +1,175 @@
 {% extends "base.html" %}
 {% block title %}Admin - Earn Proxy{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">CONTROL ROOM</p><h1>Operate the pool without over-probing it.</h1><p class="muted">Transient failures remain inconclusive instead of immediately marking proxies offline.</p></div></div>
-{% if stats %}<section class="stats admin-stats health-stats"><article><span>Healthy</span><strong>{{ stats.healthy }}</strong></article><article><span>Suspect</span><strong>{{ stats.suspect }}</strong></article><article><span>Offline</span><strong>{{ stats.offline }}</strong></article><article><span>Stale</span><strong>{{ stats.stale }}</strong></article><article><span>Online</span><strong>{{ stats.online }}</strong></article><article><span>Allow / Risk</span><strong>{{ stats.allow }} / {{ stats.risk }}</strong></article><article><span>Average latency</span><strong>{{ stats.average_latency_ms }}ms</strong></article><article><span>Checks/minute</span><strong>{{ stats.checks_per_minute }}</strong></article><article><span>Due</span><strong>{{ stats.due }}</strong></article><article><span>Sweep lag</span><strong>{{ stats.lag_minutes }}m</strong></article></section>{% endif %}
-<section class="panel"><div class="panel-head"><div><h2>Checker policy</h2><p class="muted">Stable proxies use one rotating endpoint through their detected protocol. Failures receive short confirmation retries before going offline.</p></div></div><form method="post" action="{{ url_for('admin.update_settings') }}" class="settings-grid"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><div><label for="health_interval_minutes">Health interval (minutes)</label><input id="health_interval_minutes" name="health_interval_minutes" type="number" min="15" max="1440" value="{{ checker.health_interval_minutes if checker else 60 }}"></div><div><label for="health_concurrency">Health concurrency (max 20)</label><input id="health_concurrency" name="health_concurrency" type="number" min="1" max="20" value="{{ checker.health_concurrency if checker else 5 }}"><small>Default 5. Increase only when the provider and VPS have headroom; the per-host cap still applies.</small></div><div><label for="health_per_host_concurrency">Per-host concurrency (max 3)</label><input id="health_per_host_concurrency" name="health_per_host_concurrency" type="number" min="1" max="3" value="{{ checker.health_per_host_concurrency if checker else 2 }}"></div><div><label for="health_retry_first_minutes">First retry (minutes)</label><input id="health_retry_first_minutes" name="health_retry_first_minutes" type="number" min="1" max="30" value="{{ checker.health_retry_first_minutes if checker else 5 }}"></div><div><label for="health_retry_second_minutes">Second retry (minutes)</label><input id="health_retry_second_minutes" name="health_retry_second_minutes" type="number" min="2" max="60" value="{{ checker.health_retry_second_minutes if checker else 15 }}"></div><div><label for="health_stale_minutes">API freshness limit (minutes)</label><input id="health_stale_minutes" name="health_stale_minutes" type="number" min="60" max="1440" value="{{ checker.health_stale_minutes if checker else 120 }}"><small>Online rows older than this are withheld from the internal API until a successful check.</small></div><fieldset><legend>Internal API output</legend><label class="check"><input type="checkbox" name="api_include_allow" {% if api_include_allow %}checked{% endif %}> Include <strong>Allow</strong></label><label class="check"><input type="checkbox" name="api_include_risk" {% if api_include_risk %}checked{% endif %}> Include <strong>Risk</strong></label></fieldset><button class="button primary" type="submit">Save policy</button></form></section>
-<section class="panel"><div class="panel-head"><div><h2>Create user</h2><span class="muted">Admin-created accounts are active immediately.</span></div></div><form method="post" action="{{ url_for('admin.create_admin_user') }}" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><label class="sr-only" for="new-user-email">Email</label><input id="new-user-email" name="email" type="email" placeholder="user@example.com" required><label class="sr-only" for="new-user-password">Password</label><input id="new-user-password" name="password" type="password" minlength="8" placeholder="At least 8 characters" required><button class="button primary" type="submit">Create user</button></form></section>
-<section class="panel"><div class="panel-head"><h2>User approvals</h2><span class="muted">Manual lifecycle controls</span></div>{% if users %}<div class="table-wrap"><table><thead><tr><th>Email</th><th>Status</th><th>Earn</th><th>Actions</th></tr></thead><tbody>{% for user in users %}<tr><td>{{ user.email }}</td><td>{{ user.status }}</td><td>{{ 'Paused' if user.earn_paused else 'Running' }}</td><td class="actions">{% if user.status == 'pending' %}<form method="post" action="{{ url_for('admin.approve_user', user_id=user.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button small" type="submit">Approve</button></form>{% endif %}<form method="post" action="{{ url_for('admin.pause_earn' if not user.earn_paused else 'admin.resume_earn', user_id=user.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button small ghost" type="submit">{{ 'Resume earn' if user.earn_paused else 'Pause earn' }}</button></form>{% if user.status != 'blocked' %}<form method="post" action="{{ url_for('admin.block_user', user_id=user.id) }}" onsubmit="return confirm('Block this user? Sessions will be revoked and API distribution stopped.');"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button small danger" type="submit">Block</button></form>{% endif %}<form method="post" action="{{ url_for('admin.delete_user', user_id=user.id) }}" onsubmit="return confirm('Delete this user? The account will be disabled and its history retained.');"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button small danger" type="submit">Delete</button></form></td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty">No contributor accounts waiting for review.</div>{% endif %}</section>
-<section class="panel"><div class="panel-head"><h2>Payout queue</h2><span class="muted">Approve before entering a transaction hash</span></div>{% if payouts %}<div class="table-wrap"><table><thead><tr><th>User</th><th>Amount</th><th>Status</th><th>Transaction hash</th><th>Actions</th></tr></thead><tbody>{% for payout in payouts %}<tr><td>{{ payout.email }}</td><td>${{ '%.6f'|format(payout.amount_micro_usd / 1000000) }}</td><td>{{ payout.status }}</td><td class="mono">{{ payout.tx_hash or '-' }}</td><td class="actions">{% if payout.status == 'requested' %}<form method="post" action="{{ url_for('admin.approve_payout_route', payout_id=payout.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button small" type="submit">Approve payout</button></form>{% elif payout.status == 'approved' %}<form method="post" action="{{ url_for('admin.payout_sent', payout_id=payout.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><label class="sr-only" for="tx-{{ payout.id }}">Transaction hash</label><input id="tx-{{ payout.id }}" name="tx_hash" placeholder="Transaction hash" required><button class="button small ghost" type="submit">Mark sent</button></form>{% endif %}</td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty">No payout requests. New requests can be <strong>Approve payout</strong> here, then a <strong>Transaction hash</strong> can be entered with <strong>Mark sent</strong>.</div>{% endif %}</section>
+{% set error_focus = request.args.get('error_focus', '') %}
+
+<div class="page-head">
+  <div>
+    <p class="eyebrow">CONTROL ROOM</p>
+    <h1>Operate the pool without over-probing it.</h1>
+    <p class="muted">Transient failures remain inconclusive instead of immediately marking proxies offline.</p>
+  </div>
+</div>
+
+<nav id="admin-nav" class="section-nav" aria-label="Admin sections">
+  <a href="#health-overview">Health</a>
+  <a href="#checker-policy">Checker policy</a>
+  <a href="#create-user">Create user</a>
+  <a href="#user-approvals">Users</a>
+  <a href="#payout-queue">Payouts</a>
+</nav>
+
+{% if stats %}
+  <section id="health-overview" class="section-target" aria-labelledby="health-overview-title">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">POOL HEALTH</p>
+        <h2 id="health-overview-title">Checker overview</h2>
+      </div>
+      <p class="muted">Healthy means online with a recent successful check; stale rows are withheld from the internal API.</p>
+    </div>
+    <div class="stats admin-stats health-stats">
+      <article><span>Healthy</span><strong>{{ stats.healthy }}</strong><small>Online with a fresh success.</small></article>
+      <article><span>Suspect</span><strong>{{ stats.suspect }}</strong><small>Awaiting confirmation retries.</small></article>
+      <article><span>Offline</span><strong>{{ stats.offline }}</strong><small>Three confirmed failures.</small></article>
+      <article><span>Stale</span><strong>{{ stats.stale }}</strong><small>Success older than the freshness limit.</small></article>
+      <article><span>Online</span><strong>{{ stats.online }}</strong><small>Current persisted online state.</small></article>
+      <article><span>Allow / Risk</span><strong>{{ stats.allow }} / {{ stats.risk }}</strong><small>Internal EarnApp eligibility.</small></article>
+      <article><span>Average latency</span><strong>{{ stats.average_latency_ms }}ms</strong><small>Across rows with latency data.</small></article>
+      <article><span>Checks/minute</span><strong>{{ stats.checks_per_minute }}</strong><small>Five-minute rolling average.</small></article>
+      <article><span>Due</span><strong>{{ stats.due }}</strong><small>Checks waiting to be claimed.</small></article>
+      <article><span>Sweep lag</span><strong>{{ stats.lag_minutes }}m</strong><small>Age of the oldest due check.</small></article>
+    </div>
+  </section>
+{% endif %}
+
+<section id="checker-policy" class="panel section-target">
+  <div class="panel-head">
+    <div>
+      <h2>Checker policy</h2>
+      <p class="muted">Stable proxies use one rotating endpoint through their detected protocol. Failures receive short confirmation retries before going offline.</p>
+    </div>
+  </div>
+  <form method="post" action="{{ url_for('admin.update_settings') }}" class="settings-grid" data-submit-once="true">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="ui" value="1">
+    <div class="field-group">
+      <label for="health_interval_minutes">Health interval (minutes)</label>
+      <input id="health_interval_minutes" name="health_interval_minutes" type="number" min="15" max="1440" value="{{ checker.health_interval_minutes if checker else 60 }}" aria-describedby="health-interval-hint{% if error_focus == 'health_interval_minutes' %} health-interval-error{% endif %}"{% if error_focus == 'health_interval_minutes' %} aria-invalid="true"{% endif %}>
+      <small id="health-interval-hint" class="field-hint">Normal interval for stable proxy checks.</small>
+      {% if error_focus == 'health_interval_minutes' %}<small id="health-interval-error" class="field-error">Use a number between 15 and 1440.</small>{% endif %}
+    </div>
+    <div class="field-group"><label for="health_concurrency">Health concurrency (max 20)</label><input id="health_concurrency" name="health_concurrency" type="number" min="1" max="20" value="{{ checker.health_concurrency if checker else 5 }}" aria-describedby="health-concurrency-hint"><small id="health-concurrency-hint" class="field-hint">Default 5. Increase only when the provider and VPS have headroom.</small></div>
+    <div class="field-group"><label for="health_per_host_concurrency">Per-host concurrency (max 3)</label><input id="health_per_host_concurrency" name="health_per_host_concurrency" type="number" min="1" max="3" value="{{ checker.health_per_host_concurrency if checker else 2 }}" aria-describedby="host-concurrency-hint"><small id="host-concurrency-hint" class="field-hint">Caps simultaneous checks sharing one provider host.</small></div>
+    <div class="field-group"><label for="health_retry_first_minutes">First retry (minutes)</label><input id="health_retry_first_minutes" name="health_retry_first_minutes" type="number" min="1" max="30" value="{{ checker.health_retry_first_minutes if checker else 5 }}"></div>
+    <div class="field-group"><label for="health_retry_second_minutes">Second retry (minutes)</label><input id="health_retry_second_minutes" name="health_retry_second_minutes" type="number" min="2" max="60" value="{{ checker.health_retry_second_minutes if checker else 15 }}"></div>
+    <div class="field-group"><label for="health_stale_minutes">API freshness limit (minutes)</label><input id="health_stale_minutes" name="health_stale_minutes" type="number" min="60" max="1440" value="{{ checker.health_stale_minutes if checker else 120 }}" aria-describedby="stale-hint"><small id="stale-hint" class="field-hint">Online rows older than this are withheld from the internal API.</small></div>
+    <fieldset>
+      <legend>Internal API output</legend>
+      <label class="check"><input type="checkbox" name="api_include_allow" {% if api_include_allow %}checked{% endif %}> Include <strong>Allow</strong></label>
+      <label class="check"><input type="checkbox" name="api_include_risk" {% if api_include_risk %}checked{% endif %}> Include <strong>Risk</strong></label>
+    </fieldset>
+    <button class="button primary" type="submit" data-loading-label="Saving policy...">Save policy</button>
+  </form>
+</section>
+
+<section id="create-user" class="panel section-target">
+  <div class="panel-head">
+    <div>
+      <h2>Create user</h2>
+      <p class="muted">Admin-created accounts are active immediately.</p>
+    </div>
+  </div>
+  <form method="post" action="{{ url_for('admin.create_admin_user') }}" class="inline-form inline-form-wide" data-submit-once="true">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="ui" value="1">
+    <div class="field-group">
+      <label for="new-user-email">Email</label>
+      <input id="new-user-email" name="email" type="email" placeholder="user@example.com" required aria-describedby="new-user-email-hint{% if error_focus == 'new-user-email' %} new-user-email-error{% endif %}"{% if error_focus == 'new-user-email' %} aria-invalid="true"{% endif %}>
+      <small id="new-user-email-hint" class="field-hint">Must not already be registered.</small>
+      {% if error_focus == 'new-user-email' %}<small id="new-user-email-error" class="field-error">Enter an available email address.</small>{% endif %}
+    </div>
+    <div class="field-group">
+      <label for="new-user-password">Temporary password</label>
+      <input id="new-user-password" name="password" type="password" minlength="8" placeholder="At least 8 characters" required aria-describedby="new-user-password-hint{% if error_focus == 'new-user-password' %} new-user-password-error{% endif %}"{% if error_focus == 'new-user-password' %} aria-invalid="true"{% endif %}>
+      <small id="new-user-password-hint" class="field-hint">Use at least 8 characters.</small>
+      {% if error_focus == 'new-user-password' %}<small id="new-user-password-error" class="field-error">Use at least 8 characters.</small>{% endif %}
+    </div>
+    <button class="button primary" type="submit" data-loading-label="Creating user...">Create user</button>
+  </form>
+</section>
+
+<section id="user-approvals" class="panel section-target">
+  <div class="panel-head">
+    <div>
+      <h2>User approvals</h2>
+      <p class="muted">Approve registrations, pause earnings for review, or revoke access.</p>
+    </div>
+    <span class="muted">{{ users|length }} account{{ '' if users|length == 1 else 's' }}</span>
+  </div>
+  {% if users %}
+    <div class="table-wrap">
+      <table class="responsive-table">
+        <caption>Contributor account lifecycle controls</caption>
+        <thead><tr><th scope="col">Email</th><th scope="col">Status</th><th scope="col">Earn</th><th scope="col">Actions</th></tr></thead>
+        <tbody>
+          {% for user in users %}
+            <tr>
+              <th scope="row" data-label="Email" class="breakable">{{ user.email }}</th>
+              <td data-label="Status"><span class="badge {{ user.status }}">{{ user.status|capitalize }}</span></td>
+              <td data-label="Earn">{{ 'Paused' if user.earn_paused else 'Running' }}</td>
+              <td data-label="Actions" class="actions">
+                {% if user.status == 'pending' %}<form method="post" action="{{ url_for('admin.approve_user', user_id=user.id) }}" data-submit-once="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button small" type="submit" data-loading-label="Approving...">Approve</button></form>{% endif %}
+                <form method="post" action="{{ url_for('admin.pause_earn' if not user.earn_paused else 'admin.resume_earn', user_id=user.id) }}" data-submit-once="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button small ghost" type="submit" data-loading-label="Updating...">{{ 'Resume earn' if user.earn_paused else 'Pause earn' }}</button></form>
+                {% if user.status != 'blocked' %}<form method="post" action="{{ url_for('admin.block_user', user_id=user.id) }}" data-confirm-dialog data-confirm-title="Block user?" data-confirm-message="Sessions will be revoked and API distribution for this account will stop." data-confirm-label="Block user" data-submit-once="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button small danger" type="submit" data-confirm-trigger data-loading-label="Blocking..." disabled>Block</button></form>{% endif %}
+                <form method="post" action="{{ url_for('admin.delete_user', user_id=user.id) }}" data-confirm-dialog data-confirm-title="Delete user?" data-confirm-message="The account will be disabled while historical records are retained." data-confirm-label="Delete user" data-submit-once="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button small danger" type="submit" data-confirm-trigger data-loading-label="Deleting..." disabled>Delete</button></form>
+                <noscript><small class="field-error">Enable JavaScript to perform destructive actions safely.</small></noscript>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="empty">No contributor accounts waiting for review.</div>
+  {% endif %}
+</section>
+
+<section id="payout-queue" class="panel section-target">
+  <div class="panel-head"><div><h2>Payout queue</h2><p class="muted">Approve before entering a transaction hash.</p></div><span class="muted">{{ payouts|length }} request{{ '' if payouts|length == 1 else 's' }}</span></div>
+  {% if payouts %}
+    <div class="table-wrap">
+      <table class="responsive-table">
+        <caption>Payout requests awaiting manual administration</caption>
+        <thead><tr><th scope="col">User</th><th scope="col">Amount</th><th scope="col">Status</th><th scope="col">Transaction hash</th><th scope="col">Actions</th></tr></thead>
+        <tbody>
+          {% for payout in payouts %}
+            <tr>
+              <th scope="row" data-label="User" class="breakable">{{ payout.email }}</th>
+              <td data-label="Amount">${{ '%.6f'|format(payout.amount_micro_usd / 1000000) }}</td>
+              <td data-label="Status"><span class="badge {{ payout.status }}">{{ payout.status|capitalize }}</span></td>
+              <td data-label="Transaction hash" class="mono breakable">{{ payout.tx_hash or '-' }}</td>
+              <td data-label="Actions" class="actions">
+                {% if payout.status == 'requested' %}
+                  <form method="post" action="{{ url_for('admin.approve_payout_route', payout_id=payout.id) }}" data-submit-once="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button small" type="submit" data-loading-label="Approving...">Approve payout</button></form>
+                {% elif payout.status == 'approved' %}
+                  <form method="post" action="{{ url_for('admin.payout_sent', payout_id=payout.id) }}" data-submit-once="true">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1">
+                    <label for="tx-{{ payout.id }}">Transaction hash</label>
+                    <input id="tx-{{ payout.id }}" name="tx_hash" placeholder="Transaction hash" required aria-describedby="tx-hint-{{ payout.id }}{% if error_focus == 'tx-' ~ payout.id %} tx-error-{{ payout.id }}{% endif %}"{% if error_focus == 'tx-' ~ payout.id %} aria-invalid="true"{% endif %}>
+                    <small id="tx-hint-{{ payout.id }}" class="field-hint">Recorded after the transfer is complete.</small>
+                    {% if error_focus == 'tx-' ~ payout.id %}<small id="tx-error-{{ payout.id }}" class="field-error">Enter a transaction hash.</small>{% endif %}
+                    <button class="button small ghost" type="submit" data-loading-label="Marking sent...">Mark sent</button>
+                  </form>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="empty">No payout requests. New requests can be <strong>Approve payout</strong> here, then a <strong>Transaction hash</strong> can be entered with <strong>Mark sent</strong>.</div>
+  {% endif %}
+</section>
 {% endblock %}

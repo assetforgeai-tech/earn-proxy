@@ -19,15 +19,17 @@ def register():
     email = str(request.form.get("email") or "").strip().lower()
     password = str(request.form.get("password") or "")
     if "@" not in email or len(password) < 8:
+        field = "email" if "@" not in email else "password"
         return form_error(
             "A valid email and password of at least 8 characters are required",
             400,
             "auth.register",
+            field=field,
         )
     try:
         user_id = create_user(get_db(), email, password)
     except sqlite3.IntegrityError:
-        return form_error("Email is already registered", 409, "auth.register")
+        return form_error("Email is already registered", 409, "auth.register", field="email")
     return form_success(
         {"id": user_id, "status": "pending"},
         status=201,
@@ -44,9 +46,10 @@ def login():
     password = str(request.form.get("password") or "")
     user = get_db().execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
     if user is None or not check_password_hash(user["password_hash"], password):
-        return form_error("Invalid email or password", 401, "auth.login")
+        field = "email" if "@" not in email else "password"
+        return form_error("Invalid email or password", 401, "auth.login", field=field)
     if user["status"] != "active":
-        return form_error("Account is awaiting approval or blocked", 403, "auth.login")
+        return form_error("Account is awaiting approval or blocked", 403, "auth.login", field="email")
     session.clear()
     session["user_id"] = user["id"]
     session["session_version"] = user["session_version"]

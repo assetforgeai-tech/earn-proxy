@@ -62,7 +62,13 @@ def update_settings():
         )
         stale = max(60, min(1440, int(request.form.get("health_stale_minutes", "120"))))
     except ValueError:
-        return form_error("Checker settings must be numbers", 400, "admin.dashboard")
+        return form_error(
+            "Checker settings must be numbers",
+            400,
+            "admin.dashboard",
+            field="health_interval_minutes",
+            focus="health_interval_minutes",
+        )
     db = get_db()
     set_setting(db, "health_interval_minutes", str(interval))
     set_setting(db, "health_concurrency", str(concurrency))
@@ -139,11 +145,19 @@ def create_admin_user():
             "A valid email and password of at least 8 characters are required",
             400,
             "admin.dashboard",
+            field="email" if "@" not in email else "password",
+            focus="new-user-email" if "@" not in email else "new-user-password",
         )
     try:
         user_id = create_user(get_db(), email, password, status="active")
     except sqlite3.IntegrityError:
-        return form_error("Email is already registered", 409, "admin.dashboard")
+        return form_error(
+            "Email is already registered",
+            409,
+            "admin.dashboard",
+            field="email",
+            focus="new-user-email",
+        )
     return form_success(
         {"id": user_id, "status": "active"},
         status=201,
@@ -191,7 +205,13 @@ def payout_sent(payout_id: int):
     try:
         mark_payout_sent(get_db(), payout_id, request.form.get("tx_hash", ""))
     except (ValueError, LookupError) as exc:
-        return form_error(str(exc), 400, "admin.dashboard")
+        return form_error(
+            str(exc),
+            400,
+            "admin.dashboard",
+            field="tx_hash",
+            focus=f"tx-{payout_id}",
+        )
     return form_success(
         {"id": payout_id, "status": "sent"},
         endpoint="admin.dashboard",

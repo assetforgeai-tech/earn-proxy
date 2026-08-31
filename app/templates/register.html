@@ -5,14 +5,19 @@
   <p class="eyebrow">CONTRIBUTOR ACCESS</p>
   <h1>Start with a manual review.</h1>
   <p class="muted">Your account stays pending until an administrator approves it.</p>
-  <form method="post" action="{{ url_for('auth.register') }}">
+  {% set error_field = request.args.get('error_field', '') %}
+  <form method="post" action="{{ url_for('auth.register') }}" data-submit-once="true">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="ui" value="1">
     <label for="email">Email</label>
-    <input id="email" name="email" type="email" autocomplete="email" required>
+    <input id="email" name="email" type="email" autocomplete="email" required aria-describedby="email-hint{% if error_field == 'email' %} email-error{% endif %}"{% if error_field == 'email' %} aria-invalid="true"{% endif %}>
+    <small id="email-hint" class="field-hint">We use this only to identify your contributor account.</small>
+    {% if error_field == 'email' %}<small id="email-error" class="field-error">Enter a valid, available email address.</small>{% endif %}
     <label for="password">Password</label>
-    <input id="password" name="password" type="password" minlength="8" autocomplete="new-password" required>
-    <button class="button primary" type="submit">Register</button>
+    <input id="password" name="password" type="password" minlength="8" autocomplete="new-password" required aria-describedby="password-hint{% if error_field == 'password' %} password-error{% endif %}"{% if error_field == 'password' %} aria-invalid="true"{% endif %}>
+    <small id="password-hint" class="field-hint">Use at least 8 characters.</small>
+    {% if error_field == 'password' %}<small id="password-error" class="field-error">Use at least 8 characters.</small>{% endif %}
+    <button class="button primary" type="submit" data-loading-label="Creating account...">Register</button>
   </form>
   <p class="muted"><a href="{{ url_for('auth.login') }}">Back to sign in</a></p>
 </section>

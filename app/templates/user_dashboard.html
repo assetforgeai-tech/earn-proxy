@@ -1,11 +1,202 @@
 {% extends "base.html" %}
 {% block title %}Dashboard - Earn Proxy{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">CONTRIBUTOR DASHBOARD</p><h1>Your earning endpoints</h1><p class="muted">Only a safe host:port preview is shown here. Credentials never appear in the UI.</p></div></div>
-<section class="stats"><article><span>Pending</span><strong>${{ '%.6f'|format(balances.pending_micro_usd / 1000000) }}</strong></article><article><span>Available</span><strong>${{ '%.6f'|format(balances.available_micro_usd / 1000000) }}</strong></article><article><span>Proxies</span><strong>{{ proxies|length }}</strong></article></section>
-<section class="panel"><h2>Add proxy</h2><form class="inline-form" method="post" action="{{ url_for('proxies.create_proxy') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><label class="sr-only" for="raw_proxy">Raw proxy</label><input id="raw_proxy" name="raw_proxy" placeholder="host:port:user:password" autocomplete="off" required><button class="button primary" type="submit">Add securely</button></form></section>
-<section class="panel"><div class="panel-head"><div><h2>USDT BEP20 wallet</h2><p class="muted">{{ wallet_masked if wallet else 'No wallet saved' }}</p></div></div><form class="inline-form" method="post" action="{{ url_for('wallets.update_wallet') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><label class="sr-only" for="address">Wallet address</label><input id="address" name="address" placeholder="0x..." autocomplete="off" required><button class="button ghost" type="submit">Save wallet</button></form></section>
-<section class="panel"><div class="panel-head"><div><h2>Request payout</h2><p class="muted">Available balance: ${{ '%.6f'|format(balances.available_micro_usd / 1000000) }}. Requests are reviewed manually.</p></div></div><form class="inline-form" method="post" action="{{ url_for('wallets.create_payout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><label for="amount_usd">Amount (USD)</label><input id="amount_usd" name="amount_usd" type="number" min="0.000001" step="0.000001" inputmode="decimal" placeholder="0.000000" required><button class="button primary" type="submit">Request payout</button></form></section>
-<section class="panel"><div class="panel-head"><div><h2>Proxy status</h2><span class="muted">Health sweep target: 60 minutes</span></div><span class="muted">{{ proxies|length }} endpoint{{ '' if proxies|length == 1 else 's' }}</span></div>{% if proxies %}<div class="table-wrap"><table><thead><tr><th>Endpoint</th><th>Protocol</th><th>Status</th><th>Eligibility</th><th>Online hours</th><th>Offline hours</th><th>Actions</th></tr></thead><tbody>{% for item in proxy_views %}{% set proxy = item.row %}<tr><td class="mono">{{ proxy.host }}:{{ proxy.port }}</td><td>{{ proxy.detected_protocol }}</td><td><span class="badge {{ proxy.status }}">{{ proxy.status|capitalize }}</span></td><td><span class="badge {{ proxy.eligibility }}">{{ proxy.eligibility|capitalize }}</span></td><td>{{ '%.2f'|format(item.uptime.online) }}</td><td>{{ '%.2f'|format(item.uptime.offline) }}</td><td class="actions"><form method="post" action="{{ url_for('proxies.replace', proxy_id=proxy.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><label class="sr-only" for="replace-{{ proxy.id }}">Replacement proxy</label><input id="replace-{{ proxy.id }}" name="raw_proxy" placeholder="New proxy raw value" autocomplete="off" required><button class="button small ghost" type="submit">Replace</button></form><form method="post" action="{{ url_for('proxies.delete', proxy_id=proxy.id) }}" onsubmit="return confirm('Remove this proxy? Its earning history is retained, but the endpoint stops being distributed.');"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button small danger" type="submit">Remove</button></form></td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty">No proxy yet. Add your first endpoint above.</div>{% endif %}</section>
-<section class="panel"><div class="panel-head"><h2>Payout history</h2><span class="muted">Manual admin review</span></div>{% if payouts %}<div class="table-wrap"><table><thead><tr><th>Amount</th><th>Status</th><th>Requested</th><th>Transaction hash</th></tr></thead><tbody>{% for payout in payouts %}<tr><td>${{ '%.6f'|format(payout.amount_micro_usd / 1000000) }}</td><td><span class="badge {{ payout.status }}">{{ payout.status|capitalize }}</span></td><td>{{ payout.created_at }}</td><td class="mono">{{ payout.tx_hash or '-' }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty">No payout requests yet.</div>{% endif %}</section>
+{% set error_focus = request.args.get('error_focus', '') %}
+
+<div class="page-head">
+  <div>
+    <p class="eyebrow">CONTRIBUTOR DASHBOARD</p>
+    <h1>Your earning endpoints</h1>
+    <p class="muted">Only a safe host:port preview is shown here. Credentials never appear in the UI.</p>
+  </div>
+</div>
+
+<nav id="dashboard-nav" class="section-nav" aria-label="Dashboard sections">
+  <a href="#overview">Overview</a>
+  <a href="#add-proxy">Add proxy</a>
+  <a href="#wallet">Wallet</a>
+  <a href="#request-payout">Request payout</a>
+  <a href="#proxy-status">Proxy status</a>
+  <a href="#payout-history">Payouts</a>
+</nav>
+
+<section id="overview" class="stats" aria-label="Earnings overview">
+  <article>
+    <span>Pending</span>
+    <strong>${{ '%.6f'|format(balances.pending_micro_usd / 1000000) }}</strong>
+    <small>Accruing during the 7-day continuous-online period.</small>
+  </article>
+  <article>
+    <span>Available</span>
+    <strong>${{ '%.6f'|format(balances.available_micro_usd / 1000000) }}</strong>
+    <small>Eligible for a manual payout request.</small>
+  </article>
+  <article>
+    <span>Proxies</span>
+    <strong>{{ proxies|length }}</strong>
+    <small>Active endpoints currently visible to your account.</small>
+  </article>
+</section>
+
+<section id="add-proxy" class="panel section-target">
+  <div class="panel-head">
+    <div>
+      <h2>Add proxy</h2>
+      <p class="muted">Credentials are encrypted at rest and hidden after submission.</p>
+    </div>
+  </div>
+  <form class="inline-form" method="post" action="{{ url_for('proxies.create_proxy') }}" data-submit-once="true">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="ui" value="1">
+    <div class="field-group">
+      <label for="raw_proxy">Raw proxy</label>
+      <input id="raw_proxy" name="raw_proxy" placeholder="host:port:user:password" autocomplete="off" required aria-describedby="raw-proxy-hint{% if error_focus == 'raw_proxy' %} raw-proxy-error{% endif %}"{% if error_focus == 'raw_proxy' %} aria-invalid="true"{% endif %}>
+      <small id="raw-proxy-hint" class="field-hint">Supported forms include host:port:user:password and protocol://user:password@host:port.</small>
+      {% if error_focus == 'raw_proxy' %}<small id="raw-proxy-error" class="field-error">Review the proxy value and try again.</small>{% endif %}
+    </div>
+    <button class="button primary" type="submit" data-loading-label="Adding proxy...">Add securely</button>
+  </form>
+</section>
+
+<section id="wallet" class="panel section-target">
+  <div class="panel-head">
+    <div>
+      <h2>USDT BEP20 wallet</h2>
+      <p class="muted">{{ wallet_masked if wallet else 'No wallet saved' }} · Changes trigger a 48-hour payout lock.</p>
+    </div>
+  </div>
+  <form class="inline-form" method="post" action="{{ url_for('wallets.update_wallet') }}" data-submit-once="true">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="ui" value="1">
+    <div class="field-group">
+      <label for="address">Wallet address</label>
+      <input id="address" name="address" placeholder="0x..." autocomplete="off" required aria-describedby="wallet-hint{% if error_focus == 'address' %} wallet-error{% endif %}"{% if error_focus == 'address' %} aria-invalid="true"{% endif %}>
+      <small id="wallet-hint" class="field-hint">Enter one BEP20 address beginning with 0x.</small>
+      {% if error_focus == 'address' %}<small id="wallet-error" class="field-error">Review the wallet address and try again.</small>{% endif %}
+    </div>
+    <button class="button ghost" type="submit" data-loading-label="Saving wallet...">Save wallet</button>
+  </form>
+</section>
+
+<section id="request-payout" class="panel section-target">
+  <div class="panel-head">
+    <div>
+      <h2>Request payout</h2>
+      <p class="muted">Available balance: ${{ '%.6f'|format(balances.available_micro_usd / 1000000) }}. Requests are reviewed manually.</p>
+    </div>
+  </div>
+  <form class="inline-form" method="post" action="{{ url_for('wallets.create_payout') }}" data-submit-once="true">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="ui" value="1">
+    <div class="field-group">
+      <label for="amount_usd">Amount (USD)</label>
+      <input id="amount_usd" name="amount_usd" type="number" min="0.000001" step="0.000001" inputmode="decimal" placeholder="0.000000" required aria-describedby="amount-hint{% if error_focus == 'amount_usd' %} amount-error{% endif %}"{% if error_focus == 'amount_usd' %} aria-invalid="true"{% endif %}>
+      <small id="amount-hint" class="field-hint">Up to 6 decimal places, within your available balance.</small>
+      {% if error_focus == 'amount_usd' %}<small id="amount-error" class="field-error">Review the payout amount and wallet status.</small>{% endif %}
+    </div>
+    <button class="button primary" type="submit" data-loading-label="Submitting request...">Request payout</button>
+  </form>
+</section>
+
+<section id="proxy-status" class="panel section-target">
+  <div class="panel-head">
+    <div>
+      <h2>Proxy status</h2>
+      <p class="muted">Health sweep target: {{ health_interval_minutes }} minutes. Stale results are clearly marked.</p>
+    </div>
+    <span class="muted">{{ proxies|length }} endpoint{{ '' if proxies|length == 1 else 's' }}</span>
+  </div>
+  {% if proxies %}
+    <div class="table-wrap">
+      <table class="responsive-table">
+        <caption>Masked proxy endpoints and their latest health state</caption>
+        <thead>
+          <tr>
+            <th scope="col">Endpoint</th>
+            <th scope="col">Protocol</th>
+            <th scope="col">Status</th>
+            <th scope="col">Eligibility</th>
+            <th scope="col">Online hours</th>
+            <th scope="col">Offline hours</th>
+            <th scope="col">Freshness</th>
+            <th scope="col">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in proxy_views %}
+            {% set proxy = item.row %}
+            <tr>
+              <th scope="row" data-label="Endpoint" class="mono breakable">{{ proxy.host }}:{{ proxy.port }}</th>
+              <td data-label="Protocol">{{ proxy.detected_protocol|upper }}</td>
+              <td data-label="Status"><span class="badge {{ proxy.status }}">{{ proxy.status|capitalize }}</span></td>
+              <td data-label="Eligibility"><span class="badge {{ proxy.eligibility }}">{{ proxy.eligibility|capitalize }}</span></td>
+              <td data-label="Online hours">{{ '%.2f'|format(item.uptime.online) }}</td>
+              <td data-label="Offline hours">{{ '%.2f'|format(item.uptime.offline) }}</td>
+              <td data-label="Freshness">
+                <div class="freshness {{ item.freshness.state }}">
+                  <strong>{{ item.freshness.label }}</strong>
+                  <span>Last checked: {% if item.freshness.last.iso %}<time datetime="{{ item.freshness.last.iso }}">{{ item.freshness.last.label }}</time>{% else %}{{ item.freshness.last.label }}{% endif %}</span>
+                  <span>Next check: {% if item.freshness.next.iso %}<time datetime="{{ item.freshness.next.iso }}">{{ item.freshness.next.label }}</time>{% else %}{{ item.freshness.next.label }}{% endif %}</span>
+                </div>
+              </td>
+              <td data-label="Actions" class="actions">
+                <form method="post" action="{{ url_for('proxies.replace', proxy_id=proxy.id) }}" data-submit-once="true">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                  <input type="hidden" name="ui" value="1">
+                  <label for="replace-{{ proxy.id }}">Replacement proxy</label>
+                  <input id="replace-{{ proxy.id }}" name="raw_proxy" placeholder="New raw proxy" autocomplete="off" required aria-describedby="replace-hint-{{ proxy.id }}{% if error_focus == 'replace-' ~ proxy.id %} replace-error-{{ proxy.id }}{% endif %}"{% if error_focus == 'replace-' ~ proxy.id %} aria-invalid="true"{% endif %}>
+                  <small id="replace-hint-{{ proxy.id }}" class="field-hint">Replaces this endpoint after validation.</small>
+                  {% if error_focus == 'replace-' ~ proxy.id %}<small id="replace-error-{{ proxy.id }}" class="field-error">Review the replacement proxy.</small>{% endif %}
+                  <button class="button small ghost" type="submit" data-loading-label="Replacing...">Replace</button>
+                </form>
+                <form method="post" action="{{ url_for('proxies.delete', proxy_id=proxy.id) }}" data-confirm-dialog data-confirm-title="Remove proxy?" data-confirm-message="Its earning history is retained, but this endpoint stops being distributed." data-confirm-label="Remove proxy" data-submit-once="true">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                  <input type="hidden" name="ui" value="1">
+                  <button class="button small danger" type="submit" data-confirm-trigger data-loading-label="Removing..." disabled>Remove</button>
+                </form>
+                <noscript><small class="field-error">Enable JavaScript to perform destructive actions safely.</small></noscript>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="empty">No proxy yet. Add your first endpoint above.</div>
+  {% endif %}
+</section>
+
+<section id="payout-history" class="panel section-target">
+  <div class="panel-head">
+    <h2>Payout history</h2>
+    <span class="muted">Manual admin review</span>
+  </div>
+  {% if payouts %}
+    <div class="table-wrap">
+      <table class="responsive-table">
+        <caption>Your recent payout requests</caption>
+        <thead>
+          <tr>
+            <th scope="col">Amount</th>
+            <th scope="col">Status</th>
+            <th scope="col">Requested</th>
+            <th scope="col">Transaction hash</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for payout in payouts %}
+            <tr>
+              <td data-label="Amount">${{ '%.6f'|format(payout.amount_micro_usd / 1000000) }}</td>
+              <td data-label="Status"><span class="badge {{ payout.status }}">{{ payout.status|capitalize }}</span></td>
+              <td data-label="Requested"><time datetime="{{ payout.created_at }}">{{ payout.created_at }}</time></td>
+              <td data-label="Transaction hash" class="mono breakable">{{ payout.tx_hash or '-' }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="empty">No payout requests yet.</div>
+  {% endif %}
+</section>
 {% endblock %}

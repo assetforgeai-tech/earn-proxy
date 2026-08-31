@@ -24,9 +24,9 @@ def create_proxy():
     try:
         proxy_id = add_proxy(get_db(), g.user["id"], request.form.get("raw_proxy", ""))
     except ProxyParseError as exc:
-        return form_error(str(exc), 400, "dashboard.dashboard")
+        return form_error(str(exc), 400, "dashboard.dashboard", field="raw_proxy", focus="raw_proxy")
     except DuplicateCredential as exc:
-        return form_error(str(exc), 409, "dashboard.dashboard")
+        return form_error(str(exc), 409, "dashboard.dashboard", field="raw_proxy", focus="raw_proxy")
     return form_success(
         {"id": proxy_id, "status": "pending"},
         status=201,
@@ -41,7 +41,13 @@ def replace(proxy_id: int):
     try:
         replace_proxy(get_db(), proxy_id, g.user["id"], request.form.get("raw_proxy", ""))
     except (ProxyParseError, DuplicateCredential) as exc:
-        return form_error(str(exc), 400, "dashboard.dashboard")
+        return form_error(
+            str(exc),
+            400,
+            "dashboard.dashboard",
+            field="raw_proxy",
+            focus=f"replace-{proxy_id}",
+        )
     except LookupError as exc:
         return form_error(str(exc), 404, "dashboard.dashboard")
     return form_success(

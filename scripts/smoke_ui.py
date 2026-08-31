@@ -31,12 +31,19 @@ with sync_playwright() as playwright:
     assert desktop.get_by_label("API freshness limit (minutes)").input_value() == "120"
     assert desktop.get_by_label("Include Allow").is_checked()
     assert desktop.get_by_label("Include Risk").is_checked()
-    desktop.get_by_label("Health concurrency (max 20)").fill("3")
-    desktop.get_by_role("button", name="Save policy").click()
-    desktop.wait_for_load_state("networkidle")
-    assert desktop.get_by_text("Checker policy saved.").is_visible()
-    assert desktop.get_by_label("Health concurrency (max 20)").input_value() == "3"
-    assert desktop.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    original_concurrency = desktop.get_by_label("Health concurrency (max 20)").input_value()
+    try:
+        desktop.get_by_label("Health concurrency (max 20)").fill("3")
+        desktop.get_by_role("button", name="Save policy").click()
+        desktop.wait_for_load_state("networkidle")
+        assert desktop.get_by_text("Checker policy saved.").is_visible()
+        assert desktop.get_by_label("Health concurrency (max 20)").input_value() == "3"
+        assert desktop.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    finally:
+        desktop.get_by_label("Health concurrency (max 20)").fill(original_concurrency)
+        desktop.get_by_role("button", name="Save policy").click()
+        desktop.wait_for_load_state("networkidle")
+        assert desktop.get_by_label("Health concurrency (max 20)").input_value() == original_concurrency
 
     mobile = browser.new_page(viewport={"width": 375, "height": 812})
     sign_in(mobile)

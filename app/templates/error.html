@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}{{ status_code }} - {{ title }} - Earn Proxy{% endblock %}
+{% block content %}
+<section class="error-card" aria-labelledby="error-title">
+  <p class="error-code" aria-hidden="true">{{ status_code }}</p>
+  <p class="eyebrow">EARN PROXY</p>
+  <h1 id="error-title">{{ title }}</h1>
+  <p class="muted">{{ message }}</p>
+  <a class="button primary" href="{{ url_for(recovery_endpoint) }}">{{ recovery_label }}</a>
+</section>
+{% endblock %}

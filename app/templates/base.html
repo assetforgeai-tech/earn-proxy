@@ -5,17 +5,38 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Earn Proxy{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </head>
 <body>
+  <a class="skip-link" href="#main-content">Skip to main content</a>
   <header class="topbar">
     <a class="brand" href="{{ url_for('dashboard.dashboard') if g.user else url_for('auth.login') }}">Earn Proxy</a>
-    {% if g.user %}<nav><span>{{ g.user.email }}</span><form method="post" action="{{ url_for('auth.logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button ghost" type="submit">Sign out</button></form></nav>{% endif %}
+    {% if g.user %}<nav class="account-nav" aria-label="Account"><span class="account-email">{{ g.user.email }}</span><form method="post" action="{{ url_for('auth.logout') }}" data-submit-once="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button ghost" type="submit" data-loading-label="Signing out...">Sign out</button></form></nav>{% endif %}
   </header>
-  <main class="shell">
+  <main id="main-content" class="shell" tabindex="-1">
     {% with messages = get_flashed_messages(with_categories=true) %}
-      {% if messages %}<div class="notices" aria-live="polite">{% for category, message in messages %}<div class="notice {{ category }}" role="status">{{ message }}</div>{% endfor %}</div>{% endif %}
+      {% if messages %}
+        <div class="notices" aria-live="polite">
+          {% for category, message in messages %}
+            <div class="notice {{ category }}" id="notice-{{ loop.index }}" role="{{ 'alert' if category == 'error' else 'status' }}">
+              {% if category == 'error' %}<strong>Please correct the highlighted field.</strong><span>{{ message }}</span>{% else %}{{ message }}{% endif %}
+            </div>
+          {% endfor %}
+        </div>
+      {% endif %}
     {% endwith %}
     {% block content %}{% endblock %}
   </main>
+  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-dialog-title" aria-describedby="confirm-dialog-message">
+    <div class="dialog-body">
+      <p class="eyebrow">PLEASE CONFIRM</p>
+      <h2 id="confirm-dialog-title">Are you sure?</h2>
+      <p id="confirm-dialog-message" class="muted">This action cannot be undone.</p>
+      <div class="dialog-actions">
+        <button class="button ghost" type="button" data-dialog-cancel>Cancel</button>
+        <button class="button danger" type="button" data-dialog-confirm>Continue</button>
+      </div>
+    </div>
+  </dialog>
 </body>
 </html>

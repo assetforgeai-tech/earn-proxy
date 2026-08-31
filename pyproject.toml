@@ -30,7 +30,7 @@ earn-proxy-maintenance = "app.maintenance_service:main"
 include = ["app*"]
 
 [tool.setuptools.package-data]
-app = ["templates/*.html", "static/*.css"]
+app = ["templates/*.html", "static/*.css", "static/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

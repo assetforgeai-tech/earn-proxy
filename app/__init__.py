@@ -4,7 +4,7 @@ import os
 import sqlite3
 
 from cryptography.fernet import Fernet
-from flask import Flask, jsonify
+from flask import Flask, g, jsonify, render_template, request
 
 from app import auth, db, security
 
@@ -82,6 +82,66 @@ def create_app(test_config: dict | None = None) -> Flask:
     app.register_blueprint(proxies.bp)
     app.register_blueprint(internal_api.bp)
     app.register_blueprint(wallets.bp)
+
+    def _wants_json_error() -> bool:
+        accept = request.headers.get("Accept", "")
+        return request.is_json or ("application/json" in accept and "text/html" not in accept)
+
+    @app.errorhandler(401)
+    def handle_unauthorized(error):
+        if _wants_json_error():
+            return jsonify(error="Authentication required"), 401
+        return (
+            render_template(
+                "error.html",
+                status_code=401,
+                title="Sign in to continue",
+                message="Your session is missing or has expired. Sign in again to continue.",
+                recovery_endpoint="auth.login",
+                recovery_label="Go to sign in",
+            ),
+            401,
+        )
+
+    @app.errorhandler(403)
+    def handle_forbidden(error):
+        if _wants_json_error():
+            return jsonify(error="Access denied"), 403
+        recovery_endpoint = (
+            "admin.dashboard" if g.user is not None and g.user["role"] == "admin" else "dashboard.dashboard"
+        )
+        recovery_label = "Return to dashboard"
+        if g.user is None:
+            recovery_endpoint = "auth.login"
+            recovery_label = "Go to sign in"
+        return (
+            render_template(
+                "error.html",
+                status_code=403,
+                title="Access denied",
+                message="You do not have permission to view this page.",
+                recovery_endpoint=recovery_endpoint,
+                recovery_label=recovery_label,
+            ),
+            403,
+        )
+
+    @app.errorhandler(404)
+    def handle_not_found(error):
+        if _wants_json_error():
+            return jsonify(error="Resource not found"), 404
+        recovery_endpoint = "dashboard.dashboard" if g.user is not None else "auth.login"
+        return (
+            render_template(
+                "error.html",
+                status_code=404,
+                title="Page not found",
+                message="The page you requested could not be found.",
+                recovery_endpoint=recovery_endpoint,
+                recovery_label="Return to dashboard" if g.user is not None else "Go to sign in",
+            ),
+            404,
+        )
 
     with app.app_context():
         database = db.get_db()

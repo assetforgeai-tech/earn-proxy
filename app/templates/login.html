@@ -5,14 +5,19 @@
   <p class="eyebrow">EARN PROXY</p>
   <h1>Keep your proxy fleet earning.</h1>
   <p class="muted">Sign in to monitor masked endpoints and balance.</p>
-  <form method="post" action="{{ url_for('auth.login') }}">
+  {% set error_field = request.args.get('error_field', '') %}
+  <form method="post" action="{{ url_for('auth.login') }}" data-submit-once="true">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="ui" value="1">
     <label for="email">Email</label>
-    <input id="email" name="email" type="email" autocomplete="email" required>
+    <input id="email" name="email" type="email" autocomplete="email" required aria-describedby="email-hint{% if error_field == 'email' %} email-error{% endif %}"{% if error_field == 'email' %} aria-invalid="true"{% endif %}>
+    <small id="email-hint" class="field-hint">Use the email associated with your account.</small>
+    {% if error_field == 'email' %}<small id="email-error" class="field-error">Check your email and try again.</small>{% endif %}
     <label for="password">Password</label>
-    <input id="password" name="password" type="password" autocomplete="current-password" required>
-    <button class="button primary" type="submit">Sign in</button>
+    <input id="password" name="password" type="password" autocomplete="current-password" required aria-describedby="password-hint{% if error_field == 'password' %} password-error{% endif %}"{% if error_field == 'password' %} aria-invalid="true"{% endif %}>
+    <small id="password-hint" class="field-hint">Your password is never shown in the dashboard.</small>
+    {% if error_field == 'password' %}<small id="password-error" class="field-error">Check your password and try again.</small>{% endif %}
+    <button class="button primary" type="submit" data-loading-label="Signing in...">Sign in</button>
   </form>
   <p class="muted">New contributor? <a href="{{ url_for('auth.register') }}">Create an account</a></p>
 </section>
