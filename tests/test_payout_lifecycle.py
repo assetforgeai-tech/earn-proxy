@@ -3,7 +3,10 @@ from __future__ import annotations
 import threading
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from app.db import get_db
+from app.services.payout_verification import VerificationResult, apply_payout_verification
 from app.services.payouts import approve_payout, mark_payout_sent, request_payout
 from app.services.proxies import add_proxy
 from app.services.users import create_user
@@ -35,16 +38,17 @@ def test_payout_requires_admin_approval_before_marking_sent(app):
         )
         db.commit()
         payout_id = request_payout(db, user_id, 500_000, now=now)
+        tx_hash = "0x" + "ab" * 32
         try:
-            mark_payout_sent(db, payout_id, "0xnot-approved", now=now)
+            mark_payout_sent(db, payout_id, tx_hash, now=now)
         except LookupError:
             pass
         else:
-            raise AssertionError("Unapproved payout was marked sent")
+            raise AssertionError("Unapproved payout was submitted for verification")
         approve_payout(db, payout_id, now=now)
-        mark_payout_sent(db, payout_id, "0xapproved", now=now)
+        mark_payout_sent(db, payout_id, tx_hash, now=now)
         row = db.execute("SELECT status, tx_hash FROM payouts WHERE id=?", (payout_id,)).fetchone()
-    assert (row["status"], row["tx_hash"]) == ("sent", "0xapproved")
+    assert (row["status"], row["tx_hash"]) == ("verifying", tx_hash)
 
 
 def test_payout_keeps_the_wallet_address_that_was_requested(app):
@@ -132,3 +136,79 @@ def test_concurrent_payout_requests_cannot_reserve_more_than_available(app, monk
     assert len(results) == 1
     assert len(errors) == 1
     assert total <= 1_000_000
+
+
+def test_nonterminal_payout_request_cap_rejects_new_rows_but_terminal_rows_do_not_count(app):
+    now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "payout-cap@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "payout-cap.example:9000:u:p")
+        set_wallet(
+            db,
+            user_id,
+            "0x4444444444444444444444444444444444444444",
+            now=now - timedelta(hours=49),
+        )
+        db.execute(
+            "INSERT INTO earnings_ledger(user_id,proxy_id,started_at,ended_at,micro_usd,bucket,created_at) VALUES(?,?,?, ?,?,'available',?)",
+            (
+                user_id,
+                proxy_id,
+                (now - timedelta(hours=3)).isoformat(),
+                (now - timedelta(hours=2)).isoformat(),
+                3_000_000,
+                now.isoformat(),
+            ),
+        )
+        db.commit()
+        first = request_payout(db, user_id, 500_000, now=now, max_outstanding_payouts=1)
+        with pytest.raises(ValueError, match="Maximum number of outstanding payouts"):
+            request_payout(db, user_id, 500_000, now=now, max_outstanding_payouts=1)
+
+        # Historical terminal payouts remain durable but must not consume the
+        # queue-slot cap once they are confirmed.
+        db.execute("UPDATE payouts SET status='confirmed' WHERE id=?", (first,))
+        db.commit()
+        second = request_payout(db, user_id, 500_000, now=now, max_outstanding_payouts=1)
+
+    assert second != first
+
+
+def test_failed_payout_releases_nonterminal_request_slot(app):
+    now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    tx_hash = "0x" + "cd" * 32
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "payout-failed-cap@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "payout-failed-cap.example:9000:u:p")
+        set_wallet(
+            db,
+            user_id,
+            "0x5555555555555555555555555555555555555555",
+            now=now - timedelta(hours=49),
+        )
+        db.execute(
+            "INSERT INTO earnings_ledger(user_id,proxy_id,started_at,ended_at,micro_usd,bucket,created_at) VALUES(?,?,?, ?,?,'available',?)",
+            (
+                user_id,
+                proxy_id,
+                (now - timedelta(hours=3)).isoformat(),
+                (now - timedelta(hours=2)).isoformat(),
+                2_000_000,
+                now.isoformat(),
+            ),
+        )
+        db.commit()
+        first = request_payout(db, user_id, 500_000, now=now, max_outstanding_payouts=1)
+        approve_payout(db, first, now=now)
+        mark_payout_sent(db, first, tx_hash, now=now)
+        apply_payout_verification(
+            db,
+            first,
+            VerificationResult("failed", "wrong recipient"),
+            now=now + timedelta(minutes=1),
+        )
+        second = request_payout(db, user_id, 500_000, now=now + timedelta(minutes=2), max_outstanding_payouts=1)
+
+    assert second != first

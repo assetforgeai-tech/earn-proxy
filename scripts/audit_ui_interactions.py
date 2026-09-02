@@ -108,6 +108,24 @@ with sync_playwright() as playwright:
     assert save_button.inner_text() == "Saving policy..."
     assert settings_form.get_attribute("aria-busy") == "true"
 
+    page.goto(f"{BASE_URL}/admin/integrations/api-keys")
+    page.wait_for_load_state("networkidle")
+    key_name = f"UI audit {uuid.uuid4().hex[:8]}"
+    page.get_by_label("Key name").fill(key_name)
+    page.get_by_role("button", name="Create key").click()
+    page.wait_for_load_state("networkidle")
+    assert page.get_by_text("Copy this token now.", exact=False).is_visible()
+    assert page.locator("#new-api-token").inner_text().startswith("ep_live_")
+    assert page.get_by_role("button", name="Copy new API token").is_visible()
+    page.reload()
+    page.wait_for_load_state("networkidle")
+    assert page.locator("#new-api-token").count() == 0
+    key_row = page.locator("tr").filter(has_text=key_name)
+    key_row.get_by_role("button", name="Revoke").click()
+    assert dialog.get_by_role("heading", name="Revoke API key?").is_visible()
+    dialog.get_by_role("button", name="Cancel").click()
+    assert key_row.get_by_role("button", name="Revoke").is_visible()
+
     assert console_errors == []
     browser.close()
 

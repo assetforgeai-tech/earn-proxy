@@ -100,4 +100,41 @@ def test_earnapp_probe_requires_a_nonempty_cid_after_tunnel_init(monkeypatch):
     result = asyncio.run(probe_earnapp_proxy("8.8.8.8", 1080, protocol="socks5", timeout_ms=4000))
 
     assert result["eligibility"] == "pending"
+
+
+def test_earnapp_probe_rejects_an_invalid_authenticated_exit_ip(monkeypatch):
+    class Writer:
+        def write(self, _data):
+            return None
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            return None
+
+        async def wait_closed(self):
+            return None
+
+    async def fake_open(*_args, **_kwargs):
+        return object(), Writer()
+
+    frames = iter(
+        [
+            (1, True, b'{"type":"ipc_call","cmd":"tunnel_init","cookie":"c","msg":{"ext_ip":"not-an-ip"}}'),
+            (1, True, b'{"type":"ipc_post","cmd":"cid_set","msg":{"cid":"cid"}}'),
+        ]
+    )
+
+    async def next_frame(*_args, **_kwargs):
+        return next(frames)
+
+    monkeypatch.setattr("app.earnapp_probe._open_wss_tunnel", fake_open)
+    monkeypatch.setattr("app.earnapp_probe.read_server_frame", next_frame)
+
+    result = asyncio.run(probe_earnapp_proxy("8.8.8.8", 1080, protocol="socks5", timeout_ms=4000))
+
+    assert result["verdict"] == "PROTOCOL_FAIL"
+    assert result["eligibility"] == "pending"
+    assert result["exit_ip"] == ""
     assert result["verdict"] != "CID_SET"

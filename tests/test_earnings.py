@@ -243,3 +243,28 @@ def test_online_row_without_successful_health_observation_does_not_accrue(app):
     assert balance.pending_micro_usd == 0
     assert balance.available_micro_usd == 0
     assert cursor == start.isoformat()
+
+
+def test_online_pending_row_without_verified_egress_does_not_accrue(app):
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "unverified-egress-earnings@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "unverified-egress-earnings.example:9000:u:p")
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='pending', country_code='US', "
+            "online_since=?, last_success_at=?, accrual_cursor_at=?, probation_started_at=? WHERE id=?",
+            (
+                start.isoformat(),
+                (start + timedelta(hours=24)).isoformat(),
+                start.isoformat(),
+                start.isoformat(),
+                proxy_id,
+            ),
+        )
+        db.commit()
+        accrue_eligible_time(db, now=start + timedelta(hours=24))
+        balance = balances_for_user(db, user_id)
+
+    assert balance.pending_micro_usd == 0
+    assert balance.available_micro_usd == 0

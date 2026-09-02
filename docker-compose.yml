@@ -32,6 +32,14 @@ services:
     volumes:
       - earn-proxy-data:/var/lib/earn-proxy
 
+  payout-verifier:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "-m", "app.payout_verifier_service"]
+    volumes:
+      - earn-proxy-data:/var/lib/earn-proxy
+
   caddy:
     image: caddy:2.10-alpine
     restart: unless-stopped

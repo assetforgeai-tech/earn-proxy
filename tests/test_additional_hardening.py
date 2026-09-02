@@ -257,11 +257,13 @@ def test_replace_canonical_rehomes_online_duplicate(app):
         canonical = add_proxy(db, user_id, "replace-canonical.example:9000:u:canonical")
         duplicate = add_proxy(db, user_id, "replace-duplicate.example:9001:u:duplicate")
         db.execute(
-            "UPDATE proxies SET exit_ip='198.51.100.92', status='online' WHERE id=?",
+            "UPDATE proxies SET exit_ip='198.51.100.92', status='online', "
+            "egress_attestation_source='https_quorum' WHERE id=?",
             (canonical,),
         )
         db.execute(
-            "UPDATE proxies SET exit_ip='198.51.100.92', status='online', duplicate_of=? WHERE id=?",
+            "UPDATE proxies SET exit_ip='198.51.100.92', status='online', duplicate_of=?, "
+            "egress_attestation_source='https_quorum' WHERE id=?",
             (canonical, duplicate),
         )
         db.commit()

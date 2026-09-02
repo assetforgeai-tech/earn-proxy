@@ -25,32 +25,35 @@ def set_wallet(db, user_id: int, address: str, *, now: datetime | None = None) -
     normalized = str(address or "").strip().lower()
     if not re.fullmatch(r"0x[0-9a-f]{40}", normalized):
         raise ValueError("Wallet must be a valid USDT BEP20 address")
-    existing = db.execute("SELECT * FROM wallets WHERE user_id=?", (user_id,)).fetchone()
-    if existing and _as_utc(datetime.fromisoformat(existing["locked_until"])) > current:
-        raise WalletLocked("Wallet cannot be changed during the 48-hour security lock")
-    conflict = db.execute(
-        """
-        SELECT w.user_id FROM wallets w JOIN users u ON u.id=w.user_id
-        WHERE lower(w.address)=? AND w.user_id<>? AND u.status IN ('pending','active')
-        """,
-        (normalized, user_id),
-    ).fetchone()
-    if conflict:
-        raise WalletInUse("Wallet is already assigned to another active account")
-    # Inactive accounts no longer reserve a wallet address. Preserve their
-    # payout history by removing only wallets that have never been referenced.
-    stale = db.execute(
-        """
-        SELECT w.id FROM wallets w JOIN users u ON u.id=w.user_id
-        WHERE lower(w.address)=? AND w.user_id<>? AND u.status NOT IN ('pending','active')
-          AND NOT EXISTS (SELECT 1 FROM payouts p WHERE p.wallet_id=w.id)
-        """,
-        (normalized, user_id),
-    ).fetchall()
-    if stale:
-        db.executemany("DELETE FROM wallets WHERE id=?", [(row["id"],) for row in stale])
-    locked_until = current + timedelta(hours=48)
+    owns_transaction = not db.in_transaction
     try:
+        if owns_transaction:
+            db.execute("BEGIN IMMEDIATE")
+        existing = db.execute("SELECT * FROM wallets WHERE user_id=?", (user_id,)).fetchone()
+        if existing and _as_utc(datetime.fromisoformat(existing["locked_until"])) > current:
+            raise WalletLocked("Wallet cannot be changed during the 48-hour security lock")
+        conflict = db.execute(
+            """
+            SELECT w.user_id FROM wallets w JOIN users u ON u.id=w.user_id
+            WHERE lower(w.address)=? AND w.user_id<>? AND u.status IN ('pending','active')
+            """,
+            (normalized, user_id),
+        ).fetchone()
+        if conflict:
+            raise WalletInUse("Wallet is already assigned to another active account")
+        # Inactive accounts no longer reserve a wallet address. Preserve their
+        # payout history by removing only wallets that have never been referenced.
+        stale = db.execute(
+            """
+            SELECT w.id FROM wallets w JOIN users u ON u.id=w.user_id
+            WHERE lower(w.address)=? AND w.user_id<>? AND u.status NOT IN ('pending','active')
+              AND NOT EXISTS (SELECT 1 FROM payouts p WHERE p.wallet_id=w.id)
+            """,
+            (normalized, user_id),
+        ).fetchall()
+        if stale:
+            db.executemany("DELETE FROM wallets WHERE id=?", [(row["id"],) for row in stale])
+        locked_until = current + timedelta(hours=48)
         db.execute(
             """
             INSERT INTO wallets(user_id, address, locked_until, updated_at) VALUES (?, ?, ?, ?)
@@ -59,10 +62,16 @@ def set_wallet(db, user_id: int, address: str, *, now: datetime | None = None) -
             """,
             (user_id, normalized, locked_until.isoformat(), current.isoformat()),
         )
+        if owns_transaction:
+            db.commit()
     except sqlite3.IntegrityError:
-        db.rollback()
+        if owns_transaction and db.in_transaction:
+            db.rollback()
         raise WalletInUse("Wallet is retained by an inactive account's payout history") from None
-    db.commit()
+    except Exception:
+        if owns_transaction and db.in_transaction:
+            db.rollback()
+        raise
     return Wallet(normalized, locked_until.isoformat())
 
 

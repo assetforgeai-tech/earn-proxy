@@ -15,6 +15,7 @@ from app import create_app
 from app.checker import check_proxy_fast, check_proxy_strong
 from app.db import get_db
 from app.earnapp_probe import probe_earnapp_proxy
+from app.proxy_intelligence import lookup_country_cached
 from app.services.checks import (
     MAX_HEALTH_CONCURRENCY,
     apply_earnapp_result,
@@ -471,6 +472,9 @@ class CheckRunner:
                                 password=parsed.password,
                             )
                         )
+                        exit_ip = str(result.get("exit_ip") or "").strip()
+                        if exit_ip:
+                            result.update(lookup_country_cached(db, exit_ip))
                 except Exception as exc:  # noqa: BLE001 - external WSS failures become durable evidence
                     result = {
                         "verdict": "WSS_FAIL",

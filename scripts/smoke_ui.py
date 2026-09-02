@@ -71,6 +71,19 @@ with sync_playwright() as playwright:
     assert desktop.get_by_role("button", name="Copy canonical API endpoint").is_visible()
     assert desktop.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
 
+    desktop.goto(f"{BASE_URL}/admin/integrations/api-keys")
+    desktop.wait_for_load_state("networkidle")
+    assert desktop.get_by_role("heading", name="Manage distribution API keys.").is_visible()
+    assert desktop.get_by_label("Key name").is_visible()
+    assert desktop.get_by_role("button", name="Create key").is_visible()
+    assert desktop.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+
+    mobile.goto(f"{BASE_URL}/admin/integrations/api-keys")
+    mobile.wait_for_load_state("networkidle")
+    assert mobile.get_by_role("heading", name="Manage distribution API keys.").is_visible()
+    assert mobile.get_by_role("button", name="Create key").is_visible()
+    assert mobile.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+
     browser.close()
 
 print("desktop and mobile smoke passed")

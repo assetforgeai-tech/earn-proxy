@@ -59,6 +59,7 @@ def test_verified_quorum_requires_two_independent_https_hosts():
     assert result["status"] == "live"
     assert result["protocol"] == "socks5"
     assert result["exit_ip"] == "203.0.113.10"
+    assert result["egress_trusted"] is True
 
 
 def test_checker_falls_back_to_plain_http_when_tls_is_unavailable():
@@ -69,8 +70,9 @@ def test_checker_falls_back_to_plain_http_when_tls_is_unavailable():
         return curl_response(probe, ip="203.0.113.25")
 
     result = check_proxy(PROXY, runner=runner)
-    assert result["status"] == "live"
+    assert result["status"] == "live_unverified"
     assert result["exit_ip"] == "203.0.113.25"
+    assert result["egress_trusted"] is False
 
 
 def test_auto_detection_prefers_socks5_and_does_not_open_http_after_success():
@@ -192,6 +194,7 @@ def test_tls_certificate_error_can_be_live_unverified_with_matching_quorum():
     result = check_proxy(PROXY, runner=runner)
     assert result["status"] == "live_unverified"
     assert result["exit_ip"] == "203.0.113.17"
+    assert result["egress_trusted"] is False
 
 
 def test_fast_check_uses_one_rotating_endpoint_and_detected_protocol():
@@ -208,6 +211,7 @@ def test_fast_check_uses_one_rotating_endpoint_and_detected_protocol():
     assert result["probe_endpoint"] == PROBE_URLS[1]
     assert result["next_probe_index"] == 2
     assert result["failure_kind"] == ""
+    assert result["egress_trusted"] is False
     assert len(calls) == 1
     assert calls[0][calls[0].index("--proxy") + 1].startswith("socks5h://")
 

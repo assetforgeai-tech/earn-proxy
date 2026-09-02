@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS proxies (
     earnapp_checked_at TEXT,
     earnapp_next_check_at TEXT,
     egress_verified_at TEXT,
+    egress_attestation_source TEXT NOT NULL DEFAULT '',
     earnapp_claimed_until TEXT,
     earnapp_claim_token TEXT,
     exit_ip TEXT,
@@ -74,11 +75,78 @@ CREATE INDEX IF NOT EXISTS proxies_exit_idx
 CREATE INDEX IF NOT EXISTS proxies_distribution_idx
     ON proxies(status, eligibility, duplicate_of, archived_at);
 
+CREATE TABLE IF NOT EXISTS proxy_geo_cache (
+    exit_ip TEXT PRIMARY KEY,
+    country_code TEXT NOT NULL DEFAULT '',
+    country_name TEXT NOT NULL DEFAULT '',
+    geo_source TEXT NOT NULL DEFAULT '',
+    geo_confidence TEXT NOT NULL DEFAULT 'unknown',
+    checked_at TEXT NOT NULL,
+    retry_after TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS proxy_geo_cache_retry_idx
+    ON proxy_geo_cache(retry_after);
+
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS registration_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    identity_hash TEXT NOT NULL,
+    attempted_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS registration_attempts_identity_idx
+    ON registration_attempts(identity_hash, attempted_at);
+CREATE INDEX IF NOT EXISTS registration_attempts_time_idx
+    ON registration_attempts(attempted_at);
+
+CREATE TABLE IF NOT EXISTS login_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    identity_hash TEXT NOT NULL,
+    account_hash TEXT NOT NULL,
+    attempted_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS login_attempts_identity_idx
+    ON login_attempts(identity_hash, attempted_at);
+CREATE INDEX IF NOT EXISTS login_attempts_account_idx
+    ON login_attempts(account_hash, attempted_at);
+CREATE INDEX IF NOT EXISTS login_attempts_time_idx
+    ON login_attempts(attempted_at);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    token_prefix TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    source TEXT NOT NULL DEFAULT 'managed',
+    created_by_user_id INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    last_used_at TEXT,
+    revoked_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS api_keys_active_idx
+    ON api_keys(revoked_at, created_at);
+
+CREATE TABLE IF NOT EXISTS api_key_reveals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reveal_id TEXT NOT NULL UNIQUE,
+    token_encrypted TEXT NOT NULL,
+    message TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS api_key_reveals_due_idx
+    ON api_key_reveals(reveal_id, expires_at, consumed_at);
 
 CREATE TABLE IF NOT EXISTS earnings_ledger (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,11 +179,23 @@ CREATE TABLE IF NOT EXISTS payouts (
     amount_micro_usd INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'requested',
     tx_hash TEXT NOT NULL DEFAULT '',
+    verification_error TEXT NOT NULL DEFAULT '',
+    verification_attempts INTEGER NOT NULL DEFAULT 0,
+    next_verification_at TEXT,
+    verified_at TEXT,
+    confirmations INTEGER NOT NULL DEFAULT 0,
+    tx_block_number INTEGER,
+    verification_claimed_until TEXT,
+    verification_claim_token TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS payouts_user_status_idx ON payouts(user_id, status);
+CREATE INDEX IF NOT EXISTS payouts_verification_due_idx
+    ON payouts(status, next_verification_at, verification_claimed_until);
+CREATE UNIQUE INDEX IF NOT EXISTS payouts_tx_hash_uidx
+    ON payouts(lower(tx_hash)) WHERE tx_hash <> '' AND length(tx_hash)=66;
 """
 
 
@@ -132,6 +212,7 @@ PROXY_MIGRATION_COLUMNS = {
     "earnapp_checked_at": "TEXT",
     "earnapp_next_check_at": "TEXT",
     "egress_verified_at": "TEXT",
+    "egress_attestation_source": "TEXT NOT NULL DEFAULT ''",
     "earnapp_claimed_until": "TEXT",
     "earnapp_claim_token": "TEXT",
     "exit_ip": "TEXT",
@@ -167,6 +248,27 @@ USER_MIGRATION_COLUMNS = {
 
 PAYOUT_MIGRATION_COLUMNS = {
     "wallet_address": "TEXT NOT NULL DEFAULT ''",
+    "verification_error": "TEXT NOT NULL DEFAULT ''",
+    "verification_attempts": "INTEGER NOT NULL DEFAULT 0",
+    "next_verification_at": "TEXT",
+    "verified_at": "TEXT",
+    "confirmations": "INTEGER NOT NULL DEFAULT 0",
+    "tx_block_number": "INTEGER",
+    "verification_claimed_until": "TEXT",
+    "verification_claim_token": "TEXT",
+}
+
+
+API_KEY_MIGRATION_COLUMNS = {
+    "public_id": "TEXT NOT NULL DEFAULT ''",
+    "name": "TEXT NOT NULL DEFAULT ''",
+    "token_prefix": "TEXT NOT NULL DEFAULT ''",
+    "token_hash": "TEXT NOT NULL DEFAULT ''",
+    "source": "TEXT NOT NULL DEFAULT 'managed'",
+    "created_by_user_id": "INTEGER",
+    "created_at": "TEXT NOT NULL DEFAULT ''",
+    "last_used_at": "TEXT",
+    "revoked_at": "TEXT",
 }
 
 
@@ -205,12 +307,76 @@ def migrate_db(db) -> None:
                     WHERE wallet_address=''
                     """
                 )
+            db.execute(
+                """
+                UPDATE payouts
+                SET verification_error=CASE
+                        WHEN status='sent' AND verification_error='' THEN
+                            'Legacy payout marked sent before on-chain verification'
+                        ELSE verification_error
+                    END
+                WHERE status='sent' AND verification_error=''
+                """
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS payouts_verification_due_idx "
+                "ON payouts(status,next_verification_at,verification_claimed_until)"
+            )
+            db.execute("DROP INDEX IF EXISTS payouts_tx_hash_uidx")
+            # Legacy versions accepted duplicate full transaction hashes. Keep
+            # the oldest record authoritative and clear later copies so the
+            # new uniqueness invariant can be created without aborting startup.
+            seen_hashes: set[str] = set()
+            duplicate_rows = db.execute(
+                "SELECT id, tx_hash, verification_error FROM payouts "
+                "WHERE tx_hash <> '' AND length(tx_hash)=66 ORDER BY id"
+            ).fetchall()
+            for payout in duplicate_rows:
+                normalized_hash = str(payout["tx_hash"]).strip().lower()
+                if normalized_hash not in seen_hashes:
+                    seen_hashes.add(normalized_hash)
+                    continue
+                existing_error = str(payout["verification_error"] or "").strip()
+                marker = "Duplicate legacy transaction hash cleared during migration"
+                error = f"{existing_error}; {marker}" if existing_error else marker
+                db.execute(
+                    "UPDATE payouts SET tx_hash='', verification_error=? WHERE id=?",
+                    (error[:500], payout["id"]),
+                )
+            db.execute(
+                "CREATE UNIQUE INDEX payouts_tx_hash_uidx "
+                "ON payouts(lower(tx_hash)) WHERE tx_hash <> '' AND length(tx_hash)=66"
+            )
+        if _table_exists(db, "api_keys"):
+            _add_missing_columns(db, "api_keys", API_KEY_MIGRATION_COLUMNS)
         if not _table_exists(db, "proxies"):
             db.commit()
             return
         legacy_columns = _columns(db, "proxies")
         _add_missing_columns(db, "proxies", PROXY_MIGRATION_COLUMNS)
         now = "1970-01-01T00:00:00+00:00"
+        # Force any identity without a trusted attestation through one strong
+        # qualification pass. This remains idempotent for databases that saw
+        # an intermediate schema with the column present but blank values.
+        db.execute(
+            """
+            UPDATE proxies SET exit_ip=NULL, egress_verified_at=NULL,
+                egress_attestation_source='', country_code='', duplicate_of=NULL,
+                eligibility=CASE WHEN archived_at IS NULL THEN 'pending' ELSE eligibility END,
+                health_mode=CASE WHEN archived_at IS NULL THEN 'strong' ELSE health_mode END,
+                next_check_at=CASE WHEN archived_at IS NULL THEN ? ELSE next_check_at END,
+                earnapp_next_check_at=CASE WHEN archived_at IS NULL THEN ? ELSE earnapp_next_check_at END,
+                check_claimed_until=NULL, check_claim_token=NULL,
+                earnapp_claimed_until=NULL, earnapp_claim_token=NULL
+            WHERE egress_attestation_source NOT IN ('https_quorum','earnapp_tls')
+              AND (
+                  exit_ip IS NOT NULL OR egress_verified_at IS NOT NULL OR duplicate_of IS NOT NULL
+                  OR country_code<>'' OR health_mode='fast'
+                  OR (archived_at IS NULL AND status='online' AND eligibility IN ('allow','risk'))
+              )
+            """,
+            (now, now),
+        )
         db.execute(
             "UPDATE proxies SET updated_at=COALESCE(NULLIF(updated_at,''), created_at, ?)",
             (now,),
@@ -231,7 +397,8 @@ def migrate_db(db) -> None:
             """
             UPDATE proxies SET
                 health_mode=CASE
-                    WHEN status='online' AND detected_protocol IN ('http','socks5') THEN 'fast'
+                    WHEN status='online' AND detected_protocol IN ('http','socks5')
+                         AND egress_attestation_source IN ('https_quorum','earnapp_tls') THEN 'fast'
                     ELSE COALESCE(NULLIF(health_mode,''), 'strong')
                 END
             WHERE status='online'
@@ -263,6 +430,10 @@ def migrate_db(db) -> None:
                         row["id"],
                     ),
                 )
+            # Remove the old plaintext columns' contents after every row has
+            # been encrypted successfully. The columns remain only for
+            # schema compatibility with older tooling.
+            db.execute("UPDATE proxies SET username='', password=''")
 
         db.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS proxies_credential_fingerprint_uidx "
@@ -276,6 +447,15 @@ def migrate_db(db) -> None:
             "CREATE INDEX IF NOT EXISTS proxies_distribution_idx "
             "ON proxies(status,eligibility,duplicate_of,archived_at)"
         )
+        if _table_exists(db, "api_keys"):
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS api_keys_public_id_uidx ON api_keys(public_id) WHERE public_id <> ''"
+            )
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS api_keys_token_hash_uidx "
+                "ON api_keys(token_hash) WHERE token_hash <> ''"
+            )
+            db.execute("CREATE INDEX IF NOT EXISTS api_keys_active_idx ON api_keys(revoked_at, created_at)")
         db.commit()
     except Exception:
         db.rollback()

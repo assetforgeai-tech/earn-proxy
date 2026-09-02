@@ -11,15 +11,17 @@ Earn Proxy is a compact, self-hosted Flask service for manually approved contrib
 - Exposes both `Allow` and `Risk` through the internal API by default; each class has an admin toggle.
 - Keeps `Pause earn` independent from distribution, while blocked users are excluded from both.
 - Accrues fixed hourly earnings into a seven-day probation cycle before funds become available.
-- Supports one USDT BEP20 wallet per active account and manual payout approval.
+- Classifies verified egress countries in the slower EarnApp worker, with a seven-day per-IP cache and provider cooldown, so health checks stay fast and US rates are applied correctly.
+- Supports one USDT BEP20 wallet per active account, manual payout approval, and read-only on-chain verification of submitted USDT transfers.
 
 ## Worker architecture
 
-The service is split into three independently restartable workers so an EarnApp outage or a large health backlog cannot block web requests or earnings maintenance:
+The service is split into four independently restartable workers so an EarnApp outage, RPC outage, or a large health backlog cannot block web requests or earnings maintenance:
 
 1. `health` checks proxy reachability and egress.
 2. `earnapp` performs the slower EarnApp qualification refresh.
 3. `maintenance` accrues earnings, archives proxies that have been continuously dead for 24 hours, and checkpoints SQLite WAL.
+4. `payout-verifier` validates submitted BSC transaction receipts without holding a wallet private key or sending funds.
 
 Each worker uses durable SQLite claims. A claim has a short lease and is released when a job is cancelled, so a restart does not permanently strand a proxy.
 
@@ -56,6 +58,14 @@ flask --app app:create_app run --host 127.0.0.1 --port 8000
 python -m app.check_service
 ```
 
+Public registration is admitted before password hashing through shared per-client and global rate buckets. The production defaults allow 5 attempts per client and 100 attempts globally in 15 minutes; tune `EARN_PROXY_REGISTRATION_MAX_ATTEMPTS`, `EARN_PROXY_REGISTRATION_RATE_WINDOW_SECONDS`, and `EARN_PROXY_REGISTRATION_GLOBAL_MAX_ATTEMPTS` for the expected signup volume and any upstream CDN controls.
+
+Sign-in attempts are admitted through shared client-IP and global buckets before password verification. The defaults allow 30 attempts per client and 1000 globally in 15 minutes; an account-wide lockout is deliberately not used because it would let an unauthenticated caller deny service to a known account. Tune `EARN_PROXY_LOGIN_IP_MAX_ATTEMPTS`, `EARN_PROXY_LOGIN_GLOBAL_MAX_ATTEMPTS`, and `EARN_PROXY_LOGIN_RATE_WINDOW_SECONDS` alongside any upstream login protection.
+
+Approved contributors may keep up to 100 active proxy rows by default. Set `EARN_PROXY_MAX_ACTIVE_PROXIES_PER_USER` to match the expected per-account inventory; archived rows and historical earnings do not consume the quota.
+
+Each contributor may have up to 10 nonterminal payout requests (`requested`, `approved`, or `verifying`) queued at once. Terminal history (`confirmed`, `failed`, and legacy `sent`) remains durable without consuming this queue limit. Set `EARN_PROXY_MAX_OUTSTANDING_PAYOUTS_PER_USER` to tune the bound; values are clamped to 1-1000.
+
 ## Internal API
 
 Authenticate with `X-API-Key`. The canonical endpoint for new integrations is:
@@ -67,6 +77,8 @@ GET /api/v1/proxies?format=json
 
 The text response is newline-delimited raw proxy data. JSON adds the public classification (`Allow` or `Risk`), detected protocol, and endpoint. Only online, canonical proxies belonging to active users are returned. Existing clients may continue using `/internal/api/v1/proxies`, which is a compatibility alias with identical behavior.
 
+Administrators manage multiple revocable API keys at `/admin/integrations/api-keys`. A newly created or rotated token is revealed once; only its digest, prefix, and operational metadata are retained in SQLite.
+
 Example (keep the key in an environment variable):
 
 ```bash
@@ -76,25 +88,40 @@ curl -fsS -H "X-API-Key: ${EARN_PROXY_API_KEY}" "https://earn.proxy.acacondos.co
 
 ## Production deployment
 
-The included Compose file runs web, health, EarnApp, maintenance, and Caddy as separate restartable services:
+The included Compose file runs web, health, EarnApp, maintenance, payout verification, and Caddy as separate restartable services:
 
 ```powershell
 docker compose up -d --build
 docker compose ps
-docker compose logs --tail=100 health-checker earnapp-checker maintenance
+docker compose logs --tail=100 health-checker earnapp-checker maintenance payout-verifier
 ```
 
 For a native Ubuntu deployment, copy the systemd units from `deploy/`, set secrets in `/etc/earn-proxy.env`, and keep the SQLite database under `/var/lib/earn-proxy`:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now earn-proxy-web earn-proxy-checker earn-proxy-earnapp earn-proxy-maintenance
-sudo systemctl status earn-proxy-web earn-proxy-checker earn-proxy-earnapp earn-proxy-maintenance
+sudo systemctl enable --now earn-proxy-web earn-proxy-checker earn-proxy-earnapp earn-proxy-maintenance earn-proxy-payout-verifier
+sudo systemctl status earn-proxy-web earn-proxy-checker earn-proxy-earnapp earn-proxy-maintenance earn-proxy-payout-verifier
 ```
 
 The units use `Restart=always`, a five-second restart delay, a dedicated unprivileged account, and a restricted writable data path. Back up the SQLite database and Fernet key together before upgrades. To roll back, stop the services, restore the previous application directory and database/key pair, then start the same units again.
 
 Do not use the development placeholder secrets. Back up the SQLite database and Fernet key together; losing the key makes stored proxy credentials unrecoverable.
+
+### Payout verification configuration
+
+Set an HTTPS BSC JSON-RPC endpoint and keep the token settings explicit:
+
+```text
+EARN_PROXY_BSC_RPC_URL=https://bsc-dataseed.binance.org/
+EARN_PROXY_BSC_USDT_CONTRACT=0x55d398326f99059ff775485246999027b3197955
+EARN_PROXY_BSC_USDT_DECIMALS=18
+EARN_PROXY_BSC_MIN_CONFIRMATIONS=12
+```
+
+The verifier is read-only. It never signs or sends a transaction and must not receive a wallet private key. If the RPC is unavailable or returns an inconclusive response, the payout remains `verifying` and is retried; only a finalized receipt that matches all payout fields becomes `confirmed`.
+
+A failed payout releases its reservation so the contributor may request again. If an administrator retries it later, the transition rechecks the user's available balance under the same SQLite write lock, preventing the failed payout and a newer request from reserving the same earnings twice.
 
 ## Verification
 

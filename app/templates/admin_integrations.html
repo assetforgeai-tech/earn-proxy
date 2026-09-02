@@ -15,6 +15,7 @@
   <a href="{{ url_for('admin.users') }}">Users</a>
   <a href="{{ url_for('admin.payouts') }}">Payouts</a>
   <a href="{{ url_for('admin.integrations') }}" aria-current="page">API &amp; integrations</a>
+  <a href="{{ url_for('admin.api_keys_workspace') }}">API keys</a>
 </nav>
 
 <section class="panel integration-hero" aria-labelledby="integration-status-title">
@@ -33,6 +34,7 @@
     <button class="button ghost" type="button" data-copy-target="canonical-endpoint" aria-label="Copy canonical API endpoint">Copy endpoint</button>
   </div>
   <p class="field-hint">Legacy clients may continue using <code>{{ legacy_endpoint }}</code>; both paths return the same data.</p>
+  <p><a class="button ghost" href="{{ url_for('admin.api_keys_workspace') }}">Manage API keys</a></p>
 </section>
 
 <section class="panel" aria-labelledby="auth-title">

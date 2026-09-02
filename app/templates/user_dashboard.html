@@ -169,7 +169,7 @@
 <section id="payout-history" class="panel section-target">
   <div class="panel-head">
     <h2>Payout history</h2>
-    <span class="muted">Manual admin review</span>
+    <span class="muted">Manual transfer · automatic verification</span>
   </div>
   {% if payouts %}
     <div class="table-wrap">
@@ -187,7 +187,7 @@
           {% for payout in payouts %}
             <tr>
               <td data-label="Amount">${{ '%.6f'|format(payout.amount_micro_usd / 1000000) }}</td>
-              <td data-label="Status"><span class="badge {{ payout.status }}">{{ payout.status|capitalize }}</span></td>
+              <td data-label="Status"><span class="badge {{ payout.status }}">{{ payout.status|capitalize }}</span>{% if payout.status == 'verifying' %}<small class="field-hint">Confirming the submitted transaction on BSC.</small>{% elif payout.status == 'failed' %}<small class="field-error">Payment verification failed; admin review is required.</small>{% elif payout.status == 'confirmed' %}<small class="field-hint">Verified on-chain.</small>{% elif payout.status == 'sent' %}<small class="field-hint">Completed before automatic verification was enabled.</small>{% endif %}</td>
               <td data-label="Requested"><time datetime="{{ payout.created_at }}">{{ payout.created_at }}</time></td>
               <td data-label="Transaction hash" class="mono breakable">{{ payout.tx_hash or '-' }}</td>
             </tr>

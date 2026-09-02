@@ -11,9 +11,10 @@ from app.services.users import create_user
 def _online_proxy(db, user_id, raw, eligibility, exit_ip):
     proxy_id = add_proxy(db, user_id, raw)
     db.execute(
-        "UPDATE proxies SET status='online', eligibility=?, exit_ip=?, detected_protocol='socks5', "
-        "last_success_at=? WHERE id=?",
-        (eligibility, exit_ip, datetime.now(UTC).isoformat(), proxy_id),
+        "UPDATE proxies SET status='online', eligibility=?, exit_ip=?, egress_verified_at=?, "
+        "egress_attestation_source='https_quorum', "
+        "detected_protocol='socks5', last_success_at=? WHERE id=?",
+        (eligibility, exit_ip, datetime.now(UTC).isoformat(), datetime.now(UTC).isoformat(), proxy_id),
     )
     db.commit()
     return proxy_id
@@ -98,13 +99,51 @@ def test_api_excludes_online_rows_without_a_successful_health_observation(app, c
         user_id = create_user(db, "never-success@example.com", "password", status="active")
         proxy_id = add_proxy(db, user_id, "never-success.example:9001:u:p")
         db.execute(
-            "UPDATE proxies SET status='online', eligibility='allow', detected_protocol='socks5', exit_ip=? WHERE id=?",
-            ("198.51.100.40", proxy_id),
+            "UPDATE proxies SET status='online', eligibility='allow', detected_protocol='socks5', exit_ip=?, "
+            "egress_verified_at=? WHERE id=?",
+            ("198.51.100.40", datetime.now(UTC).isoformat(), proxy_id),
         )
         db.commit()
 
     response = client.get("/internal/api/v1/proxies", headers={"X-API-Key": "internal-test-key"})
 
+    assert response.get_data(as_text=True) == ""
+
+
+def test_api_excludes_rows_without_a_canonical_egress(app, client):
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "no-egress@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "no-egress.example:9001:u:p")
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', detected_protocol='socks5', "
+            "last_success_at=? WHERE id=?",
+            (datetime.now(UTC).isoformat(), proxy_id),
+        )
+        db.commit()
+
+    response = client.get("/internal/api/v1/proxies", headers={"X-API-Key": "internal-test-key"})
+
+    assert response.status_code == 200
+    assert response.get_data(as_text=True) == ""
+
+
+def test_api_excludes_legacy_egress_without_a_trusted_attestation_source(app, client):
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "legacy-egress-api@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "legacy-egress-api.example:9001:u:p")
+        now = datetime.now(UTC).isoformat()
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', detected_protocol='socks5', "
+            "exit_ip='198.51.100.44', egress_verified_at=?, last_success_at=? WHERE id=?",
+            (now, now, proxy_id),
+        )
+        db.commit()
+
+    response = client.get("/internal/api/v1/proxies", headers={"X-API-Key": "internal-test-key"})
+
+    assert response.status_code == 200
     assert response.get_data(as_text=True) == ""
 
 

@@ -191,6 +191,48 @@ def test_canonical_egress_change_rehomes_old_duplicates(app):
     assert values[old_duplicate]["duplicate_of"] is None
 
 
+def test_reconcile_exit_ip_clears_country_metadata_when_egress_changes(app):
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "country-reset@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "country-reset.example:9000:u:p")
+        db.execute(
+            "UPDATE proxies SET exit_ip='198.51.100.1', country_code='US' WHERE id=?",
+            (proxy_id,),
+        )
+        db.commit()
+
+        reconcile_exit_ip(db, proxy_id, "198.51.100.2")
+        row = db.execute("SELECT exit_ip, country_code FROM proxies WHERE id=?", (proxy_id,)).fetchone()
+
+    assert row["exit_ip"] == "198.51.100.2"
+    assert row["country_code"] == ""
+
+
+def test_unattested_legacy_exit_cannot_become_canonical_for_a_trusted_group(app):
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "attested-canonical@example.com", "password", status="active")
+        legacy = add_proxy(db, user_id, "legacy-canonical.example:9000:u:p")
+        trusted = add_proxy(db, user_id, "trusted-canonical.example:9001:u:p")
+        db.execute(
+            "UPDATE proxies SET exit_ip='198.51.100.25', egress_verified_at='2026-01-01T00:00:00+00:00' WHERE id=?",
+            (legacy,),
+        )
+        db.commit()
+
+        reconcile_exit_ip(db, trusted, "198.51.100.25", attestation_source="https_quorum")
+        rows = db.execute(
+            "SELECT id, duplicate_of, egress_attestation_source FROM proxies WHERE id IN (?,?) ORDER BY id",
+            (legacy, trusted),
+        ).fetchall()
+
+    assert rows[0]["egress_attestation_source"] == ""
+    assert rows[0]["duplicate_of"] is None
+    assert rows[1]["egress_attestation_source"] == "https_quorum"
+    assert rows[1]["duplicate_of"] is None
+
+
 def test_user_dashboard_masks_credentials(app, client):
     from conftest import login, login_admin, register
 

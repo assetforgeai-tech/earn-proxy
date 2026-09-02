@@ -46,8 +46,8 @@ def test_admin_dashboard_exposes_create_delete_and_payout_controls(app, client):
     assert 'action="/admin/users"' in users_page
     assert "Delete" in users_page
     assert "Payout queue" in payouts_page
-    assert "Approve payout" in payouts_page or "Mark sent" in payouts_page
-    assert "Transaction hash" in payouts_page
+    assert "Approve the request, transfer USDT manually" in payouts_page
+    assert "transaction hash" in payouts_page.lower()
 
 
 def test_internal_api_json_mode_labels_allow_and_risk(app, client):
@@ -58,12 +58,16 @@ def test_internal_api_json_mode_labels_allow_and_risk(app, client):
         second = add_proxy(db, user_id, "json-risk.example:9001:u:r")
         success_at = datetime.now(UTC).isoformat()
         db.execute(
-            "UPDATE proxies SET status='online', eligibility='allow', detected_protocol='socks5', last_success_at=? WHERE id=?",
-            (success_at, first),
+            "UPDATE proxies SET status='online', eligibility='allow', detected_protocol='socks5', "
+            "exit_ip='198.51.100.60', egress_verified_at=?, "
+            "egress_attestation_source='https_quorum', last_success_at=? WHERE id=?",
+            (success_at, success_at, first),
         )
         db.execute(
-            "UPDATE proxies SET status='online', eligibility='risk', detected_protocol='http', last_success_at=? WHERE id=?",
-            (success_at, second),
+            "UPDATE proxies SET status='online', eligibility='risk', detected_protocol='http', "
+            "exit_ip='198.51.100.61', egress_verified_at=?, "
+            "egress_attestation_source='https_quorum', last_success_at=? WHERE id=?",
+            (success_at, success_at, second),
         )
         db.commit()
     response = client.get(

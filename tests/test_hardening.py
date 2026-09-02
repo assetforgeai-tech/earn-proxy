@@ -14,6 +14,7 @@ def test_schema_contains_scheduler_and_egress_audit_columns(app):
         columns = {row["name"] for row in get_db().execute("PRAGMA table_info(proxies)").fetchall()}
     assert {
         "egress_verified_at",
+        "egress_attestation_source",
         "earnapp_claimed_until",
         "continuous_dead_since",
     }.issubset(columns)

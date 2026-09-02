@@ -2,11 +2,20 @@ from __future__ import annotations
 
 import sqlite3
 
-from flask import Blueprint, current_app, render_template, request, url_for
+from flask import Blueprint, current_app, g, jsonify, redirect, render_template, request, url_for
 
 from app.auth import admin_required
 from app.db import get_db
-from app.routes.forms import form_error, form_success
+from app.routes.forms import form_error, form_success, is_browser_form
+from app.services.api_keys import (
+    consume_api_key_reveal,
+    create_api_key,
+    create_api_key_reveal,
+    get_api_key_by_public_id,
+    list_api_keys,
+    revoke_api_key,
+    rotate_api_key,
+)
 from app.services.checks import (
     MAX_HEALTH_CONCURRENCY,
     MAX_PER_HOST_CONCURRENCY,
@@ -85,6 +94,99 @@ def integrations():
         health_stale_minutes=settings.health_stale_minutes,
         admin_section="integrations",
     )
+
+
+def _api_key_page(*, new_token: str | None = None, message: str | None = None, status: int = 200):
+    response = render_template(
+        "admin_api_keys.html",
+        api_keys=list_api_keys(get_db()),
+        new_token=new_token,
+        new_token_message=message,
+        admin_section="api_keys",
+    )
+    response = current_app.make_response((response, status))
+    # A one-time token may be present in this response; never let a browser or
+    # intermediary persist it in a cache or history-backed revalidation.
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@bp.get("/integrations/api-keys")
+@admin_required
+def api_keys_workspace():
+    reveal_id = str(request.args.get("reveal") or "")
+    pending = consume_api_key_reveal(get_db(), reveal_id) if reveal_id else None
+    if pending is not None:
+        return _api_key_page(new_token=pending[0], message=pending[1])
+    return _api_key_page()
+
+
+@bp.post("/integrations/api-keys")
+@admin_required
+def create_api_key_route():
+    try:
+        key_id, token = create_api_key(
+            get_db(),
+            request.form.get("name", ""),
+            created_by_user_id=int(g.user["id"]),
+        )
+    except ValueError as exc:
+        return form_error(str(exc), 400, "admin.api_keys_workspace", field="name", focus="api-key-name")
+    if is_browser_form():
+        reveal_id = create_api_key_reveal(get_db(), token, "Copy this token now. Secret material is never shown again.")
+        response = redirect(url_for("admin.api_keys_workspace", reveal=reveal_id), code=303)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    public_id = get_db().execute("SELECT public_id FROM api_keys WHERE id=?", (key_id,)).fetchone()["public_id"]
+    response = jsonify({"id": public_id, "public_id": public_id, "token": token})
+    response.status_code = 201
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@bp.post("/integrations/api-keys/<public_id>/revoke")
+@admin_required
+def revoke_api_key_route(public_id: str):
+    row = get_api_key_by_public_id(get_db(), public_id)
+    if row is None:
+        return form_error("API key not found", 404, "admin.api_keys_workspace")
+    try:
+        revoke_api_key(get_db(), int(row["id"]))
+    except LookupError as exc:
+        return form_error(str(exc), 404, "admin.api_keys_workspace")
+    return form_success(
+        {"id": public_id, "public_id": public_id, "status": "revoked"},
+        endpoint="admin.api_keys_workspace",
+        message="API key revoked.",
+    )
+
+
+@bp.post("/integrations/api-keys/<public_id>/rotate")
+@admin_required
+def rotate_api_key_route(public_id: str):
+    row = get_api_key_by_public_id(get_db(), public_id)
+    if row is None:
+        return form_error("API key not found", 404, "admin.api_keys_workspace")
+    try:
+        new_id, token = rotate_api_key(
+            get_db(),
+            int(row["id"]),
+            created_by_user_id=int(g.user["id"]),
+        )
+    except LookupError as exc:
+        return form_error(str(exc), 404, "admin.api_keys_workspace")
+    if is_browser_form():
+        reveal_id = create_api_key_reveal(
+            get_db(), token, "Copy this rotated token now. The previous token has been revoked."
+        )
+        response = redirect(url_for("admin.api_keys_workspace", reveal=reveal_id), code=303)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    new_public_id = get_db().execute("SELECT public_id FROM api_keys WHERE id=?", (new_id,)).fetchone()["public_id"]
+    response = jsonify({"id": new_public_id, "public_id": new_public_id, "token": token, "status": "rotated"})
+    response.status_code = 201
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @bp.post("/settings")
@@ -244,9 +346,9 @@ def approve_payout_route(payout_id: int):
     )
 
 
-@bp.post("/payouts/<int:payout_id>/sent")
+@bp.post("/payouts/<int:payout_id>/transaction")
 @admin_required
-def payout_sent(payout_id: int):
+def payout_transaction(payout_id: int):
     try:
         mark_payout_sent(get_db(), payout_id, request.form.get("tx_hash", ""))
     except (ValueError, LookupError) as exc:
@@ -258,7 +360,14 @@ def payout_sent(payout_id: int):
             focus=f"tx-{payout_id}",
         )
     return form_success(
-        {"id": payout_id, "status": "sent"},
+        {"id": payout_id, "status": "verifying"},
         endpoint="admin.payouts",
-        message="Payout marked as sent.",
+        message="Transaction submitted for automatic verification.",
     )
+
+
+@bp.post("/payouts/<int:payout_id>/sent")
+@admin_required
+def payout_sent_compat(payout_id: int):
+    """Keep the old endpoint working for existing admin tooling."""
+    return payout_transaction(payout_id=payout_id)

@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}API keys - Earn Proxy{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">DEVELOPER ACCESS</p>
+    <h1>Manage distribution API keys.</h1>
+    <p class="muted">Create a separate key for each internal client. Tokens are shown once and stored only as irreversible hashes.</p>
+  </div>
+</div>
+
+<nav class="section-nav" aria-label="Admin sections">
+  <a href="{{ url_for('admin.dashboard') }}">Overview</a>
+  <a href="{{ url_for('admin.checker') }}">Checker</a>
+  <a href="{{ url_for('admin.users') }}">Users</a>
+  <a href="{{ url_for('admin.payouts') }}">Payouts</a>
+  <a href="{{ url_for('admin.integrations') }}">API &amp; integrations</a>
+  <a href="{{ url_for('admin.api_keys_workspace') }}" aria-current="page">API keys</a>
+</nav>
+
+{% if new_token %}
+<section class="panel token-reveal" aria-labelledby="token-reveal-title">
+  <div class="panel-head">
+    <div>
+      <p class="eyebrow">ONE-TIME SECRET</p>
+      <h2 id="token-reveal-title">{{ new_token_message }}</h2>
+      <p class="muted">Copy this token to your client secret store now. It cannot be recovered after leaving this page.</p>
+    </div>
+  </div>
+  <div class="copy-field">
+    <code id="new-api-token" class="copy-value">{{ new_token }}</code>
+    <button class="button primary" type="button" data-copy-target="new-api-token" aria-label="Copy new API token">Copy token</button>
+  </div>
+  <p id="copy-status" class="copy-status" aria-live="polite"></p>
+</section>
+{% endif %}
+
+<section class="panel" aria-labelledby="create-key-title">
+  <div class="panel-head">
+    <div>
+      <h2 id="create-key-title">Create API key</h2>
+      <p class="muted">Use a descriptive name such as the consuming service or environment.</p>
+    </div>
+  </div>
+  <form method="post" action="{{ url_for('admin.create_api_key_route') }}" class="inline-form" data-submit-once="true">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="ui" value="1">
+    <div class="field-group">
+      <label for="api-key-name">Key name</label>
+      <input id="api-key-name" name="name" maxlength="80" autocomplete="off" placeholder="Internal distribution client" required aria-describedby="api-key-name-hint">
+      <small id="api-key-name-hint" class="field-hint">Up to 80 characters. Do not include the secret itself.</small>
+    </div>
+    <button class="button primary" type="submit" data-loading-label="Creating key...">Create key</button>
+  </form>
+</section>
+
+<section class="panel" aria-labelledby="key-list-title">
+  <div class="panel-head">
+    <div>
+      <h2 id="key-list-title">Active and revoked keys</h2>
+      <p class="muted">Only the prefix and operational metadata are displayed.</p>
+    </div>
+    <span class="muted">{{ api_keys|length }} key{{ '' if api_keys|length == 1 else 's' }}</span>
+  </div>
+  {% if api_keys %}
+    <div class="table-wrap">
+      <table class="responsive-table api-key-table">
+        <caption>API key inventory; full tokens are never listed</caption>
+        <thead><tr><th scope="col">Name</th><th scope="col">Prefix</th><th scope="col">Source</th><th scope="col">Created</th><th scope="col">Last used</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
+        <tbody>
+          {% for key in api_keys %}
+          <tr>
+            <th scope="row" data-label="Name" class="breakable">{{ key.name }}</th>
+            <td data-label="Prefix" class="mono breakable">{{ key.token_prefix }}</td>
+            <td data-label="Source">{{ key.source|capitalize }}</td>
+            <td data-label="Created"><time datetime="{{ key.created_at }}">{{ key.created_at }}</time></td>
+            <td data-label="Last used">{{ key.last_used_at or 'Never' }}</td>
+            <td data-label="Status"><span class="badge {{ 'revoked' if key.revoked_at else 'active' }}">{{ 'Revoked' if key.revoked_at else 'Active' }}</span></td>
+            <td data-label="Actions" class="actions">
+              {% if not key.revoked_at %}
+              <form method="post" action="{{ url_for('admin.rotate_api_key_route', public_id=key.public_id) }}" data-confirm-dialog data-confirm-title="Rotate API key?" data-confirm-message="The current token will stop working immediately. Copy the new token before leaving the page." data-confirm-label="Rotate key" data-submit-once="true">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1">
+                <button class="button small ghost" type="submit" data-confirm-trigger data-loading-label="Rotating..." disabled>Rotate</button>
+              </form>
+              <form method="post" action="{{ url_for('admin.revoke_api_key_route', public_id=key.public_id) }}" data-confirm-dialog data-confirm-title="Revoke API key?" data-confirm-message="Any client using this token will receive 401 immediately. This cannot be undone." data-confirm-label="Revoke key" data-submit-once="true">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1">
+                <button class="button small danger" type="submit" data-confirm-trigger data-loading-label="Revoking..." disabled>Revoke</button>
+              </form>
+              {% else %}<span class="muted">No actions</span>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="empty">No API keys yet. Create one for your first distribution client.</div>
+  {% endif %}
+</section>
+{% endblock %}

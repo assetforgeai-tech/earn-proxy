@@ -420,6 +420,11 @@ input[aria-invalid="true"] {
   color: var(--muted);
 }
 
+.field-hint code {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .field-error {
   color: var(--red);
   font-weight: 700;
@@ -632,7 +637,8 @@ thead th {
 .badge.allow,
 .badge.active,
 .badge.approved,
-.badge.sent {
+.badge.sent,
+.badge.confirmed {
   background: var(--teal-soft);
   color: #09614f;
 }
@@ -640,7 +646,9 @@ thead th {
 .badge.offline,
 .badge.risk,
 .badge.blocked,
-.badge.deleted {
+.badge.deleted,
+.badge.revoked,
+.badge.failed {
   background: var(--red-soft);
   color: #8f2c26;
 }
@@ -649,7 +657,8 @@ thead th {
 .badge.inconclusive,
 .badge.suspect,
 .badge.requested,
-.badge.stale {
+.badge.stale,
+.badge.verifying {
   background: var(--amber-soft);
   color: #80500b;
 }
@@ -703,6 +712,23 @@ thead th {
 
 .actions .field-hint {
   max-width: 220px;
+}
+
+.verification-error {
+  display: grid;
+  gap: 4px;
+  max-width: 280px;
+  color: var(--red);
+  font-size: 0.84rem;
+}
+
+.token-reveal {
+  border-color: #d9a83c;
+  background: linear-gradient(120deg, #fff7dc, #fffdf6);
+}
+
+.api-key-table {
+  min-width: 980px;
 }
 
 .empty {
@@ -768,9 +794,11 @@ thead th {
 
   .section-nav {
     top: 4px;
+    max-width: 100%;
     overflow-x: auto;
     flex-wrap: nowrap;
     scrollbar-width: thin;
+    overscroll-behavior-inline: contain;
   }
 
   .section-nav a {

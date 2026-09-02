@@ -410,3 +410,40 @@ def test_earnapp_batch_stop_releases_unprocessed_claims(app, monkeypatch):
     assert rows[1]["earnapp_claimed_until"] is None
     assert rows[1]["earnapp_claim_token"] is None
     assert datetime.fromisoformat(rows[1]["earnapp_next_check_at"]) <= datetime.now(UTC)
+
+
+def test_earnapp_batch_enriches_country_without_adding_work_to_health_checks(app, monkeypatch):
+    from app.db import get_db
+    from app.services.proxies import add_proxy
+    from app.services.users import create_user
+
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "earnapp-country@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "earnapp-country.example:9000:u:p")
+        db.execute(
+            "UPDATE proxies SET status='online', detected_protocol='socks5', exit_ip='8.8.8.8', "
+            "earnapp_next_check_at=datetime('now','-1 minute') WHERE id=?",
+            (proxy_id,),
+        )
+        db.commit()
+
+    async def probe(*_args, **_kwargs):
+        return {"verdict": "CID_SET", "reason": "cid", "exit_ip": "8.8.8.8"}
+
+    lookup_calls = []
+    monkeypatch.setattr("app.check_service.probe_earnapp_proxy", probe)
+    monkeypatch.setattr(
+        "app.check_service.lookup_country_cached",
+        lambda db, ip: lookup_calls.append((db, ip)) or {"country_code": "US"},
+    )
+
+    runner = CheckRunner(app=app, state=SchedulerState(concurrency=1), worker="earnapp")
+    assert runner.run_earnapp_batch() == 1
+
+    with app.app_context():
+        row = get_db().execute("SELECT country_code FROM proxies WHERE id=?", (proxy_id,)).fetchone()
+
+    assert row["country_code"] == "US"
+    assert len(lookup_calls) == 1
+    assert lookup_calls[0][1] == "8.8.8.8"

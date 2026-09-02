@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from flask import Blueprint, flash, g, redirect, request, url_for
+from flask import Blueprint, current_app, flash, g, redirect, request, url_for
 
 from app.auth import login_required
 from app.db import get_db
@@ -8,6 +8,7 @@ from app.proxy_parser import ProxyParseError
 from app.routes.forms import form_error, form_success, is_browser_form
 from app.services.proxies import (
     DuplicateCredential,
+    ProxyQuotaExceeded,
     add_proxy,
     archive_proxy,
     replace_proxy,
@@ -21,12 +22,40 @@ bp = Blueprint("proxies", __name__, url_prefix="/proxies")
 def create_proxy():
     if g.user["role"] != "user":
         return form_error("Only user accounts can add proxies", 403, "dashboard.dashboard")
+    db = get_db()
     try:
-        proxy_id = add_proxy(get_db(), g.user["id"], request.form.get("raw_proxy", ""))
+        quota = max(1, min(10_000, int(current_app.config.get("MAX_ACTIVE_PROXIES_PER_USER", 100))))
+    except (TypeError, ValueError):
+        quota = 100
+    # Fast rejection keeps malformed input out of the service when the quota
+    # is already exhausted; add_proxy repeats this check under a write lock.
+    active_count = int(
+        db.execute(
+            "SELECT COUNT(*) AS count FROM proxies WHERE user_id=? AND archived_at IS NULL",
+            (g.user["id"],),
+        ).fetchone()["count"]
+    )
+    if active_count >= quota:
+        return form_error(
+            f"This account has reached the maximum number of active proxies ({quota})",
+            429,
+            "dashboard.dashboard",
+            field="raw_proxy",
+            focus="raw_proxy",
+        )
+    try:
+        proxy_id = add_proxy(
+            db,
+            g.user["id"],
+            request.form.get("raw_proxy", ""),
+            max_active_proxies=quota,
+        )
     except ProxyParseError as exc:
         return form_error(str(exc), 400, "dashboard.dashboard", field="raw_proxy", focus="raw_proxy")
     except DuplicateCredential as exc:
         return form_error(str(exc), 409, "dashboard.dashboard", field="raw_proxy", focus="raw_proxy")
+    except ProxyQuotaExceeded as exc:
+        return form_error(str(exc), 429, "dashboard.dashboard", field="raw_proxy", focus="raw_proxy")
     return form_success(
         {"id": proxy_id, "status": "pending"},
         status=201,

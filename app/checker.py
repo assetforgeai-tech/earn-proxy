@@ -345,6 +345,7 @@ def _probe_result(
     probe_endpoint: str = "",
     next_probe_index: int = 0,
     failed_probe_endpoint: str = "",
+    egress_trusted: bool = False,
 ) -> dict:
     return {
         "status": status,
@@ -356,6 +357,7 @@ def _probe_result(
         "probe_endpoint": probe_endpoint,
         "next_probe_index": next_probe_index,
         "failed_probe_endpoint": failed_probe_endpoint,
+        "egress_trusted": bool(egress_trusted),
     }
 
 
@@ -608,6 +610,7 @@ def check_proxy_strong(
                     exit_ip=verified_ip,
                     latency_ms=latency,
                     probe_endpoint=",".join(PROBE_URLS),
+                    egress_trusted=True,
                 )
             for probe in HTTP_PROBE_URLS:
                 if time.monotonic() >= protocol_deadline:
@@ -646,10 +649,11 @@ def check_proxy_strong(
                 )
             if plain_ip:
                 return _probe_result(
-                    status="live",
+                    status="live_unverified",
                     protocol=protocol,
                     exit_ip=plain_ip,
                     latency_ms=latency,
+                    error="TLS probes unavailable; exit IP confirmed by independent plain HTTP probes",
                     probe_endpoint=",".join(HTTP_PROBE_URLS),
                 )
     if blocked_results:

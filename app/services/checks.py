@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import secrets
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -15,6 +16,17 @@ DEFAULT_HEALTH_CONCURRENCY = 5
 MAX_HEALTH_CONCURRENCY = 20
 DEFAULT_PER_HOST_CONCURRENCY = 2
 MAX_PER_HOST_CONCURRENCY = 3
+
+
+def _normalized_exit_ip(value: object) -> str:
+    """Accept only literal IP evidence before it can affect identity state."""
+    candidate = str(value or "").strip()
+    if not candidate:
+        return ""
+    try:
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        return ""
 
 
 @contextmanager
@@ -297,7 +309,8 @@ def _apply_earnapp_result_locked(db, proxy_id: int, result: dict, *, now: dateti
     eligibility = classify_verdict(verdict, reason)
     refresh = checker_settings(db).earnapp_refresh_hours
     previous = db.execute(
-        "SELECT eligibility, credential_generation, earnapp_claim_token, archived_at FROM proxies WHERE id=?",
+        "SELECT eligibility, credential_generation, earnapp_claim_token, archived_at, exit_ip, "
+        "egress_verified_at FROM proxies WHERE id=?",
         (proxy_id,),
     ).fetchone()
     if previous is None or previous["archived_at"] is not None:
@@ -309,16 +322,56 @@ def _apply_earnapp_result_locked(db, proxy_id: int, result: dict, *, now: dateti
     if expected_claim is not None and str(previous["earnapp_claim_token"] or "") != str(expected_claim):
         return
     previous_eligibility = str(previous["eligibility"] if previous else "")
+    result_exit_ip = _normalized_exit_ip(result.get("exit_ip"))
+    previous_exit_ip = _normalized_exit_ip(previous["exit_ip"])
+    attestation = result.get("egress_trusted")
+    # Older direct service callers do not provide an attestation field. Keep
+    # their eligibility/country behavior, but only an explicit true from the
+    # production probe may establish or reconcile canonical egress identity.
+    legacy_result = attestation is None
+    authenticated_exit_ip = result_exit_ip if attestation is True else ""
+    egress_changed = bool(authenticated_exit_ip and previous_exit_ip and authenticated_exit_ip != previous_exit_ip)
+    if verdict == "CID_SET" and not legacy_result and not authenticated_exit_ip:
+        eligibility = "pending"
+        reason = f"{reason}; missing authenticated egress IP".strip("; ")
+    if egress_changed:
+        eligibility = "pending"
+        reason = f"{reason}; authenticated egress changed".strip("; ")
+    country_code = str(result.get("country_code") or "").strip().upper()
+    country_evidence_ip = authenticated_exit_ip or (result_exit_ip if legacy_result else "")
+    verified_country_code = (
+        country_code
+        if len(country_code) == 2
+        and country_code.isalpha()
+        and country_evidence_ip
+        and country_evidence_ip == previous_exit_ip
+        else ""
+    )
+    if legacy_result and result_exit_ip and result_exit_ip != previous_exit_ip:
+        # Compatibility callers may report a changed address, but that value
+        # is not an attested source; retain prior country metadata.
+        verified_country_code = ""
     changed = previous is not None and previous_eligibility != eligibility
     if changed and previous_eligibility == "allow":
         # Capture the last eligible interval before invalidating its cycle.
         accrue_proxy_time(db, proxy_id, now=current)
-    reset = previous is not None and previous_eligibility != eligibility
+    reset = bool(changed or egress_changed)
     if reset:
         reset_probation(db, proxy_id, current)
+    if authenticated_exit_ip:
+        # EarnApp supplies ext_ip over its authenticated TLS channel, making it
+        # authoritative for duplicate identity and egress changes.
+        reconcile_exit_ip(
+            db,
+            proxy_id,
+            authenticated_exit_ip,
+            attestation_source="earnapp_tls",
+            commit=False,
+        )
     db.execute(
         """
         UPDATE proxies SET eligibility=?, earnapp_verdict=?, earnapp_reason=?, earnapp_checked_at=?,
+            country_code=CASE WHEN ?<>'' THEN ? ELSE country_code END,
             earnapp_next_check_at=?, earnapp_claimed_until=NULL, earnapp_claim_token=NULL,
             probation_started_at=CASE WHEN ? THEN ? ELSE probation_started_at END,
             accrual_cursor_at=CASE WHEN ? THEN ? ELSE accrual_cursor_at END, updated_at=? WHERE id=?
@@ -328,7 +381,9 @@ def _apply_earnapp_result_locked(db, proxy_id: int, result: dict, *, now: dateti
             verdict[:60],
             reason[:300],
             current.isoformat(),
-            (current + timedelta(hours=refresh)).isoformat(),
+            verified_country_code,
+            verified_country_code,
+            (current.isoformat() if egress_changed else (current + timedelta(hours=refresh)).isoformat()),
             int(reset),
             current.isoformat(),
             int(reset),
@@ -379,6 +434,10 @@ def _apply_health_result_locked(db, proxy_id: int, result: dict, *, now: datetim
         latency_ms = None
 
     if status in {"live", "live_unverified"}:
+        # The checker explicitly marks plain HTTP/insecure evidence as
+        # untrusted. Legacy injected hooks that omit the field retain their
+        # historical behavior; production checker results always include it.
+        egress_trusted = result.get("egress_trusted", True) is True
         recovered_from_offline = row["status"] == "offline"
         accumulated_offline = int(row["accumulated_offline_seconds"] or 0)
         if row["status"] == "offline" and row["offline_since"]:
@@ -386,18 +445,23 @@ def _apply_health_result_locked(db, proxy_id: int, result: dict, *, now: datetim
                 0,
                 int((current - datetime.fromisoformat(row["offline_since"])).total_seconds()),
             )
-        previous_exit_ip = str(row["exit_ip"] or "")
-        next_exit_ip = str(result.get("exit_ip") or previous_exit_ip)
-        egress_changed = bool(previous_exit_ip and next_exit_ip and previous_exit_ip != next_exit_ip)
+        previous_exit_ip = _normalized_exit_ip(row["exit_ip"])
+        observed_exit_ip = _normalized_exit_ip(result.get("exit_ip"))
+        trusted_exit_ip = observed_exit_ip if egress_trusted else ""
+        egress_changed = bool(previous_exit_ip and trusted_exit_ip and previous_exit_ip != trusted_exit_ip)
+        untrusted_egress_mismatch = bool(
+            not egress_trusted and previous_exit_ip and observed_exit_ip and observed_exit_ip != previous_exit_ip
+        )
+        missing_trusted_egress = not previous_exit_ip and not trusted_exit_ip
         previous_success = datetime.fromisoformat(row["last_success_at"]) if row["last_success_at"] else None
         stale_recovery = bool(
             row["status"] in {"online", "suspect"}
             and previous_success
             and current > previous_success + timedelta(minutes=settings.health_stale_minutes)
         )
-        if (egress_changed or stale_recovery) and row["eligibility"] == "allow":
+        if (egress_changed or untrusted_egress_mismatch or stale_recovery) and row["eligibility"] == "allow":
             accrue_proxy_time(db, proxy_id, now=current)
-        if egress_changed or stale_recovery:
+        if egress_changed or untrusted_egress_mismatch or stale_recovery:
             reset_probation(db, proxy_id, current)
         online_since = current.isoformat() if stale_recovery else (row["online_since"] or current.isoformat())
         accumulated_online = int(row["accumulated_online_seconds"] or 0)
@@ -410,10 +474,13 @@ def _apply_health_result_locked(db, proxy_id: int, result: dict, *, now: datetim
                 0,
                 int((observed_until - datetime.fromisoformat(row["online_since"])).total_seconds()),
             )
-        continuity_reset = recovered_from_offline or egress_changed or stale_recovery
+        continuity_reset = recovered_from_offline or egress_changed or untrusted_egress_mismatch or stale_recovery
+        requires_strong = (
+            not egress_trusted and (not previous_exit_ip or untrusted_egress_mismatch)
+        ) or missing_trusted_egress
         db.execute(
             """
-            UPDATE proxies SET status='online', detected_protocol=?, consecutive_failures=0, health_mode='fast',
+            UPDATE proxies SET status='online', detected_protocol=?, consecutive_failures=0, health_mode=?,
                 online_since=?, offline_since=NULL, last_checked_at=?, check_claimed_until=NULL, check_claim_token=NULL,
                 accumulated_online_seconds=?, accumulated_offline_seconds=?, continuous_dead_since=NULL, egress_verified_at=?, eligibility=?, earnapp_next_check_at=?, probation_started_at=?,
                 earnapp_claimed_until=CASE WHEN ? THEN NULL ELSE earnapp_claimed_until END,
@@ -423,20 +490,25 @@ def _apply_health_result_locked(db, proxy_id: int, result: dict, *, now: datetim
             """,
             (
                 result.get("protocol") or row["detected_protocol"],
+                "strong" if requires_strong else "fast",
                 online_since,
                 current.isoformat(),
                 accumulated_online,
                 accumulated_offline,
                 (
                     current.isoformat()
-                    if next_exit_ip and (not row["egress_verified_at"] or egress_changed)
+                    if trusted_exit_ip and (not row["egress_verified_at"] or egress_changed)
                     else row["egress_verified_at"]
                 ),
-                "pending" if egress_changed else row["eligibility"],
-                current.isoformat() if egress_changed else row["earnapp_next_check_at"],
+                "pending"
+                if (egress_changed or untrusted_egress_mismatch or missing_trusted_egress)
+                else row["eligibility"],
+                current.isoformat()
+                if (egress_changed or untrusted_egress_mismatch or missing_trusted_egress)
+                else row["earnapp_next_check_at"],
                 current.isoformat() if continuity_reset else row["probation_started_at"],
-                int(egress_changed or stale_recovery),
-                int(egress_changed or stale_recovery),
+                int(egress_changed or untrusted_egress_mismatch or stale_recovery),
+                int(egress_changed or untrusted_egress_mismatch or stale_recovery),
                 current.isoformat() if continuity_reset else row["accrual_cursor_at"],
                 current.isoformat(),
                 (current + timedelta(minutes=settings.health_interval_minutes)).isoformat(),
@@ -448,8 +520,14 @@ def _apply_health_result_locked(db, proxy_id: int, result: dict, *, now: datetim
                 proxy_id,
             ),
         )
-        if result.get("exit_ip"):
-            reconcile_exit_ip(db, proxy_id, str(result["exit_ip"]), commit=False)
+        if trusted_exit_ip:
+            reconcile_exit_ip(
+                db,
+                proxy_id,
+                trusted_exit_ip,
+                attestation_source="https_quorum",
+                commit=False,
+            )
         return
 
     if status == "inconclusive" or (

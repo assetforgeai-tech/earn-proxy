@@ -533,6 +533,72 @@ def test_egress_change_schedules_new_earnapp_qualification(app):
     assert datetime.fromisoformat(row["earnapp_next_check_at"]) <= now
 
 
+def test_earnapp_result_persists_country_for_the_verified_egress(app):
+    now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "country@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "proxy.example:9000:u:p")
+        db.execute(
+            "UPDATE proxies SET status='online', exit_ip='8.8.8.8', earnapp_claim_token='country-claim' WHERE id=?",
+            (proxy_id,),
+        )
+        db.commit()
+
+        apply_earnapp_result(
+            db,
+            proxy_id,
+            {
+                "verdict": "CID_SET",
+                "reason": "cid",
+                "exit_ip": "8.8.8.8",
+                "country_code": "US",
+                "_earnapp_claim_token": "country-claim",
+            },
+            now=now,
+        )
+        row = db.execute(
+            "SELECT eligibility, country_code FROM proxies WHERE id=?",
+            (proxy_id,),
+        ).fetchone()
+
+    assert row["eligibility"] == "allow"
+    assert row["country_code"] == "US"
+
+
+def test_earnapp_result_does_not_apply_country_from_a_different_egress(app):
+    now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "country-mismatch@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "proxy.example:9000:u:p")
+        db.execute(
+            "UPDATE proxies SET status='online', exit_ip='8.8.8.8', country_code='US', "
+            "earnapp_claim_token='country-claim' WHERE id=?",
+            (proxy_id,),
+        )
+        db.commit()
+
+        apply_earnapp_result(
+            db,
+            proxy_id,
+            {
+                "verdict": "CID_SET",
+                "reason": "cid",
+                "exit_ip": "1.1.1.1",
+                "country_code": "AU",
+                "_earnapp_claim_token": "country-claim",
+            },
+            now=now,
+        )
+        row = db.execute(
+            "SELECT country_code FROM proxies WHERE id=?",
+            (proxy_id,),
+        ).fetchone()
+
+    assert row["country_code"] == "US"
+
+
 def test_egress_change_expires_pending_balance_from_previous_cycle(app):
     now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
     with app.app_context():
@@ -785,6 +851,209 @@ def test_repeated_health_observations_do_not_refresh_egress_verification_time(ap
             "egress_verified_at"
         ]
     assert final == initial
+
+
+def test_untrusted_health_evidence_cannot_establish_or_change_canonical_egress(app):
+    now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "untrusted-egress@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "untrusted-egress.example:9000:u:p")
+        apply_health_result(
+            db,
+            proxy_id,
+            {
+                "status": "live_unverified",
+                "protocol": "socks5",
+                "exit_ip": "198.51.100.77",
+                "egress_trusted": False,
+            },
+            now=now,
+        )
+        row = db.execute(
+            "SELECT status, eligibility, health_mode, exit_ip, egress_verified_at FROM proxies WHERE id=?",
+            (proxy_id,),
+        ).fetchone()
+
+    assert row["status"] == "online"
+    assert row["eligibility"] == "pending"
+    assert row["health_mode"] == "strong"
+    assert row["exit_ip"] is None
+    assert row["egress_verified_at"] is None
+
+
+def test_untrusted_health_mismatch_requalifies_without_rehoming_egress(app):
+    now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "untrusted-mismatch@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "untrusted-mismatch.example:9000:u:p")
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', exit_ip=?, egress_verified_at=?, "
+            "last_success_at=?, online_since=?, probation_started_at=?, accrual_cursor_at=? WHERE id=?",
+            (
+                "198.51.100.10",
+                now.isoformat(),
+                now.isoformat(),
+                now.isoformat(),
+                now.isoformat(),
+                now.isoformat(),
+                proxy_id,
+            ),
+        )
+        db.commit()
+        apply_health_result(
+            db,
+            proxy_id,
+            {
+                "status": "live",
+                "protocol": "socks5",
+                "exit_ip": "198.51.100.11",
+                "egress_trusted": False,
+            },
+            now=now + timedelta(minutes=1),
+        )
+        row = db.execute(
+            "SELECT status, eligibility, exit_ip, egress_verified_at, earnapp_next_check_at FROM proxies WHERE id=?",
+            (proxy_id,),
+        ).fetchone()
+
+    assert row["status"] == "online"
+    assert row["eligibility"] == "pending"
+    assert row["exit_ip"] == "198.51.100.10"
+    assert row["egress_verified_at"] == now.isoformat()
+    assert datetime.fromisoformat(row["earnapp_next_check_at"]) <= now + timedelta(minutes=1)
+
+
+def test_trusted_health_evidence_reconciles_canonical_egress(app):
+    now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "trusted-egress@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "trusted-egress.example:9000:u:p")
+        apply_health_result(
+            db,
+            proxy_id,
+            {
+                "status": "live",
+                "protocol": "socks5",
+                "exit_ip": "198.51.100.88",
+                "egress_trusted": True,
+            },
+            now=now,
+        )
+        row = db.execute(
+            "SELECT status, exit_ip, egress_verified_at, egress_attestation_source FROM proxies WHERE id=?",
+            (proxy_id,),
+        ).fetchone()
+
+    assert row["status"] == "online"
+    assert row["exit_ip"] == "198.51.100.88"
+    assert row["egress_verified_at"] == now.isoformat()
+    assert row["egress_attestation_source"] == "https_quorum"
+
+
+def test_earnapp_authenticated_egress_reconciles_duplicates_globally(app):
+    now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "earnapp-duplicate@example.com", "password", status="active")
+        first = add_proxy(db, user_id, "earnapp-first.example:9000:u:first")
+        second = add_proxy(db, user_id, "earnapp-second.example:9001:u:second")
+        db.execute(
+            "UPDATE proxies SET status='online', exit_ip=?, egress_verified_at=?, "
+            "egress_attestation_source='https_quorum', earnapp_claim_token=? WHERE id=?",
+            ("198.51.100.99", now.isoformat(), "claim-first", first),
+        )
+        db.execute(
+            "UPDATE proxies SET status='online', earnapp_claim_token=? WHERE id=?",
+            ("claim-second", second),
+        )
+        db.commit()
+        apply_earnapp_result(
+            db,
+            second,
+            {
+                "verdict": "CID_SET",
+                "reason": "cid",
+                "exit_ip": "198.51.100.99",
+                "egress_trusted": True,
+                "_earnapp_claim_token": "claim-second",
+            },
+            now=now,
+        )
+        rows = db.execute(
+            "SELECT id, exit_ip, duplicate_of, eligibility, egress_attestation_source "
+            "FROM proxies WHERE id IN (?,?) ORDER BY id",
+            (first, second),
+        ).fetchall()
+
+    assert rows[0]["exit_ip"] == "198.51.100.99"
+    assert rows[1]["exit_ip"] == "198.51.100.99"
+    assert rows[0]["duplicate_of"] is None
+    assert rows[1]["duplicate_of"] == first
+    assert rows[1]["eligibility"] == "allow"
+    assert rows[1]["egress_attestation_source"] == "earnapp_tls"
+
+
+def test_earnapp_egress_mismatch_requires_requalification(app):
+    now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "earnapp-mismatch@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "earnapp-mismatch.example:9000:u:p")
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', exit_ip=?, egress_verified_at=?, "
+            "earnapp_claim_token=? WHERE id=?",
+            ("198.51.100.100", now.isoformat(), "claim", proxy_id),
+        )
+        db.commit()
+        apply_earnapp_result(
+            db,
+            proxy_id,
+            {
+                "verdict": "CID_SET",
+                "reason": "cid",
+                "exit_ip": "198.51.100.101",
+                "egress_trusted": True,
+                "_earnapp_claim_token": "claim",
+            },
+            now=now + timedelta(minutes=1),
+        )
+        row = db.execute(
+            "SELECT eligibility, exit_ip, earnapp_next_check_at, probation_started_at FROM proxies WHERE id=?",
+            (proxy_id,),
+        ).fetchone()
+
+    assert row["eligibility"] == "pending"
+    assert row["exit_ip"] == "198.51.100.101"
+    assert datetime.fromisoformat(row["earnapp_next_check_at"]) <= now + timedelta(minutes=1)
+    assert row["probation_started_at"] == (now + timedelta(minutes=1)).isoformat()
+
+
+def test_cid_set_without_authenticated_egress_cannot_become_allow(app):
+    now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "earnapp-no-egress@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "earnapp-no-egress.example:9000:u:p")
+        db.execute("UPDATE proxies SET status='online', earnapp_claim_token='claim' WHERE id=?", (proxy_id,))
+        db.commit()
+        apply_earnapp_result(
+            db,
+            proxy_id,
+            {
+                "verdict": "CID_SET",
+                "reason": "cid",
+                "egress_trusted": False,
+                "_earnapp_claim_token": "claim",
+            },
+            now=now,
+        )
+        row = db.execute("SELECT eligibility, exit_ip FROM proxies WHERE id=?", (proxy_id,)).fetchone()
+
+    assert row["eligibility"] == "pending"
+    assert row["exit_ip"] is None
 
 
 def test_confirmed_offline_transition_expires_old_pending_probation_cycle(app):

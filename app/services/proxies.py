@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 from datetime import UTC, datetime, timedelta
 
 from app.crypto import decrypt_secret, encrypt_secret
@@ -12,15 +13,34 @@ class DuplicateCredential(ValueError):
     pass
 
 
+class ProxyQuotaExceeded(ValueError):
+    pass
+
+
 def credential_fingerprint(parsed: ParsedProxy) -> str:
     normalized = "\0".join([parsed.host.lower(), str(parsed.port), parsed.username, parsed.password])
     return hashlib.sha256(normalized.encode()).hexdigest()
 
 
-def add_proxy(db, user_id: int, raw_proxy: str) -> int:
-    parsed = parse_proxy(raw_proxy)
-    now = datetime.now(UTC).isoformat()
+def add_proxy(db, user_id: int, raw_proxy: str, *, max_active_proxies: int | None = None) -> int:
+    quota = None
+    if max_active_proxies is not None:
+        quota = max(1, min(10_000, int(max_active_proxies)))
+        # Serialize the quota check with the insert so parallel requests cannot
+        # both observe the same available slot.
+        db.execute("BEGIN IMMEDIATE")
     try:
+        if quota is not None:
+            active_count = int(
+                db.execute(
+                    "SELECT COUNT(*) AS count FROM proxies WHERE user_id=? AND archived_at IS NULL",
+                    (user_id,),
+                ).fetchone()["count"]
+            )
+            if active_count >= quota:
+                raise ProxyQuotaExceeded(f"This account has reached the maximum number of active proxies ({quota})")
+        parsed = parse_proxy(raw_proxy)
+        now = datetime.now(UTC).isoformat()
         cursor = db.execute(
             """
             INSERT INTO proxies(
@@ -46,6 +66,7 @@ def add_proxy(db, user_id: int, raw_proxy: str) -> int:
         )
         db.commit()
     except Exception as exc:
+        db.rollback()
         if "credential_fingerprint" in str(exc) or "UNIQUE constraint failed: proxies.credential_fingerprint" in str(
             exc
         ):
@@ -80,7 +101,8 @@ def replace_proxy(db, proxy_id: int, user_id: int, raw_proxy: str, *, now: datet
             credential_fingerprint=?, credential_generation=credential_generation+1,
             detected_protocol='unknown', status='pending', eligibility='pending',
             earnapp_verdict='', earnapp_reason='', earnapp_checked_at=NULL, earnapp_next_check_at=NULL,
-            earnapp_claimed_until=NULL, earnapp_claim_token=NULL, egress_verified_at=NULL, exit_ip=NULL, country_code='',
+            earnapp_claimed_until=NULL, earnapp_claim_token=NULL, egress_verified_at=NULL,
+            egress_attestation_source='', exit_ip=NULL, country_code='',
             duplicate_of=NULL, consecutive_failures=0, online_since=NULL,
             offline_since=NULL, last_checked_at=NULL, last_success_at=NULL, next_check_at=?,
             check_claimed_until=NULL, check_claim_token=NULL, health_mode='strong', next_probe_index=0,
@@ -166,9 +188,17 @@ def reveal_proxy(row) -> ParsedProxy:
     )
 
 
-def reconcile_exit_ip(db, proxy_id: int, exit_ip: str, *, commit: bool = True) -> None:
-    normalized_exit = str(exit_ip or "").strip()
-    if not normalized_exit:
+def reconcile_exit_ip(
+    db,
+    proxy_id: int,
+    exit_ip: str,
+    *,
+    attestation_source: str = "https_quorum",
+    commit: bool = True,
+) -> None:
+    try:
+        normalized_exit = str(ipaddress.ip_address(str(exit_ip or "").strip()))
+    except ValueError:
         return
     now = datetime.now(UTC).isoformat()
     previous = db.execute(
@@ -179,19 +209,27 @@ def reconcile_exit_ip(db, proxy_id: int, exit_ip: str, *, commit: bool = True) -
         return
     previous_exit = str(previous["exit_ip"] or "")
     had_verified_timestamp = bool(previous["egress_verified_at"])
+    source = str(attestation_source or "").strip().lower()
+    if source not in {"https_quorum", "earnapp_tls"}:
+        return
     db.execute(
         """
         UPDATE proxies
         SET exit_ip=?,
+            country_code=CASE
+                WHEN COALESCE(exit_ip,'')<>'' AND COALESCE(exit_ip,'')<>? THEN ''
+                ELSE country_code
+            END,
             egress_verified_at=CASE
                 WHEN COALESCE(exit_ip,'')<>? AND COALESCE(exit_ip,'')<>''
                      AND egress_verified_at IS NOT NULL THEN ?
                 ELSE COALESCE(egress_verified_at, ?)
             END,
+            egress_attestation_source=?,
             updated_at=?
         WHERE id=?
         """,
-        (normalized_exit, normalized_exit, now, now, now, proxy_id),
+        (normalized_exit, normalized_exit, normalized_exit, now, now, source, now, proxy_id),
     )
     _canonicalize_exit_group(db, normalized_exit, prefer_verified_order=had_verified_timestamp)
     if previous_exit and previous_exit != normalized_exit:
@@ -210,12 +248,14 @@ def _canonicalize_exit_group(
     """Choose one stable distributor for an egress IP and rehome duplicates."""
     if exclude_id is None:
         rows = db.execute(
-            "SELECT * FROM proxies WHERE exit_ip=? AND archived_at IS NULL",
+            "SELECT * FROM proxies WHERE exit_ip=? AND archived_at IS NULL "
+            "AND egress_attestation_source IN ('https_quorum','earnapp_tls')",
             (exit_ip,),
         ).fetchall()
     else:
         rows = db.execute(
-            "SELECT * FROM proxies WHERE exit_ip=? AND archived_at IS NULL AND id<>?",
+            "SELECT * FROM proxies WHERE exit_ip=? AND archived_at IS NULL AND id<>? "
+            "AND egress_attestation_source IN ('https_quorum','earnapp_tls')",
             (exit_ip, exclude_id),
         ).fetchall()
     if not rows:
@@ -238,7 +278,8 @@ def _canonicalize_exit_group(
     canonical = min(candidates, key=key)["id"]
     db.execute("UPDATE proxies SET duplicate_of=NULL WHERE id=?", (canonical,))
     db.execute(
-        "UPDATE proxies SET duplicate_of=? WHERE exit_ip=? AND id<>? AND archived_at IS NULL"
+        "UPDATE proxies SET duplicate_of=? WHERE exit_ip=? AND id<>? AND archived_at IS NULL "
+        "AND egress_attestation_source IN ('https_quorum','earnapp_tls')"
         + (" AND id<>?" if exclude_id is not None else ""),
         (canonical, exit_ip, canonical, exclude_id) if exclude_id is not None else (canonical, exit_ip, canonical),
     )

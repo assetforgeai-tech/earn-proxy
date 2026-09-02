@@ -48,10 +48,25 @@ def create_app(test_config: dict | None = None) -> Flask:
         INTERNAL_API_KEY=os.environ.get("EARN_PROXY_INTERNAL_API_KEY", ""),
         ADMIN_EMAIL=os.environ.get("EARN_PROXY_ADMIN_EMAIL", "admin@example.com"),
         ADMIN_PASSWORD=os.environ.get("EARN_PROXY_ADMIN_PASSWORD", ""),
+        BSC_RPC_URL=os.environ.get("EARN_PROXY_BSC_RPC_URL", ""),
+        BSC_USDT_CONTRACT=os.environ.get(
+            "EARN_PROXY_BSC_USDT_CONTRACT",
+            "0x55d398326f99059ff775485246999027b3197955",
+        ),
+        BSC_USDT_DECIMALS=int(os.environ.get("EARN_PROXY_BSC_USDT_DECIMALS", "18")),
+        BSC_MIN_CONFIRMATIONS=int(os.environ.get("EARN_PROXY_BSC_MIN_CONFIRMATIONS", "12")),
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=os.environ.get("EARN_PROXY_COOKIE_SECURE", "1") == "1",
         CSRF_ENABLED=True,
+        REGISTRATION_MAX_ATTEMPTS=int(os.environ.get("EARN_PROXY_REGISTRATION_MAX_ATTEMPTS", "5")),
+        REGISTRATION_RATE_WINDOW_SECONDS=int(os.environ.get("EARN_PROXY_REGISTRATION_RATE_WINDOW_SECONDS", "900")),
+        REGISTRATION_GLOBAL_MAX_ATTEMPTS=int(os.environ.get("EARN_PROXY_REGISTRATION_GLOBAL_MAX_ATTEMPTS", "100")),
+        LOGIN_IP_MAX_ATTEMPTS=int(os.environ.get("EARN_PROXY_LOGIN_IP_MAX_ATTEMPTS", "30")),
+        LOGIN_GLOBAL_MAX_ATTEMPTS=int(os.environ.get("EARN_PROXY_LOGIN_GLOBAL_MAX_ATTEMPTS", "1000")),
+        LOGIN_RATE_WINDOW_SECONDS=int(os.environ.get("EARN_PROXY_LOGIN_RATE_WINDOW_SECONDS", "900")),
+        MAX_ACTIVE_PROXIES_PER_USER=int(os.environ.get("EARN_PROXY_MAX_ACTIVE_PROXIES_PER_USER", "100")),
+        MAX_OUTSTANDING_PAYOUTS_PER_USER=int(os.environ.get("EARN_PROXY_MAX_OUTSTANDING_PAYOUTS_PER_USER", "10")),
         MAX_CONTENT_LENGTH=64 * 1024,
         MAX_FORM_MEMORY_SIZE=64 * 1024,
         MAX_FORM_PARTS=64,
@@ -73,8 +88,8 @@ def create_app(test_config: dict | None = None) -> Flask:
     db.init_app(app)
     security.init_app(app)
     app.before_request(auth.load_logged_in_user)
-    # Caddy terminates TLS; trust only its forwarded scheme for secure links.
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1)
+    # Caddy terminates TLS and supplies the client address/scheme headers.
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
     from app.routes import admin, dashboard, internal_api, proxies, wallets
     from app.routes import auth as auth_routes
@@ -149,6 +164,11 @@ def create_app(test_config: dict | None = None) -> Flask:
 
     with app.app_context():
         database = db.get_db()
+        from app.services.api_keys import ensure_legacy_api_key
+
+        # Keep the pre-existing environment key working while moving auth to
+        # revocable, database-backed key records. Only its digest is stored.
+        ensure_legacy_api_key(database, app.config.get("INTERNAL_API_KEY"))
         admin_email = str(app.config.get("ADMIN_EMAIL") or "").strip().lower()
         admin_password = str(app.config.get("ADMIN_PASSWORD") or "")
         if admin_email and admin_password:

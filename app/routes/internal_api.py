@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import hmac
 from datetime import UTC, datetime, timedelta
 
 from flask import Blueprint, Response, current_app, jsonify, request
 
 from app.db import get_db
+from app.services.api_keys import authenticate_api_key
 from app.services.checks import checker_settings
 from app.services.proxies import reveal_proxy
 from app.services.settings import get_setting
@@ -18,8 +18,7 @@ api_bp = Blueprint("api", __name__, url_prefix="/api/v1")
 @api_bp.get("/proxies")
 def list_proxies():
     supplied = str(request.headers.get("X-API-Key") or "")
-    expected = str(current_app.config.get("INTERNAL_API_KEY") or "")
-    if not expected or not hmac.compare_digest(supplied, expected):
+    if authenticate_api_key(get_db(), supplied) is None:
         return Response("Unauthorized\n", status=401, mimetype="text/plain")
     db = get_db()
     enabled = []
@@ -36,6 +35,8 @@ def list_proxies():
         SELECT p.* FROM proxies p JOIN users u ON u.id=p.user_id
         WHERE p.archived_at IS NULL AND p.status='online' AND p.duplicate_of IS NULL
           AND p.eligibility IN ({placeholders}) AND u.status='active'
+          AND p.exit_ip IS NOT NULL AND trim(p.exit_ip) <> ''
+          AND p.egress_attestation_source IN ('https_quorum','earnapp_tls')
           AND p.last_success_at IS NOT NULL AND p.last_success_at >= ?
         ORDER BY p.id
         """,

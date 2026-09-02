@@ -28,6 +28,7 @@
   <a href="{{ url_for('admin.users') }}"{% if admin_section == 'users' %} aria-current="page"{% endif %}>Users</a>
   <a href="{{ url_for('admin.payouts') }}"{% if admin_section == 'payouts' %} aria-current="page"{% endif %}>Payouts</a>
   <a href="{{ url_for('admin.integrations') }}"{% if admin_section == 'integrations' %} aria-current="page"{% endif %}>API &amp; integrations</a>
+  <a href="{{ url_for('admin.api_keys_workspace') }}"{% if admin_section == 'api_keys' %} aria-current="page"{% endif %}>API keys</a>
 </nav>
 
 {% if admin_section == 'overview' and stats %}
@@ -166,11 +167,11 @@
 
 {% if admin_section == 'payouts' %}
 <section id="payout-queue" class="panel section-target">
-  <div class="panel-head"><div><h2>Payout queue</h2><p class="muted">Approve before entering a transaction hash.</p></div><span class="muted">{{ payouts|length }} request{{ '' if payouts|length == 1 else 's' }}</span></div>
+  <div class="panel-head"><div><h2>Payout queue</h2><p class="muted">Approve the request, transfer USDT manually, then submit the transaction hash for automatic on-chain verification.</p></div><span class="muted">{{ payouts|length }} request{{ '' if payouts|length == 1 else 's' }}</span></div>
   {% if payouts %}
     <div class="table-wrap">
       <table class="responsive-table">
-        <caption>Payout requests awaiting manual administration</caption>
+        <caption>Manual payout approvals with automatic BSC transaction verification</caption>
         <thead><tr><th scope="col">User</th><th scope="col">Amount</th><th scope="col">Status</th><th scope="col">Transaction hash</th><th scope="col">Actions</th></tr></thead>
         <tbody>
           {% for payout in payouts %}
@@ -178,19 +179,37 @@
               <th scope="row" data-label="User" class="breakable">{{ payout.email }}</th>
               <td data-label="Amount">${{ '%.6f'|format(payout.amount_micro_usd / 1000000) }}</td>
               <td data-label="Status"><span class="badge {{ payout.status }}">{{ payout.status|capitalize }}</span></td>
-              <td data-label="Transaction hash" class="mono breakable">{{ payout.tx_hash or '-' }}</td>
+              <td data-label="Transaction hash" class="mono breakable">{{ payout.tx_hash or '-' }}{% if payout.confirmations %}<small class="field-hint">{{ payout.confirmations }} confirmation{{ '' if payout.confirmations == 1 else 's' }}</small>{% endif %}</td>
               <td data-label="Actions" class="actions">
                 {% if payout.status == 'requested' %}
                   <form method="post" action="{{ url_for('admin.approve_payout_route', payout_id=payout.id) }}" data-submit-once="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button small" type="submit" data-loading-label="Approving...">Approve payout</button></form>
                 {% elif payout.status == 'approved' %}
-                  <form method="post" action="{{ url_for('admin.payout_sent', payout_id=payout.id) }}" data-submit-once="true">
+                  <form method="post" action="{{ url_for('admin.payout_transaction', payout_id=payout.id) }}" data-confirm-dialog data-confirm-title="Submit transaction for verification?" data-confirm-message="The system will verify the USDT contract, recipient, amount, receipt status, and confirmation depth before marking this payout confirmed." data-confirm-label="Submit for verification" data-submit-once="true">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1">
                     <label for="tx-{{ payout.id }}">Transaction hash</label>
-                    <input id="tx-{{ payout.id }}" name="tx_hash" placeholder="Transaction hash" required aria-describedby="tx-hint-{{ payout.id }}{% if error_focus == 'tx-' ~ payout.id %} tx-error-{{ payout.id }}{% endif %}"{% if error_focus == 'tx-' ~ payout.id %} aria-invalid="true"{% endif %}>
-                    <small id="tx-hint-{{ payout.id }}" class="field-hint">Recorded after the transfer is complete.</small>
+                    <input id="tx-{{ payout.id }}" name="tx_hash" placeholder="0x…" minlength="66" maxlength="66" pattern="0x[0-9a-fA-F]{64}" autocomplete="off" required aria-describedby="tx-hint-{{ payout.id }}{% if error_focus == 'tx-' ~ payout.id %} tx-error-{{ payout.id }}{% endif %}"{% if error_focus == 'tx-' ~ payout.id %} aria-invalid="true"{% endif %}>
+                    <small id="tx-hint-{{ payout.id }}" class="field-hint">Enter the 32-byte transaction hash after sending the exact approved amount.</small>
                     {% if error_focus == 'tx-' ~ payout.id %}<small id="tx-error-{{ payout.id }}" class="field-error">Enter a transaction hash.</small>{% endif %}
-                    <button class="button small ghost" type="submit" data-loading-label="Marking sent...">Mark sent</button>
+                    <button class="button small ghost" type="submit" data-confirm-trigger data-loading-label="Submitting..." disabled>Submit for verification</button>
                   </form>
+                {% elif payout.status == 'verifying' %}
+                  <div class="verification-progress"><span class="muted">Automatic verification in progress.</span>
+                  <form method="post" action="{{ url_for('admin.payout_transaction', payout_id=payout.id) }}" data-confirm-dialog data-confirm-title="Replace transaction under verification?" data-confirm-message="This replaces the current hash and clears its verification lease. Confirm that the previous transaction may already settle; do not submit a second payout for the same transfer." data-confirm-label="Replace transaction" data-submit-once="true">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1">
+                    <label for="tx-replace-{{ payout.id }}">Replacement transaction hash</label>
+                    <input id="tx-replace-{{ payout.id }}" name="tx_hash" placeholder="0x…" minlength="66" maxlength="66" pattern="0x[0-9a-fA-F]{64}" autocomplete="off" required>
+                    <button class="button small ghost" type="submit" data-confirm-trigger data-loading-label="Replacing..." disabled>Replace transaction</button>
+                  </form></div>
+                {% elif payout.status == 'failed' %}
+                  <div class="verification-error"><strong>Verification failed</strong><span>{{ payout.verification_error or 'Transaction did not satisfy payout requirements.' }}</span></div>
+                  <form method="post" action="{{ url_for('admin.payout_transaction', payout_id=payout.id) }}" data-confirm-dialog data-confirm-title="Retry payout verification?" data-confirm-message="The replacement transaction will be checked independently. Ensure the previous transaction will not also settle this payout." data-confirm-label="Retry verification" data-submit-once="true">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1">
+                    <label for="tx-{{ payout.id }}">Replacement transaction hash</label>
+                    <input id="tx-{{ payout.id }}" name="tx_hash" placeholder="0x…" minlength="66" maxlength="66" pattern="0x[0-9a-fA-F]{64}" autocomplete="off" required>
+                    <button class="button small ghost" type="submit" data-confirm-trigger data-loading-label="Submitting..." disabled>Retry verification</button>
+                  </form>
+                {% elif payout.status in ('confirmed', 'sent') %}
+                  <span class="muted">{{ 'Confirmed on-chain' if payout.status == 'confirmed' else 'Legacy manual completion' }}</span>
                 {% endif %}
               </td>
             </tr>
@@ -199,7 +218,7 @@
       </table>
     </div>
   {% else %}
-    <div class="empty">No payout requests. New requests can be <strong>Approve payout</strong> here, then a <strong>Transaction hash</strong> can be entered with <strong>Mark sent</strong>.</div>
+    <div class="empty">No payout requests. New requests are approved here, then the transfer hash is submitted for automatic verification.</div>
   {% endif %}
 </section>
 {% endif %}

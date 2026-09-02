@@ -56,6 +56,8 @@ def test_existing_legacy_proxy_database_is_migrated_without_plaintext_credential
     with app.app_context():
         assert decrypt_secret(row["username_encrypted"]) == "legacy-user"
         assert decrypt_secret(row["password_encrypted"]) == "legacy-secret"
+    assert row["username"] == ""
+    assert row["password"] == ""
     assert row["credential_fingerprint"]
     # A legacy `online` label is not proof of a successful health observation;
     # distribution must remain fail-closed until the new checker confirms it.
@@ -130,6 +132,121 @@ def test_existing_payout_database_gets_a_wallet_address_snapshot_column(tmp_path
     assert "wallet_address" in columns
 
 
+def test_legacy_sent_payout_remains_reserved_after_verification_migration(tmp_path):
+    database = tmp_path / "legacy-sent-payout.db"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT, password_hash TEXT, role TEXT, status TEXT, created_at TEXT);
+        CREATE TABLE wallets(id INTEGER PRIMARY KEY, user_id INTEGER, address TEXT, locked_until TEXT, updated_at TEXT);
+        CREATE TABLE payouts(
+            id INTEGER PRIMARY KEY, user_id INTEGER, wallet_id INTEGER, amount_micro_usd INTEGER,
+            status TEXT, tx_hash TEXT, created_at TEXT, updated_at TEXT
+        );
+        INSERT INTO users VALUES(1, 'legacy-paid@example.com', 'hash', 'user', 'active', '2026-01-01T00:00:00+00:00');
+        INSERT INTO wallets VALUES(1, 1, '0x1111111111111111111111111111111111111111', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+        INSERT INTO payouts VALUES(1, 1, 1, 500000, 'sent', '0xabc123', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    application = create_app(
+        {
+            "TESTING": True,
+            "DATABASE": str(database),
+            "SECRET_KEY": "migration-secret",
+            "FERNET_KEY": "-WjNr7wJTuNQqnbsZog_WamxH_0FcKscBU8vcR2ThIY=",
+        }
+    )
+
+    with application.app_context():
+        row = get_db().execute("SELECT status, verification_error FROM payouts WHERE id=1").fetchone()
+
+    assert row["status"] == "sent"
+    assert "legacy" in row["verification_error"].lower()
+
+
+def test_payout_migration_tolerates_duplicate_legacy_short_transaction_labels(tmp_path):
+    database = tmp_path / "legacy-duplicate-short-tx.db"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT, password_hash TEXT, role TEXT, status TEXT, created_at TEXT);
+        CREATE TABLE wallets(id INTEGER PRIMARY KEY, user_id INTEGER, address TEXT, locked_until TEXT, updated_at TEXT);
+        CREATE TABLE payouts(
+            id INTEGER PRIMARY KEY, user_id INTEGER, wallet_id INTEGER, amount_micro_usd INTEGER,
+            status TEXT, tx_hash TEXT, created_at TEXT, updated_at TEXT
+        );
+        INSERT INTO payouts VALUES(1, 1, 1, 500000, 'sent', 'manual', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+        INSERT INTO payouts VALUES(2, 1, 1, 500000, 'sent', 'manual', '2026-01-02T00:00:00+00:00', '2026-01-02T00:00:00+00:00');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    application = create_app(
+        {
+            "TESTING": True,
+            "DATABASE": str(database),
+            "SECRET_KEY": "migration-secret",
+            "FERNET_KEY": "-WjNr7wJTuNQqnbsZog_WamxH_0FcKscBU8vcR2ThIY=",
+        }
+    )
+
+    with application.app_context():
+        index = (
+            get_db()
+            .execute("SELECT sql FROM sqlite_master WHERE type='index' AND name='payouts_tx_hash_uidx'")
+            .fetchone()
+        )
+
+    assert index is not None
+    assert "length(tx_hash)=66" in index["sql"].replace(" ", "")
+
+
+def test_payout_migration_reconciles_duplicate_full_transaction_hashes(tmp_path):
+    database = tmp_path / "legacy-duplicate-full-tx.db"
+    duplicate_hash = "0x" + "ab" * 32
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        f"""
+        CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT, password_hash TEXT, role TEXT, status TEXT, created_at TEXT);
+        CREATE TABLE wallets(id INTEGER PRIMARY KEY, user_id INTEGER, address TEXT, locked_until TEXT, updated_at TEXT);
+        CREATE TABLE payouts(
+            id INTEGER PRIMARY KEY, user_id INTEGER, wallet_id INTEGER, amount_micro_usd INTEGER,
+            status TEXT, tx_hash TEXT, created_at TEXT, updated_at TEXT
+        );
+        INSERT INTO payouts VALUES(1, 1, 1, 500000, 'sent', '{duplicate_hash}', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+        INSERT INTO payouts VALUES(2, 1, 1, 500000, 'sent', '{duplicate_hash.upper()}', '2026-01-02T00:00:00+00:00', '2026-01-02T00:00:00+00:00');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    application = create_app(
+        {
+            "TESTING": True,
+            "DATABASE": str(database),
+            "SECRET_KEY": "migration-secret",
+            "FERNET_KEY": "-WjNr7wJTuNQqnbsZog_WamxH_0FcKscBU8vcR2ThIY=",
+        }
+    )
+
+    with application.app_context():
+        rows = get_db().execute("SELECT id, tx_hash, verification_error FROM payouts ORDER BY id").fetchall()
+        index = (
+            get_db()
+            .execute("SELECT sql FROM sqlite_master WHERE type='index' AND name='payouts_tx_hash_uidx'")
+            .fetchone()
+        )
+
+    assert rows[0]["tx_hash"] == duplicate_hash
+    assert rows[1]["tx_hash"] == ""
+    assert "duplicate" in rows[1]["verification_error"].lower()
+    assert index is not None
+
+
 def test_migration_handles_multiple_rows_with_unknown_fingerprints(tmp_path):
     database = tmp_path / "partial-migration.db"
     connection = sqlite3.connect(database)
@@ -170,3 +287,101 @@ def test_migration_handles_multiple_rows_with_unknown_fingerprints(tmp_path):
     assert all(row["credential_fingerprint"] == "" for row in rows)
     assert index is not None
     assert "WHERE credential_fingerprint <> ''" in index["sql"]
+
+
+def test_attestation_hardening_migration_invalidates_legacy_egress_identity(tmp_path):
+    database = tmp_path / "legacy-egress.db"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT, password_hash TEXT, role TEXT, status TEXT, created_at TEXT);
+        CREATE TABLE proxies(
+            id INTEGER PRIMARY KEY, user_id INTEGER, host TEXT NOT NULL, port INTEGER NOT NULL,
+            protocol_hint TEXT, detected_protocol TEXT, username_encrypted TEXT, password_encrypted TEXT,
+            credential_fingerprint TEXT, credential_generation INTEGER, status TEXT, eligibility TEXT,
+            earnapp_verdict TEXT, earnapp_reason TEXT, earnapp_checked_at TEXT, earnapp_next_check_at TEXT,
+            egress_verified_at TEXT, earnapp_claimed_until TEXT, earnapp_claim_token TEXT, exit_ip TEXT,
+            country_code TEXT, duplicate_of INTEGER, consecutive_failures INTEGER, online_since TEXT,
+            offline_since TEXT, last_checked_at TEXT, last_success_at TEXT, next_check_at TEXT,
+            check_claimed_until TEXT, check_claim_token TEXT, health_mode TEXT, next_probe_index INTEGER,
+            last_probe_endpoint TEXT, last_latency_ms INTEGER, failure_kind TEXT, accrual_cursor_at TEXT,
+            probation_started_at TEXT, accumulated_online_seconds INTEGER, accumulated_offline_seconds INTEGER,
+            continuous_dead_since TEXT, archived_at TEXT, last_error TEXT, created_at TEXT, updated_at TEXT
+        );
+        CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);
+        INSERT INTO users VALUES(1, 'legacy-egress@example.com', 'hash', 'user', 'active', '2026-01-01T00:00:00+00:00');
+        INSERT INTO proxies VALUES(
+            1, 1, 'legacy-egress.example', 8080, 'auto', 'socks5', '', '', 'fingerprint', 1,
+            'online', 'allow', 'CID_SET', 'cid', '2026-01-01T00:00:00+00:00', NULL,
+            '2026-01-01T00:00:00+00:00', NULL, NULL, '198.51.100.20', 'US', NULL, 0,
+            '2026-01-01T00:00:00+00:00', NULL, '2026-01-01T00:00:00+00:00',
+            '2026-01-01T00:00:00+00:00', '2026-01-01T01:00:00+00:00', NULL, NULL, 'fast', 0,
+            '', 100, '', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00', 0, 0,
+            NULL, NULL, '', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'
+        );
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    application = create_app(
+        {
+            "TESTING": True,
+            "DATABASE": str(database),
+            "SECRET_KEY": "migration-secret",
+            "FERNET_KEY": "-WjNr7wJTuNQqnbsZog_WamxH_0FcKscBU8vcR2ThIY=",
+        }
+    )
+
+    with application.app_context():
+        db = get_db()
+        row = db.execute(
+            "SELECT status, eligibility, exit_ip, egress_verified_at, egress_attestation_source, "
+            "country_code, duplicate_of, "
+            "health_mode, next_check_at FROM proxies WHERE id=1"
+        ).fetchone()
+
+    assert row["status"] == "online"
+    assert row["eligibility"] == "pending"
+    assert row["exit_ip"] is None
+    assert row["egress_verified_at"] is None
+    assert row["egress_attestation_source"] == ""
+    assert row["country_code"] == ""
+    assert row["duplicate_of"] is None
+    assert row["health_mode"] == "strong"
+    assert row["next_check_at"] <= "1970-01-01T00:00:00+00:00"
+
+
+def test_attestation_migration_invalidates_rows_with_untrusted_existing_source(app):
+    from app.services.proxies import add_proxy
+    from app.services.users import create_user
+
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "intermediate-egress@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "intermediate-egress.example:9000:u:p")
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', detected_protocol='socks5', "
+            "exit_ip='198.51.100.30', egress_verified_at='2026-01-01T00:00:00+00:00', "
+            "egress_attestation_source='', country_code='US', duplicate_of=NULL, health_mode='fast' "
+            "WHERE id=?",
+            (proxy_id,),
+        )
+        db.commit()
+
+        from app.db import migrate_db
+
+        migrate_db(db)
+        row = db.execute(
+            "SELECT eligibility, exit_ip, egress_verified_at, egress_attestation_source, "
+            "country_code, duplicate_of, health_mode FROM proxies WHERE id=?",
+            (proxy_id,),
+        ).fetchone()
+
+    assert row["eligibility"] == "pending"
+    assert row["exit_ip"] is None
+    assert row["egress_verified_at"] is None
+    assert row["egress_attestation_source"] == ""
+    assert row["country_code"] == ""
+    assert row["duplicate_of"] is None
+    assert row["health_mode"] == "strong"

@@ -6,6 +6,7 @@ import asyncio
 import base64
 import contextlib
 import hashlib
+import ipaddress
 import json
 import os
 import secrets
@@ -285,6 +286,7 @@ async def probe_earnapp_proxy(
         "reason": "",
         "eligibility": "unknown",
         "exit_ip": "",
+        "egress_trusted": False,
         "latency_ms": None,
         "probe_version": f"earnapp-wss-{SDK}",
     }
@@ -339,10 +341,19 @@ async def probe_earnapp_proxy(
                 if not tunnel_initialized or not cid:
                     result.update(verdict="PROTOCOL_FAIL", reason="cid_set arrived before a valid tunnel_init")
                     break
+                if not result.get("exit_ip"):
+                    result.update(verdict="PROTOCOL_FAIL", reason="tunnel_init did not provide a valid external IP")
+                    break
                 result.update(verdict="CID_SET", reason=cid)
                 break
             if msg_type == "ipc_call" and command == "tunnel_init":
-                result["exit_ip"] = str(data.get("ext_ip") or "")
+                candidate_ip = str(data.get("ext_ip") or "").strip()
+                try:
+                    result["exit_ip"] = str(ipaddress.ip_address(candidate_ip))
+                except ValueError:
+                    result.update(verdict="PROTOCOL_FAIL", reason="tunnel_init returned an invalid external IP")
+                    break
+                result["egress_trusted"] = True
                 tunnel_initialized = True
                 reply = {
                     "type": "ipc_result",

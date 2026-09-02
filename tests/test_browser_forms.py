@@ -30,6 +30,19 @@ def test_browser_login_redirects_to_dashboard_and_keeps_json_contract(app, clien
     assert api_response.get_json()["status"] == "active"
 
 
+def test_browser_admin_login_redirects_to_admin(client):
+    response = client.post(
+        "/login",
+        data={
+            "email": "admin@example.com",
+            "password": "correct horse battery staple",
+            "ui": "1",
+        },
+    )
+    assert response.status_code == 303
+    assert response.headers["Location"].endswith("/admin")
+
+
 def test_browser_registration_and_validation_show_feedback(client):
     invalid = client.post(
         "/register",
