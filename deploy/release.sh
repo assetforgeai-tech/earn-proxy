@@ -18,6 +18,7 @@ fi
 
 source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 release_dir="/opt/earn-proxy-${revision}"
+python_bin="${EARN_PROXY_PYTHON:-/opt/python3.11/bin/python3.11}"
 previous_release="$(readlink -f /opt/earn-proxy || true)"
 next_link="/opt/.earn-proxy-next"
 archive="$(mktemp --tmpdir earn-proxy-release.XXXXXX.tar)"
@@ -42,11 +43,18 @@ if [[ ! -f /etc/earn-proxy.env ]]; then
   echo "missing /etc/earn-proxy.env" >&2
   exit 78
 fi
+if [[ ! -x "$python_bin" ]]; then
+  python_bin="$(command -v python3.11 || true)"
+fi
+if [[ -z "$python_bin" ]] || ! "$python_bin" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))'; then
+  echo "Python 3.11 or newer is required" >&2
+  exit 69
+fi
 
 git -C "$source_dir" archive --format=tar "$revision" -o "$archive"
 install -d -o root -g root -m 0755 "$release_dir"
 tar -xf "$archive" -C "$release_dir"
-python3 -m venv "$release_dir/.venv"
+"$python_bin" -m venv "$release_dir/.venv"
 "$release_dir/.venv/bin/python" -m pip install --disable-pip-version-check --upgrade "pip>=25.3" "setuptools>=83"
 "$release_dir/.venv/bin/python" -m pip install --disable-pip-version-check "$release_dir"
 "$release_dir/.venv/bin/python" -m pip check

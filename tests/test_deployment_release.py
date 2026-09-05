@@ -16,7 +16,9 @@ def test_release_installer_builds_the_venv_at_its_final_absolute_path():
     installer = (ROOT / "deploy" / "release.sh").read_text()
 
     assert 'release_dir="/opt/earn-proxy-${revision}"' in installer
-    assert 'python3 -m venv "$release_dir/.venv"' in installer
+    assert 'python_bin="${EARN_PROXY_PYTHON:-/opt/python3.11/bin/python3.11}"' in installer
+    assert '"$python_bin" -m venv "$release_dir/.venv"' in installer
+    assert 'python3 -m venv "$release_dir/.venv"' not in installer
     assert '"$release_dir/.venv/bin/python" -m pip install' in installer
     assert '"$release_dir/.venv/bin/python" -m pip check' in installer
     assert "cp -a /opt/earn-proxy/.venv" not in installer
