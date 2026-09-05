@@ -11,6 +11,8 @@ proxy.acacondos.com {
 
 transfer.proxy.acacondos.com {
     encode zstd gzip
+    @relay_internal path /internal/feed
+    respond @relay_internal 404
     reverse_proxy 127.0.0.1:8000
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains"

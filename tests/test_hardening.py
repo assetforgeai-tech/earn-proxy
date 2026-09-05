@@ -51,6 +51,7 @@ def test_caddy_contract_routes_primary_legacy_transfer_and_whitelist_domains():
     caddy = (Path(__file__).parents[1] / "deploy" / "Caddyfile").read_text()
     assert "proxy.acacondos.com" in caddy and "reverse_proxy 127.0.0.1:8100" in caddy
     assert "transfer.proxy.acacondos.com" in caddy and "reverse_proxy 127.0.0.1:8000" in caddy
+    assert "@relay_internal path /internal/feed" in caddy and "respond @relay_internal 404" in caddy
     assert "whitelist.proxy.acacondos.com" in caddy and 'respond "42.96.12.142\\n" 200' in caddy
     assert "earn.proxy.acacondos.com" in caddy and "path /api/* /internal/api/*" in caddy
 
