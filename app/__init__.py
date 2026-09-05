@@ -103,6 +103,21 @@ def create_app(test_config: dict | None = None) -> Flask:
     # Caddy terminates TLS and supplies the client address/scheme headers.
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
+    @app.context_processor
+    def inject_shell_context():
+        endpoint = str(request.endpoint or "")
+        route_nav = {
+            "admin.dashboard": "overview",
+            "admin.checker": "checker",
+            "admin.users": "users",
+            "admin.payouts": "payouts",
+            "admin.integrations": "integrations",
+            "admin.api_keys_workspace": "api_keys",
+            "admin.transfer_proxy": "transfer_proxy",
+            "dashboard.dashboard": "dashboard",
+        }
+        return {"active_nav": route_nav.get(endpoint, "dashboard")}
+
     from app.routes import admin, dashboard, internal_api, proxies, wallets
     from app.routes import auth as auth_routes
 

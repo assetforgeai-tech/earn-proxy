@@ -62,7 +62,9 @@ def test_mobile_navigation_wraps_without_hidden_horizontal_overflow():
     css = (Path(__file__).parents[1] / "app" / "static" / "app.css").read_text()
     mobile = css.split("@media (max-width: 700px)", 1)[1]
     assert ".topbar {\n    flex-direction: column;" in mobile
-    assert ".section-nav {\n    top: 4px;\n    max-width: 100%;\n    overflow-x: visible;\n    flex-wrap: wrap;" in mobile
+    assert (
+        ".section-nav {\n    top: 4px;\n    max-width: 100%;\n    overflow-x: visible;\n    flex-wrap: wrap;" in mobile
+    )
 
 
 def test_schema_contains_scheduler_and_egress_audit_columns(app):

@@ -23,13 +23,13 @@
 </div>
 
 <nav id="admin-nav" class="section-nav" aria-label="Admin sections">
-  <a href="{{ url_for('admin.dashboard') }}"{% if admin_section == 'overview' %} aria-current="page"{% endif %}>Overview</a>
-  <a href="{{ url_for('admin.checker') }}"{% if admin_section == 'checker' %} aria-current="page"{% endif %}>Checker</a>
-  <a href="{{ url_for('admin.users') }}"{% if admin_section == 'users' %} aria-current="page"{% endif %}>Users</a>
-  <a href="{{ url_for('admin.payouts') }}"{% if admin_section == 'payouts' %} aria-current="page"{% endif %}>Payouts</a>
-  <a href="{{ url_for('admin.integrations') }}"{% if admin_section == 'integrations' %} aria-current="page"{% endif %}>API &amp; integrations</a>
-  <a href="{{ url_for('admin.transfer_proxy') }}"{% if admin_section == 'transfer_proxy' %} aria-current="page"{% endif %}>Transfer Proxy</a>
-  <a href="{{ url_for('admin.api_keys_workspace') }}"{% if admin_section == 'api_keys' %} aria-current="page"{% endif %}>API keys</a>
+  <a href="{{ url_for('admin.dashboard') }}"{% if admin_section == 'overview' %} class="is-active"{% endif %}>Overview</a>
+  <a href="{{ url_for('admin.checker') }}"{% if admin_section == 'checker' %} class="is-active"{% endif %}>Checker</a>
+  <a href="{{ url_for('admin.users') }}"{% if admin_section == 'users' %} class="is-active"{% endif %}>Users</a>
+  <a href="{{ url_for('admin.payouts') }}"{% if admin_section == 'payouts' %} class="is-active"{% endif %}>Payouts</a>
+  <a href="{{ url_for('admin.integrations') }}"{% if admin_section == 'integrations' %} class="is-active"{% endif %}>API &amp; integrations</a>
+  <a href="{{ url_for('admin.transfer_proxy') }}"{% if admin_section == 'transfer_proxy' %} class="is-active"{% endif %}>Transfer Proxy</a>
+  <a href="{{ url_for('admin.api_keys_workspace') }}"{% if admin_section == 'api_keys' %} class="is-active"{% endif %}>API keys</a>
 </nav>
 
 {% if admin_section == 'overview' and stats %}

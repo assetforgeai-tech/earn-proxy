@@ -1,4 +1,39 @@
 (() => {
+  const sidebar = document.querySelector("#app-sidebar");
+  const menuToggle = document.querySelector("#mobile-menu-toggle");
+  const sidebarOverlay = document.querySelector("#sidebar-overlay");
+
+  const closeSidebar = () => {
+    sidebar?.classList.remove("open");
+    sidebarOverlay?.classList.remove("open");
+    menuToggle?.setAttribute("aria-expanded", "false");
+  };
+
+  menuToggle?.addEventListener("click", () => {
+    const open = !sidebar?.classList.contains("open");
+    sidebar?.classList.toggle("open", open);
+    sidebarOverlay?.classList.toggle("open", open);
+    menuToggle.setAttribute("aria-expanded", String(open));
+    if (open) sidebar?.querySelector('[aria-current="page"]')?.focus();
+  });
+  sidebarOverlay?.addEventListener("click", closeSidebar);
+  sidebar?.querySelectorAll(".nav-item").forEach((item) => item.addEventListener("click", closeSidebar));
+
+  const themeToggle = document.querySelector("[data-theme-toggle]");
+  themeToggle?.addEventListener("click", () => {
+    document.body.classList.toggle("theme-dark");
+    themeToggle.setAttribute("aria-pressed", String(document.body.classList.contains("theme-dark")));
+  });
+
+  const pageSearch = document.querySelector("[data-page-search]");
+  document.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      pageSearch?.focus();
+    }
+    if (event.key === "Escape") closeSidebar();
+  });
+
   const dialog = document.querySelector("#confirm-dialog");
   const title = dialog?.querySelector("#confirm-dialog-title");
   const message = dialog?.querySelector("#confirm-dialog-message");

@@ -13,7 +13,7 @@
   <a href="{{ url_for('admin.users') }}">Users</a>
   <a href="{{ url_for('admin.payouts') }}">Payouts</a>
   <a href="{{ url_for('admin.integrations') }}">API &amp; integrations</a>
-  <a href="{{ url_for('admin.transfer_proxy') }}" aria-current="page">Transfer Proxy</a>
+  <a href="{{ url_for('admin.transfer_proxy') }}" class="is-active">Transfer Proxy</a>
 </nav>
 {% if relay_configured %}
 <section class="panel" aria-labelledby="relay-launch-title">
