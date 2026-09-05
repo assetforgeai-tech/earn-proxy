@@ -217,22 +217,22 @@
 
   Expected: every command exits `0` with no failures.
 
-- [ ] **Step 2: Inspect scope and commit**
+- [x] **Step 2: Inspect scope and commit**
 
   Confirm `git diff` contains no CashPilot path or secret, commit the navigation/UX consolidation, and push the branch and public repository default branch as appropriate.
 
-- [ ] **Step 3: Deploy a versioned release with rollback preserved**
+- [x] **Step 3: Deploy a versioned release with rollback preserved**
 
   Back up the production database/configuration, copy only tracked release files to a new `/opt/earn-proxy-<commit>` directory, update the current symlink/service working directory using the established deployment procedure, and restart only the Earn Proxy services.
 
-- [ ] **Step 4: Smoke production**
+- [x] **Step 4: Smoke production**
 
   Verify `/healthz`, anonymous redirects, authenticated admin/contributor routes, Caddy TLS, service status, recent journals, raw/transfer API authentication behavior, and the isolated Transfer Proxy handoff page.
 
-- [ ] **Step 5: Audit Chrome Profile 40**
+- [x] **Step 5: Audit Chrome Profile 40**
 
   Use the already authenticated `AssetForge AI` Chrome profile to click every admin and contributor menu at desktop, tablet, and mobile dimensions; verify route highlighting, content hierarchy, drawer focus, no overflow, light/dark mode, and no console errors.
 
-- [ ] **Step 6: Report evidence**
+- [x] **Step 6: Report evidence**
 
   Report the commit, release directory, previous rollback directory, test counts, service health, browser audit results, and any residual risk without exposing credentials.
