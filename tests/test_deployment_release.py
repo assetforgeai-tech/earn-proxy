@@ -30,12 +30,25 @@ def test_release_installer_builds_the_venv_at_its_final_absolute_path():
 def test_release_installer_preflights_before_switching_and_rolls_back_on_failure():
     installer = (ROOT / "deploy" / "release.sh").read_text()
 
-    preflight = installer.index('"$release_dir/.venv/bin/python" -m deploy.release_preflight')
+    preflight = installer.index("systemd-run --quiet --wait --pipe --collect")
     switch = installer.index('ln -s "$release_dir" "$next_link"')
     assert preflight < switch
+    assert "source /etc/earn-proxy.env" not in installer
+    assert "--uid=earnproxy" in installer
+    assert "--property=EnvironmentFile=/etc/earn-proxy.env" in installer
     assert 'previous_release="$(readlink -f /opt/earn-proxy || true)"' in installer
     assert 'ln -s "$previous_release" "$next_link"' in installer
     assert 'systemctl restart "${services[@]}"' in installer
+
+
+def test_release_installer_preserves_database_config_and_previous_units():
+    installer = (ROOT / "deploy" / "release.sh").read_text()
+
+    assert 'backup_dir="/var/backups/earn-proxy/${backup_stamp}-${revision}"' in installer
+    assert "source.backup(destination)" in installer
+    assert 'cp -a /etc/earn-proxy.env "$backup_dir/earn-proxy.env"' in installer
+    assert 'cp -a /etc/systemd/system/earn-proxy-*.service "$backup_dir/systemd/"' in installer
+    assert 'install -m 0644 "$backup_dir"/systemd/earn-proxy-*.service /etc/systemd/system/' in installer
 
 
 def test_release_preflight_rejects_a_venv_created_for_another_release(tmp_path, monkeypatch):
