@@ -56,6 +56,17 @@
     </div>
     <button class="button primary" type="submit" data-loading-label="Adding proxy...">Add securely</button>
   </form>
+  <aside class="info-callout whitelist-callout" aria-labelledby="whitelist-title">
+    <div>
+      <p class="eyebrow">PROVIDER WHITELIST</p>
+      <h3 id="whitelist-title">Allow this relay origin when a provider requires a whitelist</h3>
+      <p class="muted">Prefer the hostname when the provider accepts domains. If it requires an IP address, use the IPv4 value shown beside it.</p>
+    </div>
+    <div class="copy-stack">
+      <div class="copy-field"><code id="whitelist-host" class="copy-value">{{ whitelist_host }}</code><button class="button small ghost" type="button" data-copy-target="whitelist-host" aria-label="Copy whitelist hostname">Copy hostname</button></div>
+      <div class="copy-field"><code id="whitelist-ip" class="copy-value">{{ whitelist_ip }}</code><button class="button small ghost" type="button" data-copy-target="whitelist-ip" aria-label="Copy whitelist IP address">Copy IP</button></div>
+    </div>
+  </aside>
 </section>
 
 <section id="wallet" class="panel section-target">
@@ -82,7 +93,7 @@
   <div class="panel-head">
     <div>
       <h2>Request payout</h2>
-      <p class="muted">Available balance: ${{ '%.6f'|format(balances.available_micro_usd / 1000000) }}. Requests are reviewed manually.</p>
+      <p class="muted">Available balance: ${{ '%.6f'|format(balances.available_micro_usd / 1000000) }}. Requests are reviewed manually and processed within 48 hours.</p>
     </div>
   </div>
   <form class="inline-form" method="post" action="{{ url_for('wallets.create_payout') }}" data-submit-once="true">
@@ -90,12 +101,17 @@
     <input type="hidden" name="ui" value="1">
     <div class="field-group">
       <label for="amount_usd">Amount (USD)</label>
-      <input id="amount_usd" name="amount_usd" type="number" min="0.000001" step="0.000001" inputmode="decimal" placeholder="0.000000" required aria-describedby="amount-hint{% if error_focus == 'amount_usd' %} amount-error{% endif %}"{% if error_focus == 'amount_usd' %} aria-invalid="true"{% endif %}>
-      <small id="amount-hint" class="field-hint">Up to 6 decimal places, within your available balance.</small>
+      <input id="amount_usd" name="amount_usd" type="number" min="10" step="0.000001" inputmode="decimal" placeholder="10.000000" required aria-describedby="amount-hint{% if error_focus == 'amount_usd' %} amount-error{% endif %}"{% if error_focus == 'amount_usd' %} aria-invalid="true"{% endif %}>
+      <small id="amount-hint" class="field-hint">Minimum payout: $10.00 · 10% fee for $10.00–$49.99 · 2% fee from $50.00. Up to 6 decimal places.</small>
       {% if error_focus == 'amount_usd' %}<small id="amount-error" class="field-error">Review the payout amount and wallet status.</small>{% endif %}
     </div>
     <button class="button primary" type="submit" data-loading-label="Submitting request...">Request payout</button>
   </form>
+  <div class="payout-quote" aria-live="polite" data-payout-quote>
+    <span>Fee: <strong data-payout-fee>$0.000000</strong></span>
+    <span>You receive: <strong data-payout-net>$0.000000</strong></span>
+    <span class="field-hint" data-payout-sla>Requests are processed within 48 hours.</span>
+  </div>
 </section>
 
 <section id="proxy-status" class="panel section-target">
@@ -186,9 +202,9 @@
         <tbody>
           {% for payout in payouts %}
             <tr>
-              <td data-label="Amount">${{ '%.6f'|format(payout.amount_micro_usd / 1000000) }}</td>
+              <td data-label="Amount"><strong>Gross ${{ '%.6f'|format(payout.amount_micro_usd / 1000000) }}</strong><small class="field-hint">Fee ${{ '%.6f'|format(payout.fee_micro_usd / 1000000) }} · Net ${{ '%.6f'|format(payout.net_micro_usd / 1000000) }}</small></td>
               <td data-label="Status"><span class="badge {{ payout.status }}">{{ payout.status|capitalize }}</span>{% if payout.status == 'verifying' %}<small class="field-hint">Confirming the submitted transaction on BSC.</small>{% elif payout.status == 'failed' %}<small class="field-error">Payment verification failed; admin review is required.</small>{% elif payout.status == 'confirmed' %}<small class="field-hint">Verified on-chain.</small>{% elif payout.status == 'sent' %}<small class="field-hint">Completed before automatic verification was enabled.</small>{% endif %}</td>
-              <td data-label="Requested"><time datetime="{{ payout.created_at }}">{{ payout.created_at }}</time></td>
+              <td data-label="Requested"><time datetime="{{ payout.created_at }}">{{ payout.created_at }}</time><small class="field-hint">Process by {{ payout.processing_due_at }}</small></td>
               <td data-label="Transaction hash" class="mono breakable">{{ payout.tx_hash or '-' }}</td>
             </tr>
           {% endfor %}

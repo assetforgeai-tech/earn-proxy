@@ -68,22 +68,22 @@ Each contributor may have up to 10 nonterminal payout requests (`requested`, `ap
 
 ## Internal API
 
-Authenticate with `X-API-Key`. The canonical endpoint for new integrations is:
+Authenticate with `X-API-Key`. The canonical endpoints for new integrations are:
 
 ```text
-GET /api/v1/proxies
-GET /api/v1/proxies?format=json
+GET https://proxy.acacondos.com/api/v1/proxy-raw
+GET https://proxy.acacondos.com/api/v1/proxy-transfer
 ```
 
-The text response is newline-delimited raw proxy data. JSON adds the public classification (`Allow` or `Risk`), detected protocol, and endpoint. Only online, canonical proxies belonging to active users are returned. Existing clients may continue using `/internal/api/v1/proxies`, which is a compatibility alias with identical behavior.
+`proxy-raw` returns contributor upstream credentials for systems that connect directly to the provider. `proxy-transfer` returns fixed VPS listener credentials for clients that must connect through the relay. Both support newline-delimited text and `?format=json`; all responses are authenticated and marked `Cache-Control: no-store`. Only online, canonical proxies belonging to active users are returned. Existing clients may continue using `/api/v1/proxies` or `/internal/api/v1/proxies`, which remain raw-feed compatibility aliases.
 
 Administrators manage multiple revocable API keys at `/admin/integrations/api-keys`. A newly created or rotated token is revealed once; only its digest, prefix, and operational metadata are retained in SQLite.
 
 Example (keep the key in an environment variable):
 
 ```bash
-curl -fsS -H "X-API-Key: ${EARN_PROXY_API_KEY}" "https://earn.proxy.acacondos.com/api/v1/proxies"
-curl -fsS -H "X-API-Key: ${EARN_PROXY_API_KEY}" "https://earn.proxy.acacondos.com/api/v1/proxies?format=json"
+curl -fsS -H "X-API-Key: ${EARN_PROXY_API_KEY}" "https://proxy.acacondos.com/api/v1/proxy-raw"
+curl -fsS -H "X-API-Key: ${EARN_PROXY_API_KEY}" "https://proxy.acacondos.com/api/v1/proxy-transfer?format=json"
 ```
 
 ## Production deployment

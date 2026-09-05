@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime
 
 from flask import Blueprint, current_app, g, jsonify, redirect, render_template, request, url_for
 
@@ -23,6 +24,7 @@ from app.services.checks import (
     operational_stats,
 )
 from app.services.payouts import approve_payout, mark_payout_sent
+from app.services.relay_sso import create_relay_sso_token
 from app.services.settings import get_setting, set_setting
 from app.services.users import create_user
 
@@ -75,6 +77,7 @@ def payouts():
             """
         )
         .fetchall(),
+        now_iso=datetime.now(UTC).isoformat(),
         admin_section="payouts",
     )
 
@@ -84,16 +87,54 @@ def payouts():
 def integrations():
     db = get_db()
     settings = checker_settings(db)
+    primary_domain = str(current_app.config.get("EARN_PROXY_DOMAIN") or "proxy.acacondos.com").strip()
+    legacy_domain = str(current_app.config.get("LEGACY_EARN_PROXY_DOMAIN") or "earn.proxy.acacondos.com").strip()
     return render_template(
         "admin_integrations.html",
-        canonical_endpoint=url_for("api.list_proxies", _external=True),
-        legacy_endpoint=url_for("internal_api.list_proxies", _external=True),
+        canonical_endpoint=f"https://{primary_domain}/api/v1/proxy-raw",
+        raw_endpoint=f"https://{primary_domain}/api/v1/proxy-raw",
+        transfer_endpoint=f"https://{primary_domain}/api/v1/proxy-transfer",
+        legacy_endpoint=f"https://{legacy_domain}/api/v1/proxies",
         api_key_configured=bool(str(current_app.config.get("INTERNAL_API_KEY") or "")),
         api_include_allow=get_setting(db, "api_include_allow", "1") == "1",
         api_include_risk=get_setting(db, "api_include_risk", "1") == "1",
         health_stale_minutes=settings.health_stale_minutes,
         admin_section="integrations",
     )
+
+
+@bp.get("/transfer-proxy")
+@admin_required
+def transfer_proxy():
+    secret = str(current_app.config.get("RELAY_SSO_SECRET") or "")
+    if not secret:
+        response = current_app.make_response(
+            (
+                render_template(
+                    "admin_transfer_proxy.html",
+                    relay_url="",
+                    relay_token="",
+                    relay_configured=False,
+                    admin_section="transfer_proxy",
+                ),
+                503,
+            )
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    relay_public_url = str(current_app.config.get("RELAY_PUBLIC_URL") or "").strip().rstrip("/")
+    relay_url = f"{relay_public_url}/sso" if relay_public_url else "/admin/transfer-proxy/sso"
+    response = current_app.make_response(
+        render_template(
+            "admin_transfer_proxy.html",
+            relay_url=relay_url,
+            relay_token=create_relay_sso_token(secret),
+            relay_configured=True,
+            admin_section="transfer_proxy",
+        )
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def _api_key_page(*, new_token: str | None = None, message: str | None = None, status: int = 200):

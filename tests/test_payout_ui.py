@@ -29,12 +29,12 @@ def _payout(app, client, *, status: str) -> int:
                 proxy_id,
                 (now - timedelta(hours=3)).isoformat(),
                 (now - timedelta(hours=2)).isoformat(),
-                1_000_000,
+                20_000_000,
                 now.isoformat(),
             ),
         )
         db.commit()
-        payout_id = request_payout(db, user_id, 500_000, now=now)
+        payout_id = request_payout(db, user_id, 10_000_000, now=now)
         if status in {"approved", "verifying", "failed", "confirmed"}:
             approve_payout(db, payout_id, now=now)
         if status in {"verifying", "failed", "confirmed"}:
@@ -59,6 +59,28 @@ def test_admin_payout_ui_submits_for_verification_with_confirmation(app, client)
     assert '/transaction"' in page
 
 
+def test_user_dashboard_explains_fee_quote_and_whitelist_values(app, client):
+    _active_user = _payout
+    register(client, "fee-copy@example.com", "member-password")
+    login_admin(client)
+    with app.app_context():
+        user_id = get_db().execute("SELECT id FROM users WHERE email='fee-copy@example.com'").fetchone()["id"]
+        get_db().execute("UPDATE users SET status='active' WHERE id=?", (user_id,))
+        get_db().commit()
+    client.post("/logout")
+    login(client, "fee-copy@example.com", "member-password")
+
+    page = client.get("/dashboard").get_data(as_text=True)
+
+    assert "Minimum payout: $10.00" in page
+    assert "10% fee for $10.00–$49.99" in page
+    assert "2% fee from $50.00" in page
+    assert "processed within 48 hours" in page
+    assert "whitelist.proxy.acacondos.com" in page
+    assert "42.96.12.142" in page
+    assert "data-copy-target" in page
+
+
 def test_verifying_payout_offers_guarded_transaction_replacement(app, client):
     _payout(app, client, status="verifying")
     page = client.get("/admin/payouts").get_data(as_text=True)
@@ -81,3 +103,13 @@ def test_verifying_and_failed_statuses_are_explained_to_admin_and_user(app, clie
     assert "Failed" in user_page
     assert "Payment verification failed; admin review is required." in user_page
     assert "Simulated verifier detail" not in user_page
+
+
+def test_admin_payout_queue_shows_fee_net_and_processing_deadline(app, client):
+    _payout(app, client, status="approved")
+    page = client.get("/admin/payouts").get_data(as_text=True)
+
+    assert "Gross" in page
+    assert "Fee" in page
+    assert "Net" in page
+    assert "Processing deadline" in page

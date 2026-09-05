@@ -76,6 +76,25 @@ def test_valid_bsc_usdt_transfer_is_confirmed_after_required_depth():
     assert result.block_number == 100
 
 
+def test_fee_bearing_payout_verifies_the_net_transfer_amount():
+    payout = {
+        "tx_hash": TX_HASH,
+        "wallet_address": WALLET,
+        "amount_micro_usd": 10_000_000,
+        "net_micro_usd": 9_000_000,
+    }
+    result = verify_bsc_payout(
+        payout,
+        rpc_url="https://rpc.example",
+        token_contract=USDT,
+        token_decimals=18,
+        min_confirmations=10,
+        rpc_call=_rpc(_receipt(amount_units=9_000_000 * 10**12)),
+    )
+
+    assert result.status == "confirmed"
+
+
 @pytest.mark.parametrize(
     ("receipt", "error"),
     [
@@ -214,12 +233,12 @@ def _approved_payout(db, *, email: str, proxy: str, wallet: str, now: datetime) 
             proxy_id,
             (now - timedelta(hours=3)).isoformat(),
             (now - timedelta(hours=2)).isoformat(),
-            2_000_000,
+            20_000_000,
             now.isoformat(),
         ),
     )
     db.commit()
-    payout_id = request_payout(db, user_id, 500_000, now=now)
+    payout_id = request_payout(db, user_id, 10_000_000, now=now)
     approve_payout(db, payout_id, now=now)
     return payout_id
 
@@ -318,18 +337,18 @@ def test_retrying_failed_payout_cannot_over_reserve_available_balance(app):
                 proxy_id,
                 (now - timedelta(hours=3)).isoformat(),
                 (now - timedelta(hours=2)).isoformat(),
-                1_000_000,
+                19_000_000,
                 now.isoformat(),
             ),
         )
         db.commit()
 
-        first = request_payout(db, user_id, 1_000_000, now=now)
+        first = request_payout(db, user_id, 10_000_000, now=now)
         approve_payout(db, first, now=now)
         submit_payout_transaction(db, first, TX_HASH, now=now)
         apply_payout_verification(db, first, VerificationResult("failed", "wrong recipient"), now=now)
 
-        second = request_payout(db, user_id, 1_000_000, now=now)
+        second = request_payout(db, user_id, 10_000_000, now=now)
         with pytest.raises(ValueError, match="available balance"):
             submit_payout_transaction(db, first, replacement, now=now + timedelta(minutes=1))
 

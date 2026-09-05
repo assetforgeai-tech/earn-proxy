@@ -130,6 +130,49 @@ def test_existing_payout_database_gets_a_wallet_address_snapshot_column(tmp_path
     with application.app_context():
         columns = {row["name"] for row in get_db().execute("PRAGMA table_info(payouts)").fetchall()}
     assert "wallet_address" in columns
+    assert {"fee_bps", "fee_micro_usd", "net_micro_usd", "processing_due_at"}.issubset(columns)
+
+
+def test_legacy_payout_migration_preserves_original_transfer_amount(tmp_path):
+    database = tmp_path / "legacy-payout-fee.db"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT, password_hash TEXT, role TEXT, status TEXT, created_at TEXT);
+        CREATE TABLE wallets(id INTEGER PRIMARY KEY, user_id INTEGER, address TEXT, locked_until TEXT, updated_at TEXT);
+        CREATE TABLE payouts(
+            id INTEGER PRIMARY KEY, user_id INTEGER, wallet_id INTEGER, amount_micro_usd INTEGER,
+            status TEXT, tx_hash TEXT, created_at TEXT, updated_at TEXT
+        );
+        INSERT INTO payouts VALUES(
+            1, 1, 1, 12000000, 'requested', '',
+            '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'
+        );
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    application = create_app(
+        {
+            "TESTING": True,
+            "DATABASE": str(database),
+            "SECRET_KEY": "migration-secret",
+            "FERNET_KEY": "-WjNr7wJTuNQqnbsZog_WamxH_0FcKscBU8vcR2ThIY=",
+        }
+    )
+
+    with application.app_context():
+        row = (
+            get_db()
+            .execute("SELECT fee_bps, fee_micro_usd, net_micro_usd, processing_due_at FROM payouts WHERE id=1")
+            .fetchone()
+        )
+
+    assert row["fee_bps"] == 0
+    assert row["fee_micro_usd"] == 0
+    assert row["net_micro_usd"] == 12_000_000
+    assert row["processing_due_at"] == "2026-01-03T00:00:00+00:00"
 
 
 def test_legacy_sent_payout_remains_reserved_after_verification_migration(tmp_path):

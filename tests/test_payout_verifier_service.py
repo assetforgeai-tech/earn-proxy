@@ -28,12 +28,12 @@ def _verifying_payout(app, *, now: datetime) -> int:
                 proxy_id,
                 (now - timedelta(hours=3)).isoformat(),
                 (now - timedelta(hours=2)).isoformat(),
-                1_000_000,
+                20_000_000,
                 now.isoformat(),
             ),
         )
         db.commit()
-        payout_id = request_payout(db, user_id, 500_000, now=now)
+        payout_id = request_payout(db, user_id, 10_000_000, now=now)
         approve_payout(db, payout_id, now=now)
         submit_payout_transaction(db, payout_id, TX_HASH, now=now)
         return payout_id

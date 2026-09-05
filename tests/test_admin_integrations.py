@@ -9,6 +9,10 @@ def test_admin_integration_page_explains_connection_without_exposing_key(client)
     assert response.status_code == 200
     assert "API &amp; integrations" in page or "API & integrations" in page
     assert "/api/v1/proxies" in page
+    assert "/api/v1/proxy-raw" in page
+    assert "/api/v1/proxy-transfer" in page
+    assert "Proxy raw" in page
+    assert "Proxy transfer" in page
     assert "X-API-Key" in page
     assert "format=json" in page
     assert "EARN_PROXY_INTERNAL_API_KEY" in page
@@ -109,3 +113,17 @@ def test_admin_brand_link_does_not_route_through_contributor_dashboard(client):
     login_admin(client)
     page = client.get("/admin/integrations").get_data(as_text=True)
     assert '<a class="brand" href="/admin">Earn Proxy</a>' in page
+
+
+def test_transfer_proxy_workspace_is_admin_only_and_uses_expiring_handoff(app, client):
+    assert client.get("/admin/transfer-proxy").status_code == 403
+    app.config["RELAY_SSO_SECRET"] = "test-relay-secret"
+    app.config["RELAY_PUBLIC_URL"] = "https://transfer.proxy.acacondos.com"
+    login_admin(client)
+    response = client.get("/admin/transfer-proxy")
+    page = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert "Continue to Transfer Proxy" in page
+    assert 'action="https://transfer.proxy.acacondos.com/sso"' in page
+    assert 'name="token"' in page
+    assert response.headers["Cache-Control"] == "no-store"

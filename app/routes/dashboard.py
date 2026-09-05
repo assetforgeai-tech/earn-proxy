@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from flask import Blueprint, g, redirect, render_template, url_for
+from flask import Blueprint, current_app, g, redirect, render_template, url_for
 
 from app.auth import login_required
 from app.db import get_db
@@ -102,4 +102,6 @@ def dashboard():
         wallet_masked=wallet_masked,
         payouts=payouts,
         health_interval_minutes=settings.health_interval_minutes,
+        whitelist_host=current_app.config.get("WHITELIST_HOST", "whitelist.proxy.acacondos.com"),
+        whitelist_ip=current_app.config.get("WHITELIST_IP", ""),
     )

@@ -5,7 +5,7 @@
   <div>
     <p class="eyebrow">DEVELOPER ACCESS</p>
     <h1>Connect your distribution client.</h1>
-    <p class="muted">Use the read-only proxy feed below. Credentials are returned only to an authenticated machine client, never displayed in this admin page.</p>
+    <p class="muted">Choose a feed for your downstream system. Credentials are returned only to an authenticated machine client, never displayed in this admin page.</p>
   </div>
 </div>
 
@@ -16,6 +16,7 @@
   <a href="{{ url_for('admin.payouts') }}">Payouts</a>
   <a href="{{ url_for('admin.integrations') }}" aria-current="page">API &amp; integrations</a>
   <a href="{{ url_for('admin.api_keys_workspace') }}">API keys</a>
+  <a href="{{ url_for('admin.transfer_proxy') }}">Transfer Proxy</a>
 </nav>
 
 <section class="panel integration-hero" aria-labelledby="integration-status-title">
@@ -29,11 +30,11 @@
 
 <section class="panel" aria-labelledby="endpoint-title">
   <div class="panel-head"><div><h2 id="endpoint-title">1. Endpoint</h2><p class="muted">Use this canonical URL for new integrations.</p></div></div>
-  <div class="copy-field">
-    <code id="canonical-endpoint" class="copy-value">{{ canonical_endpoint }}</code>
-    <button class="button ghost" type="button" data-copy-target="canonical-endpoint" aria-label="Copy canonical API endpoint">Copy endpoint</button>
-  </div>
-  <p class="field-hint">Legacy clients may continue using <code>{{ legacy_endpoint }}</code>; both paths return the same data.</p>
+    <div class="integration-grid">
+      <article class="integration-card"><h3>Proxy raw</h3><p>Contributor upstream credentials, ready for systems that connect directly to the provider.</p><div class="copy-field"><code id="raw-endpoint" class="copy-value">{{ raw_endpoint }}</code><button class="button small ghost" type="button" data-copy-target="raw-endpoint" aria-label="Copy raw proxy endpoint">Copy</button></div></article>
+      <article class="integration-card"><h3>Proxy transfer</h3><p>Fixed VPS listener endpoints, ready for clients that must connect through the relay.</p><div class="copy-field"><code id="transfer-endpoint" class="copy-value">{{ transfer_endpoint }}</code><button class="button small ghost" type="button" data-copy-target="transfer-endpoint" aria-label="Copy transfer proxy endpoint">Copy</button></div></article>
+    </div>
+  <p class="field-hint">Legacy clients may continue using <code>{{ legacy_endpoint }}</code>; it remains an alias for the raw feed.</p>
   <p><a class="button ghost" href="{{ url_for('admin.api_keys_workspace') }}">Manage API keys</a></p>
 </section>
 
@@ -46,8 +47,8 @@
 <section class="panel" aria-labelledby="format-title">
   <div class="panel-head"><div><h2 id="format-title">3. Choose a response format</h2><p class="muted">Text is easiest for line-based consumers; JSON includes safe metadata.</p></div></div>
   <div class="integration-grid">
-    <article class="integration-card"><h3>Raw text</h3><p>One proxy per line, ready for import.</p><code id="text-example">curl -fsS -H "X-API-Key: $EARN_PROXY_API_KEY" "{{ canonical_endpoint }}"</code><button class="button small ghost" type="button" data-copy-target="text-example" aria-label="Copy raw text example">Copy example</button></article>
-    <article class="integration-card"><h3>JSON</h3><p>Add <code>?format=json</code> for status, protocol, and endpoint fields.</p><code id="json-example">curl -fsS -H "X-API-Key: $EARN_PROXY_API_KEY" "{{ canonical_endpoint }}?format=json"</code><button class="button small ghost" type="button" data-copy-target="json-example" aria-label="Copy JSON example">Copy example</button></article>
+    <article class="integration-card"><h3>Raw text</h3><p>One raw proxy per line, ready for import.</p><code id="text-example">curl -fsS -H "X-API-Key: $EARN_PROXY_API_KEY" "{{ raw_endpoint }}"</code><button class="button small ghost" type="button" data-copy-target="text-example" aria-label="Copy raw text example">Copy example</button></article>
+    <article class="integration-card"><h3>Transfer JSON</h3><p>Fixed listener endpoints and protocol metadata.</p><code id="json-example">curl -fsS -H "X-API-Key: $EARN_PROXY_API_KEY" "{{ transfer_endpoint }}?format=json"</code><button class="button small ghost" type="button" data-copy-target="json-example" aria-label="Copy transfer JSON example">Copy example</button></article>
   </div>
   <p id="copy-status" class="copy-status" aria-live="polite"></p>
 </section>

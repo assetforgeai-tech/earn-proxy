@@ -118,4 +118,25 @@
   if (invalidField instanceof HTMLElement) {
     window.requestAnimationFrame(() => invalidField.focus());
   }
+
+  const payoutAmount = document.querySelector("#amount_usd");
+  const payoutFee = document.querySelector("[data-payout-fee]");
+  const payoutNet = document.querySelector("[data-payout-net]");
+  if (payoutAmount && payoutFee && payoutNet) {
+    const formatUsd = (value) => `$${value.toFixed(6)}`;
+    const updatePayoutQuote = () => {
+      const amount = Number.parseFloat(payoutAmount.value || "0");
+      if (!Number.isFinite(amount) || amount <= 0) {
+        payoutFee.textContent = "$0.000000";
+        payoutNet.textContent = "$0.000000";
+        return;
+      }
+      const rate = amount >= 50 ? 0.02 : 0.10;
+      const fee = amount * rate;
+      payoutFee.textContent = formatUsd(fee);
+      payoutNet.textContent = formatUsd(Math.max(0, amount - fee));
+    };
+    payoutAmount.addEventListener("input", updatePayoutQuote);
+    updatePayoutQuote();
+  }
 })();

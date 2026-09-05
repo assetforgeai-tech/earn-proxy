@@ -1,0 +1,10 @@
+[Unit]
+Description=Proxy Relay Daily Backup
+After=proxy-relay.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/proxy-relay-backup
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077

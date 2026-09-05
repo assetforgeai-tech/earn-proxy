@@ -209,3 +209,61 @@ def test_legacy_api_alias_also_disables_caching(client):
     )
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_raw_and_transfer_api_paths_are_separate_and_typed(app, client, monkeypatch):
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "feed-split@example.com", "password", status="active")
+        _online_proxy(db, user_id, "raw-split.example:9001:u:p", "allow", "198.51.100.60")
+
+    class FeedResponse:
+        status_code = 200
+        content = b"[]"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [
+                {
+                    "proxy": "proxy.acacondos.com:42001:relay-user:relay-pass",
+                    "protocol": "socks5",
+                    "exit_ip": "198.51.100.61",
+                }
+            ]
+
+    from app.routes import internal_api
+
+    monkeypatch.setattr(internal_api.requests, "get", lambda *args, **kwargs: FeedResponse())
+    app.config.update(RELAY_FEED_KEY="test-relay-feed-key")
+    headers = {"X-API-Key": "internal-test-key"}
+
+    raw = client.get("/api/v1/proxy-raw?format=json", headers=headers)
+    transfer = client.get("/api/v1/proxy-transfer?format=json", headers=headers)
+
+    assert raw.status_code == 200
+    assert raw.get_json()[0]["type"] == "raw"
+    assert transfer.status_code == 200
+    assert transfer.get_json() == [
+        {
+            "proxy": "proxy.acacondos.com:42001:relay-user:relay-pass",
+            "type": "transfer",
+            "protocol": "socks5",
+            "exit_ip": "198.51.100.61",
+        }
+    ]
+    assert transfer.headers["Cache-Control"] == "no-store"
+
+
+def test_transfer_api_returns_service_unavailable_when_relay_feed_fails(client, monkeypatch):
+    def fail(*_args, **_kwargs):
+        raise TimeoutError("relay timeout")
+
+    from app.routes import internal_api
+
+    monkeypatch.setattr(internal_api.requests, "get", fail)
+    response = client.get("/api/v1/proxy-transfer", headers={"X-API-Key": "internal-test-key"})
+
+    assert response.status_code == 503
+    assert response.get_json() == {"error": "Transfer feed is temporarily unavailable"}

@@ -177,6 +177,10 @@ CREATE TABLE IF NOT EXISTS payouts (
     wallet_id INTEGER NOT NULL REFERENCES wallets(id),
     wallet_address TEXT NOT NULL DEFAULT '',
     amount_micro_usd INTEGER NOT NULL,
+    fee_bps INTEGER NOT NULL DEFAULT 0,
+    fee_micro_usd INTEGER NOT NULL DEFAULT 0,
+    net_micro_usd INTEGER NOT NULL DEFAULT 0,
+    processing_due_at TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'requested',
     tx_hash TEXT NOT NULL DEFAULT '',
     verification_error TEXT NOT NULL DEFAULT '',
@@ -248,6 +252,10 @@ USER_MIGRATION_COLUMNS = {
 
 PAYOUT_MIGRATION_COLUMNS = {
     "wallet_address": "TEXT NOT NULL DEFAULT ''",
+    "fee_bps": "INTEGER NOT NULL DEFAULT 0",
+    "fee_micro_usd": "INTEGER NOT NULL DEFAULT 0",
+    "net_micro_usd": "INTEGER NOT NULL DEFAULT 0",
+    "processing_due_at": "TEXT NOT NULL DEFAULT ''",
     "verification_error": "TEXT NOT NULL DEFAULT ''",
     "verification_attempts": "INTEGER NOT NULL DEFAULT 0",
     "next_verification_at": "TEXT",
@@ -294,7 +302,27 @@ def migrate_db(db) -> None:
         if _table_exists(db, "users"):
             _add_missing_columns(db, "users", USER_MIGRATION_COLUMNS)
         if _table_exists(db, "payouts"):
+            existing_payout_columns = _columns(db, "payouts")
             _add_missing_columns(db, "payouts", PAYOUT_MIGRATION_COLUMNS)
+            if "net_micro_usd" not in existing_payout_columns:
+                from datetime import UTC, datetime, timedelta
+
+                legacy_payouts = db.execute("SELECT id, amount_micro_usd, created_at FROM payouts").fetchall()
+                for payout in legacy_payouts:
+                    try:
+                        created_at = datetime.fromisoformat(str(payout["created_at"] or ""))
+                        if created_at.tzinfo is None:
+                            created_at = created_at.replace(tzinfo=UTC)
+                    except ValueError:
+                        created_at = datetime(1970, 1, 1, tzinfo=UTC)
+                    db.execute(
+                        """
+                        UPDATE payouts SET fee_bps=0, fee_micro_usd=0,
+                            net_micro_usd=amount_micro_usd, processing_due_at=?
+                        WHERE id=?
+                        """,
+                        ((created_at + timedelta(hours=48)).isoformat(), payout["id"]),
+                    )
             if _table_exists(db, "wallets"):
                 db.execute(
                     """

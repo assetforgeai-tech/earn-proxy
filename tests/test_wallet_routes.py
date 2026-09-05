@@ -35,7 +35,7 @@ def test_payout_is_manual_and_admin_can_submit_transaction_for_verification(app,
         )
         db.execute(
             "INSERT INTO earnings_ledger(user_id,proxy_id,started_at,ended_at,micro_usd,bucket,created_at) "
-            "SELECT ?, id, datetime('now','-2 hour'), datetime('now','-1 hour'), 1000000, 'available', datetime('now') FROM proxies LIMIT 1",
+            "SELECT ?, id, datetime('now','-2 hour'), datetime('now','-1 hour'), 20000000, 'available', datetime('now') FROM proxies LIMIT 1",
             (user_id,),
         )
         if db.execute("SELECT changes()").fetchone()[0] == 0:
@@ -43,11 +43,11 @@ def test_payout_is_manual_and_admin_can_submit_transaction_for_verification(app,
 
             proxy_id = add_proxy(db, user_id, "payout.example:9000:u:p")
             db.execute(
-                "INSERT INTO earnings_ledger(user_id,proxy_id,started_at,ended_at,micro_usd,bucket,created_at) VALUES(?,?,datetime('now','-2 hour'),datetime('now','-1 hour'),1000000,'available',datetime('now'))",
+                "INSERT INTO earnings_ledger(user_id,proxy_id,started_at,ended_at,micro_usd,bucket,created_at) VALUES(?,?,datetime('now','-2 hour'),datetime('now','-1 hour'),20000000,'available',datetime('now'))",
                 (user_id, proxy_id),
             )
         db.commit()
-    response = client.post("/payouts", data={"amount_micro_usd": "500000"})
+    response = client.post("/payouts", data={"amount_micro_usd": "10000000"})
     assert response.status_code == 201
     payout_id = response.get_json()["id"]
 
@@ -78,13 +78,13 @@ def test_payout_queue_cap_returns_429_before_creating_another_row(app, client):
         proxy_id = add_proxy(db, user_id, "payout-cap-route.example:9000:u:p")
         db.execute(
             "INSERT INTO earnings_ledger(user_id,proxy_id,started_at,ended_at,micro_usd,bucket,created_at) "
-            "VALUES(?,?,datetime('now','-2 hour'),datetime('now','-1 hour'),2000000,'available',datetime('now'))",
+            "VALUES(?,?,datetime('now','-2 hour'),datetime('now','-1 hour'),20000000,'available',datetime('now'))",
             (user_id, proxy_id),
         )
         db.commit()
 
-    first = client.post("/payouts", data={"amount_micro_usd": "500000"})
-    second = client.post("/payouts", data={"amount_micro_usd": "500000"})
+    first = client.post("/payouts", data={"amount_micro_usd": "10000000"})
+    second = client.post("/payouts", data={"amount_micro_usd": "10000000"})
 
     assert first.status_code == 201
     assert second.status_code == 429

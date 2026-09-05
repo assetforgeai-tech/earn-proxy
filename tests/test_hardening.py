@@ -1,12 +1,58 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+from cryptography.fernet import Fernet
 
 from app.check_service import CheckRunner, SchedulerState
 from app.db import get_db
 from app.services.checks import archive_due_dead_proxies
 from app.services.proxies import add_proxy
 from app.services.users import create_user
+
+
+def test_production_instance_path_can_be_configured_outside_release_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("EARN_PROXY_INSTANCE_PATH", str(tmp_path / "instance"))
+    from app import create_app
+
+    application = create_app(
+        {
+            "TESTING": True,
+            "DATABASE": str(tmp_path / "data" / "earn-proxy.db"),
+            "SECRET_KEY": "test-session-secret",
+            "FERNET_KEY": "-WjNr7wJTuNQqnbsZog_WamxH_0FcKscBU8vcR2ThIY=",
+        }
+    )
+
+    assert application.instance_path == str(tmp_path / "instance")
+    assert (tmp_path / "instance").is_dir()
+
+
+def test_domain_and_whitelist_runtime_defaults_are_explicit(tmp_path):
+    from app import create_app
+
+    application = create_app(
+        {
+            "TESTING": True,
+            "DATABASE": str(tmp_path / "data" / "earn-proxy.db"),
+            "SECRET_KEY": "test-session-secret",
+            "FERNET_KEY": Fernet.generate_key().decode("ascii"),
+        }
+    )
+
+    assert application.config["EARN_PROXY_DOMAIN"] == "proxy.acacondos.com"
+    assert application.config["LEGACY_EARN_PROXY_DOMAIN"] == "earn.proxy.acacondos.com"
+    assert application.config["WHITELIST_HOST"] == "whitelist.proxy.acacondos.com"
+    assert application.config["RELAY_PUBLIC_URL"] == "https://transfer.proxy.acacondos.com"
+
+
+def test_caddy_contract_routes_primary_legacy_transfer_and_whitelist_domains():
+    caddy = (Path(__file__).parents[1] / "deploy" / "Caddyfile").read_text()
+    assert "proxy.acacondos.com" in caddy and "reverse_proxy 127.0.0.1:8100" in caddy
+    assert "transfer.proxy.acacondos.com" in caddy and "reverse_proxy 127.0.0.1:8000" in caddy
+    assert "whitelist.proxy.acacondos.com" in caddy and 'respond "42.96.12.142\\n" 200' in caddy
+    assert "earn.proxy.acacondos.com" in caddy and "path /api/* /internal/api/*" in caddy
 
 
 def test_schema_contains_scheduler_and_egress_audit_columns(app):

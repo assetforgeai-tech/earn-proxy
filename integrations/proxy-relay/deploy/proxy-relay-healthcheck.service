@@ -1,0 +1,13 @@
+[Unit]
+Description=Proxy Relay Lightweight Health Check
+After=proxy-relay.service proxy-relay-engine.service caddy.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/proxy-relay-healthcheck
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+StateDirectory=proxy-relay-monitor
+StateDirectoryMode=0700
+UMask=0077

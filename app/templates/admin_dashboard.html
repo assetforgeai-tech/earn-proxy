@@ -28,6 +28,7 @@
   <a href="{{ url_for('admin.users') }}"{% if admin_section == 'users' %} aria-current="page"{% endif %}>Users</a>
   <a href="{{ url_for('admin.payouts') }}"{% if admin_section == 'payouts' %} aria-current="page"{% endif %}>Payouts</a>
   <a href="{{ url_for('admin.integrations') }}"{% if admin_section == 'integrations' %} aria-current="page"{% endif %}>API &amp; integrations</a>
+  <a href="{{ url_for('admin.transfer_proxy') }}"{% if admin_section == 'transfer_proxy' %} aria-current="page"{% endif %}>Transfer Proxy</a>
   <a href="{{ url_for('admin.api_keys_workspace') }}"{% if admin_section == 'api_keys' %} aria-current="page"{% endif %}>API keys</a>
 </nav>
 
@@ -172,12 +173,15 @@
     <div class="table-wrap">
       <table class="responsive-table">
         <caption>Manual payout approvals with automatic BSC transaction verification</caption>
-        <thead><tr><th scope="col">User</th><th scope="col">Amount</th><th scope="col">Status</th><th scope="col">Transaction hash</th><th scope="col">Actions</th></tr></thead>
+        <thead><tr><th scope="col">User</th><th scope="col">Gross</th><th scope="col">Fee</th><th scope="col">Net</th><th scope="col">Processing deadline</th><th scope="col">Status</th><th scope="col">Transaction hash</th><th scope="col">Actions</th></tr></thead>
         <tbody>
           {% for payout in payouts %}
             <tr>
               <th scope="row" data-label="User" class="breakable">{{ payout.email }}</th>
-              <td data-label="Amount">${{ '%.6f'|format(payout.amount_micro_usd / 1000000) }}</td>
+              <td data-label="Gross">${{ '%.6f'|format(payout.amount_micro_usd / 1000000) }}</td>
+              <td data-label="Fee">${{ '%.6f'|format(payout.fee_micro_usd / 1000000) }} ({{ '%.2f'|format(payout.fee_bps / 100) }}%)</td>
+              <td data-label="Net">${{ '%.6f'|format(payout.net_micro_usd / 1000000) }}</td>
+              <td data-label="Processing deadline"><time datetime="{{ payout.processing_due_at }}">{{ payout.processing_due_at }}</time>{% if payout.status in ('requested','approved','verifying') and payout.processing_due_at < now_iso %}<span class="badge danger">Overdue</span>{% endif %}</td>
               <td data-label="Status"><span class="badge {{ payout.status }}">{{ payout.status|capitalize }}</span></td>
               <td data-label="Transaction hash" class="mono breakable">{{ payout.tx_hash or '-' }}{% if payout.confirmations %}<small class="field-hint">{{ payout.confirmations }} confirmation{{ '' if payout.confirmations == 1 else 's' }}</small>{% endif %}</td>
               <td data-label="Actions" class="actions">

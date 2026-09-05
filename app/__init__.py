@@ -37,13 +37,25 @@ def _valid_fernet_key(value: object) -> bool:
 
 
 def create_app(test_config: dict | None = None) -> Flask:
-    app = Flask(__name__, instance_relative_config=True)
+    instance_path = os.environ.get("EARN_PROXY_INSTANCE_PATH")
+    flask_kwargs = {"instance_relative_config": True}
+    if instance_path:
+        flask_kwargs["instance_path"] = instance_path
+    app = Flask(__name__, **flask_kwargs)
     app.config.from_mapping(
         SECRET_KEY=os.environ.get("EARN_PROXY_SECRET_KEY", "dev-change-me"),
         DATABASE=os.environ.get(
             "EARN_PROXY_DATABASE",
             os.path.join(app.instance_path, "earn-proxy.db"),
         ),
+        EARN_PROXY_DOMAIN=os.environ.get("EARN_PROXY_DOMAIN", "proxy.acacondos.com"),
+        LEGACY_EARN_PROXY_DOMAIN=os.environ.get("EARN_PROXY_LEGACY_DOMAIN", "earn.proxy.acacondos.com"),
+        WHITELIST_HOST=os.environ.get("EARN_PROXY_WHITELIST_HOST", "whitelist.proxy.acacondos.com"),
+        WHITELIST_IP=os.environ.get("EARN_PROXY_WHITELIST_IP", "42.96.12.142"),
+        RELAY_FEED_URL=os.environ.get("EARN_PROXY_RELAY_FEED_URL", "http://127.0.0.1:8000/internal/feed"),
+        RELAY_FEED_KEY=os.environ.get("EARN_PROXY_RELAY_FEED_KEY", ""),
+        RELAY_SSO_SECRET=os.environ.get("EARN_PROXY_RELAY_SSO_SECRET", ""),
+        RELAY_PUBLIC_URL=os.environ.get("EARN_PROXY_RELAY_PUBLIC_URL", "https://transfer.proxy.acacondos.com"),
         FERNET_KEY=os.environ.get("EARN_PROXY_FERNET_KEY", ""),
         INTERNAL_API_KEY=os.environ.get("EARN_PROXY_INTERNAL_API_KEY", ""),
         ADMIN_EMAIL=os.environ.get("EARN_PROXY_ADMIN_EMAIL", "admin@example.com"),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 from app.services.earnings import balances_for_user
 
@@ -8,6 +9,35 @@ DEFAULT_MAX_OUTSTANDING_PAYOUTS_PER_USER = 10
 MAX_MAX_OUTSTANDING_PAYOUTS_PER_USER = 1_000
 NONTERMINAL_PAYOUT_STATUSES = ("requested", "approved", "verifying")
 MAX_PAYOUT_MICRO_USD = 10**15
+MIN_PAYOUT_MICRO_USD = 10_000_000
+FEE_TIER_THRESHOLD_MICRO_USD = 50_000_000
+FEE_TIER_LOW_BPS = 1_000
+FEE_TIER_HIGH_BPS = 200
+PAYOUT_PROCESSING_HOURS = 48
+
+
+@dataclass(frozen=True)
+class PayoutQuote:
+    amount_micro_usd: int
+    fee_bps: int
+    fee_micro_usd: int
+    net_micro_usd: int
+
+
+def quote_payout(amount_micro_usd: int) -> PayoutQuote:
+    amount = int(amount_micro_usd)
+    if amount < MIN_PAYOUT_MICRO_USD:
+        raise ValueError("The minimum payout is $10.00")
+    if amount > MAX_PAYOUT_MICRO_USD:
+        raise ValueError("Payout amount is above the supported maximum")
+    fee_bps = FEE_TIER_HIGH_BPS if amount >= FEE_TIER_THRESHOLD_MICRO_USD else FEE_TIER_LOW_BPS
+    fee = amount * fee_bps // 10_000
+    return PayoutQuote(
+        amount_micro_usd=amount,
+        fee_bps=fee_bps,
+        fee_micro_usd=fee,
+        net_micro_usd=amount - fee,
+    )
 
 
 class PayoutQuotaExceeded(ValueError):
@@ -32,10 +62,7 @@ def request_payout(
 ) -> int:
     current = now or datetime.now(UTC)
     amount = int(amount_micro_usd)
-    if amount <= 0:
-        raise ValueError("Payout amount must be positive")
-    if amount > MAX_PAYOUT_MICRO_USD:
-        raise ValueError("Payout amount is above the supported maximum")
+    quote = quote_payout(amount)
     try:
         # Serialize balance validation and reservation so simultaneous requests
         # cannot each observe the same unreserved funds.
@@ -67,8 +94,24 @@ def request_payout(
         if amount > available - int(reserved):
             raise ValueError("Payout amount exceeds available balance")
         cursor = db.execute(
-            "INSERT INTO payouts(user_id,wallet_id,wallet_address,amount_micro_usd,status,created_at,updated_at) VALUES(?,?,?,?,'requested',?,?)",
-            (user_id, wallet["id"], wallet["address"], amount, current.isoformat(), current.isoformat()),
+            """
+            INSERT INTO payouts(
+                user_id,wallet_id,wallet_address,amount_micro_usd,fee_bps,
+                fee_micro_usd,net_micro_usd,processing_due_at,status,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,'requested',?,?)
+            """,
+            (
+                user_id,
+                wallet["id"],
+                wallet["address"],
+                quote.amount_micro_usd,
+                quote.fee_bps,
+                quote.fee_micro_usd,
+                quote.net_micro_usd,
+                (current + timedelta(hours=PAYOUT_PROCESSING_HOURS)).isoformat(),
+                current.isoformat(),
+                current.isoformat(),
+            ),
         )
         db.commit()
         return int(cursor.lastrowid)

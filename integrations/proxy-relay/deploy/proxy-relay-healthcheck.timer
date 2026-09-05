@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Proxy Relay Lightweight Health Check
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

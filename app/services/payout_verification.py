@@ -186,7 +186,13 @@ def verify_bsc_payout(
                 confirmations,
                 block_number,
             )
-        expected_units = int(payout["amount_micro_usd"]) * (10**decimals) // 1_000_000
+        try:
+            transfer_micro_usd = int(payout["net_micro_usd"])
+        except (KeyError, IndexError, TypeError, ValueError):
+            transfer_micro_usd = int(payout["amount_micro_usd"])
+        if transfer_micro_usd <= 0:
+            transfer_micro_usd = int(payout["amount_micro_usd"])
+        expected_units = transfer_micro_usd * (10**decimals) // 1_000_000
         matching_contract = False
         matching_recipient = False
         for log in receipt.get("logs") or []:

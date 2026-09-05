@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Transfer Proxy - Earn Proxy{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">ADMIN WORKSPACE</p>
+    <h1>Transfer Proxy</h1>
+    <p class="muted">Manage fixed listener mappings without exposing upstream credentials to contributors.</p>
+  </div>
+</div>
+<nav class="section-nav" aria-label="Admin sections">
+  <a href="{{ url_for('admin.dashboard') }}">Overview</a>
+  <a href="{{ url_for('admin.users') }}">Users</a>
+  <a href="{{ url_for('admin.payouts') }}">Payouts</a>
+  <a href="{{ url_for('admin.integrations') }}">API &amp; integrations</a>
+  <a href="{{ url_for('admin.transfer_proxy') }}" aria-current="page">Transfer Proxy</a>
+</nav>
+{% if relay_configured %}
+<section class="panel" aria-labelledby="relay-launch-title">
+  <h2 id="relay-launch-title">Open relay manager</h2>
+  <p class="muted">The relay manager opens in its own isolated workspace. The handoff token expires quickly and is never put in the URL.</p>
+  <form method="post" action="{{ relay_url }}" id="relay-sso-form">
+    <input type="hidden" name="token" value="{{ relay_token }}">
+    <button class="button primary" type="submit">Continue to Transfer Proxy</button>
+  </form>
+  <noscript><p class="field-hint">JavaScript is not required. Submit the form to continue.</p></noscript>
+</section>
+{% else %}
+<section class="panel error-card"><h2>Relay manager is not configured</h2><p>Ask the administrator to configure the relay SSO secret before opening this workspace.</p></section>
+{% endif %}
+{% endblock %}
