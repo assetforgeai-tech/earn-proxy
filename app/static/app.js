@@ -1,4 +1,8 @@
 (() => {
+  const themeStorageKey = "earn-proxy-theme";
+  const savedTheme = window.localStorage?.getItem(themeStorageKey);
+  if (savedTheme === "dark") document.body.classList.add("theme-dark");
+
   const sidebar = document.querySelector("#app-sidebar");
   const menuToggle = document.querySelector("#mobile-menu-toggle");
   const sidebarOverlay = document.querySelector("#sidebar-overlay");
@@ -20,9 +24,11 @@
   sidebar?.querySelectorAll(".nav-item").forEach((item) => item.addEventListener("click", closeSidebar));
 
   const themeToggle = document.querySelector("[data-theme-toggle]");
+  themeToggle?.setAttribute("aria-pressed", String(document.body.classList.contains("theme-dark")));
   themeToggle?.addEventListener("click", () => {
-    document.body.classList.toggle("theme-dark");
-    themeToggle.setAttribute("aria-pressed", String(document.body.classList.contains("theme-dark")));
+    const dark = document.body.classList.toggle("theme-dark");
+    window.localStorage?.setItem(themeStorageKey, dark ? "dark" : "light");
+    themeToggle.setAttribute("aria-pressed", String(dark));
   });
 
   const pageSearch = document.querySelector("[data-page-search]");

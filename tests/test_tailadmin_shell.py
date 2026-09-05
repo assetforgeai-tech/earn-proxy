@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from conftest import login, login_admin, register
 
 
@@ -53,3 +55,12 @@ def test_auth_pages_keep_lightweight_auth_shell(client):
 
     assert 'class="auth-shell"' in page
     assert 'id="app-sidebar"' not in page
+
+
+def test_theme_control_has_a_persisted_visual_theme_contract():
+    css = (Path(__file__).parents[1] / "app" / "static" / "app.css").read_text()
+    js = (Path(__file__).parents[1] / "app" / "static" / "app.js").read_text()
+
+    assert ".theme-dark" in css
+    assert "localStorage" in js
+    assert "data-theme-toggle" in (Path(__file__).parents[1] / "app" / "templates" / "base.html").read_text()

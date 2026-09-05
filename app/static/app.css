@@ -1162,6 +1162,39 @@ body.authenticated input, body.authenticated select { border-color: var(--shell-
 body.authenticated table { border-color: var(--shell-line); }
 body.authenticated .badge.active, body.authenticated .badge.online, body.authenticated .badge.allow, body.authenticated .badge.approved, body.authenticated .badge.confirmed { background: #ecfdf3; color: #039855; }
 
+body.authenticated.theme-dark {
+  --shell-bg: #101828;
+  --shell-surface: #182230;
+  --shell-line: #344054;
+  --shell-ink: #f2f4f7;
+  --shell-muted: #98a2b3;
+  --shell-primary-soft: #202b63;
+  background: var(--shell-bg);
+  color: var(--shell-ink);
+}
+
+body.authenticated.theme-dark .app-topbar,
+body.authenticated.theme-dark .global-search,
+body.authenticated.theme-dark .icon-button,
+body.authenticated.theme-dark .system-card,
+body.authenticated.theme-dark .panel,
+body.authenticated.theme-dark .stats article { background: var(--shell-surface); color: var(--shell-ink); }
+body.authenticated.theme-dark .global-search input,
+body.authenticated.theme-dark .account-copy strong,
+body.authenticated.theme-dark .system-card strong { color: var(--shell-ink); }
+body.authenticated.theme-dark .sidebar-nav .nav-item { color: #d0d5dd; }
+body.authenticated.theme-dark .sidebar-nav .nav-item:hover { background: #202b3c; color: #aab7ff; }
+body.authenticated.theme-dark .section-nav { background: #1d2939; }
+body.authenticated.theme-dark .section-nav a { color: #d0d5dd; }
+body.authenticated.theme-dark .section-nav a[aria-current="page"],
+body.authenticated.theme-dark .section-nav a.is-active { background: #27356f; color: #c7d2fe; }
+body.authenticated.theme-dark input,
+body.authenticated.theme-dark select,
+body.authenticated.theme-dark textarea { background: #1d2939; color: var(--shell-ink); border-color: var(--shell-line); }
+body.authenticated.theme-dark .button.ghost { background: #1d2939; color: #eaecf0; }
+body.authenticated.theme-dark .button.ghost:hover { background: #273548; }
+body.authenticated.theme-dark table { color: var(--shell-ink); }
+
 .sidebar-overlay { display: none; }
 .auth-shell { min-height: 100vh; max-width: 1180px; margin: 0 auto; padding: 38px 24px 80px; }
 
