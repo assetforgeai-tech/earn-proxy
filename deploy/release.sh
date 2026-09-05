@@ -24,7 +24,7 @@ next_link="/opt/.earn-proxy-next"
 archive="$(mktemp --tmpdir earn-proxy-release.XXXXXX.tar)"
 backup_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 backup_dir="/var/backups/earn-proxy/${backup_stamp}-${revision}"
-database_path="$(awk -F= '$1 == "EARN_PROXY_DATABASE" { sub(/^[[:space:]]+/, "", $2); gsub(/^\"|\"$/, "", $2); print $2; exit }' /etc/earn-proxy.env)"
+database_path="$(awk -F= '$1 == "EARN_PROXY_DATABASE" { sub(/^[[:space:]]+/, "", $2); gsub(/^"|"$/, "", $2); print $2; exit }' /etc/earn-proxy.env)"
 database_path="${database_path:-/var/lib/earn-proxy/earn-proxy.db}"
 activated=0
 services=(
@@ -95,7 +95,6 @@ systemctl daemon-reload
 systemd-analyze verify "$release_dir"/deploy/earn-proxy-*.service
 ln -s "$release_dir" "$next_link"
 mv -Tf "$next_link" /opt/earn-proxy
-
 if ! systemctl restart "${services[@]}" || ! timeout 30 bash -c '
   until curl -fsS http://127.0.0.1:8100/healthz >/dev/null; do sleep 1; done
 '; then
