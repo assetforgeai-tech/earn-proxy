@@ -780,7 +780,19 @@ thead th {
   }
 
   .topbar {
+    flex-direction: column;
+    align-items: stretch;
     padding: 16px;
+  }
+
+  .brand {
+    align-self: flex-start;
+  }
+
+  .account-nav {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    gap: 8px 12px;
   }
 
   .account-email {
@@ -795,10 +807,8 @@ thead th {
   .section-nav {
     top: 4px;
     max-width: 100%;
-    overflow-x: auto;
-    flex-wrap: nowrap;
-    scrollbar-width: thin;
-    overscroll-behavior-inline: contain;
+    overflow-x: visible;
+    flex-wrap: wrap;
   }
 
   .section-nav a {

@@ -53,7 +53,16 @@ def test_caddy_contract_routes_primary_legacy_transfer_and_whitelist_domains():
     assert "transfer.proxy.acacondos.com" in caddy and "reverse_proxy 127.0.0.1:8000" in caddy
     assert "@relay_internal path /internal/feed*" in caddy and "respond @relay_internal 404" in caddy
     assert "whitelist.proxy.acacondos.com" in caddy and 'respond "42.96.12.142\\n" 200' in caddy
-    assert "earn.proxy.acacondos.com" in caddy and "path /api/* /internal/api/*" in caddy
+    legacy = caddy.split("earn.proxy.acacondos.com", 1)[1]
+    assert "route {" in legacy and "handle @api" in legacy
+    assert "handle {" in legacy and "redir https://proxy.acacondos.com{uri} permanent" in legacy
+
+
+def test_mobile_navigation_wraps_without_hidden_horizontal_overflow():
+    css = (Path(__file__).parents[1] / "app" / "static" / "app.css").read_text()
+    mobile = css.split("@media (max-width: 700px)", 1)[1]
+    assert ".topbar {\n    flex-direction: column;" in mobile
+    assert ".section-nav {\n    top: 4px;\n    max-width: 100%;\n    overflow-x: visible;\n    flex-wrap: wrap;" in mobile
 
 
 def test_schema_contains_scheduler_and_egress_audit_columns(app):

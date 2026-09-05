@@ -29,9 +29,13 @@ whitelist.proxy.acacondos.com {
 }
 
 earn.proxy.acacondos.com {
-    @api path /api/* /internal/api/*
-    handle @api {
-        reverse_proxy 127.0.0.1:8100
+    route {
+        @api path /api/* /internal/api/*
+        handle @api {
+            reverse_proxy 127.0.0.1:8100
+        }
+        handle {
+            redir https://proxy.acacondos.com{uri} permanent
+        }
     }
-    redir https://proxy.acacondos.com{uri} permanent
 }
