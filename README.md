@@ -96,15 +96,17 @@ docker compose ps
 docker compose logs --tail=100 health-checker earnapp-checker maintenance payout-verifier
 ```
 
-For a native Ubuntu deployment, copy the systemd units from `deploy/`, set secrets in `/etc/earn-proxy.env`, and keep the SQLite database under `/var/lib/earn-proxy`:
+For a native Ubuntu deployment, keep secrets in `/etc/earn-proxy.env` and the SQLite database under `/var/lib/earn-proxy`. Deploy a committed revision from a clean checkout with the versioned release script:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now earn-proxy-web earn-proxy-checker earn-proxy-earnapp earn-proxy-maintenance earn-proxy-payout-verifier
+sudo bash deploy/release.sh "$(git rev-parse --verify HEAD)"
+sudo systemctl enable earn-proxy-web earn-proxy-checker earn-proxy-earnapp earn-proxy-maintenance earn-proxy-payout-verifier
 sudo systemctl status earn-proxy-web earn-proxy-checker earn-proxy-earnapp earn-proxy-maintenance earn-proxy-payout-verifier
 ```
 
-The units use `Restart=always`, a five-second restart delay, a dedicated unprivileged account, and a restricted writable data path. Back up the SQLite database and Fernet key together before upgrades. To roll back, stop the services, restore the previous application directory and database/key pair, then start the same units again.
+The release script creates the virtualenv only after the release has reached its final absolute path, validates imports, configuration, dependency consistency, database access, and systemd units, then atomically switches `/opt/earn-proxy`. If the restarted application fails its local health check, it restores the previous symlink and restarts the services. Never copy or move a virtualenv between release directories: Python console scripts and package metadata may retain absolute paths.
+
+The units use `Restart=always`, a five-second restart delay, a dedicated unprivileged account, and a restricted writable data path. Back up the SQLite database and Fernet key together before upgrades. The previous versioned directory remains available as the first rollback target.
 
 Do not use the development placeholder secrets. Back up the SQLite database and Fernet key together; losing the key makes stored proxy credentials unrecoverable.
 
