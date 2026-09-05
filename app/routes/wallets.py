@@ -29,10 +29,10 @@ def update_wallet():
     try:
         wallet = set_wallet(get_db(), g.user["id"], request.form.get("address", ""))
     except (ValueError, WalletInUse, WalletLocked) as exc:
-        return form_error(str(exc), 400, "dashboard.dashboard", field="address", focus="address")
+        return form_error(str(exc), 400, "dashboard.wallet", field="address", focus="address")
     return form_success(
         {"address": wallet.address, "locked_until": wallet.locked_until},
-        endpoint="dashboard.dashboard",
+        endpoint="dashboard.wallet",
         message="Wallet saved. A 48-hour payout lock now applies.",
     )
 
@@ -87,12 +87,12 @@ def create_payout():
             max_outstanding_payouts=max_outstanding,
         )
     except PayoutQuotaExceeded as exc:
-        return form_error(str(exc), 429, "dashboard.dashboard", field="amount_usd", focus="amount_usd")
+        return form_error(str(exc), 429, "dashboard.wallet", field="amount_usd", focus="amount_usd")
     except (ValueError, TypeError) as exc:
-        return form_error(str(exc), 400, "dashboard.dashboard", field="amount_usd", focus="amount_usd")
+        return form_error(str(exc), 400, "dashboard.wallet", field="amount_usd", focus="amount_usd")
     return form_success(
         {"id": payout_id, "status": "requested"},
         status=201,
-        endpoint="dashboard.dashboard",
+        endpoint="dashboard.wallet",
         message="Payout request submitted for manual review.",
     )

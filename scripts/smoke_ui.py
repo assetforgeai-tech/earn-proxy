@@ -23,7 +23,7 @@ with sync_playwright() as playwright:
 
     desktop = browser.new_page(viewport={"width": 1440, "height": 1000})
     sign_in(desktop)
-    assert desktop.get_by_role("link", name="API & integrations", exact=True).first.is_visible()
+    assert desktop.get_by_role("link", name="Distribution API", exact=True).is_visible()
     assert desktop.locator("#checker-policy").count() == 0
     desktop.goto(f"{BASE_URL}/admin/checker")
     desktop.wait_for_load_state("networkidle")
@@ -60,15 +60,15 @@ with sync_playwright() as playwright:
     mobile.wait_for_load_state("networkidle")
     mobile.get_by_role("heading", name="Connect your distribution client.").wait_for(state="visible")
     assert mobile.get_by_role("heading", name="Connect your distribution client.").is_visible()
-    assert mobile.get_by_role("button", name="Copy canonical API endpoint").is_visible()
+    assert mobile.get_by_role("button", name="Copy raw proxy endpoint").is_visible()
     assert mobile.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
 
     desktop.goto(f"{BASE_URL}/admin/integrations")
     desktop.wait_for_load_state("networkidle")
     desktop.get_by_role("heading", name="Connect your distribution client.").wait_for(state="visible")
     assert desktop.get_by_role("heading", name="Connect your distribution client.").is_visible()
-    assert desktop.locator("#canonical-endpoint").inner_text().endswith("/api/v1/proxies")
-    assert desktop.get_by_role("button", name="Copy canonical API endpoint").is_visible()
+    assert desktop.locator("#raw-endpoint").inner_text().endswith("/api/v1/proxy-raw")
+    assert desktop.get_by_role("button", name="Copy raw proxy endpoint").is_visible()
     assert desktop.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
 
     desktop.goto(f"{BASE_URL}/admin/integrations/api-keys")

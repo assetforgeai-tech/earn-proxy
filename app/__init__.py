@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from datetime import UTC, datetime
 
 from cryptography.fernet import Fernet
 from flask import Flask, g, jsonify, render_template, request
@@ -86,6 +87,18 @@ def create_app(test_config: dict | None = None) -> Flask:
     if test_config:
         app.config.update(test_config)
 
+    @app.template_filter("timestamp_label")
+    def timestamp_label(value):
+        if not value:
+            return "Never"
+        try:
+            parsed = datetime.fromisoformat(str(value))
+        except ValueError:
+            return str(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC).strftime("%b %d, %Y %H:%M UTC")
+
     if not app.testing:
         unsafe = (
             _is_secret_placeholder(app.secret_key)
@@ -106,17 +119,21 @@ def create_app(test_config: dict | None = None) -> Flask:
     @app.context_processor
     def inject_shell_context():
         endpoint = str(request.endpoint or "")
-        route_nav = {
-            "admin.dashboard": "overview",
-            "admin.checker": "checker",
-            "admin.users": "users",
-            "admin.payouts": "payouts",
-            "admin.integrations": "integrations",
-            "admin.api_keys_workspace": "api_keys",
-            "admin.transfer_proxy": "transfer_proxy",
-            "dashboard.dashboard": "dashboard",
+        route_shell = {
+            "admin.dashboard": ("overview", "Overview"),
+            "admin.checker": ("checker", "Health checker"),
+            "admin.users": ("users", "Users"),
+            "admin.payouts": ("payouts", "Payouts"),
+            "admin.integrations": ("integrations", "Distribution API"),
+            "admin.api_keys_workspace": ("api_keys", "API keys"),
+            "admin.transfer_proxy": ("transfer_proxy", "Transfer Proxy"),
+            "dashboard.dashboard": ("dashboard", "Overview"),
+            "dashboard.proxies": ("proxy_pool", "Proxy pool"),
+            "dashboard.earnings": ("earnings", "Earnings"),
+            "dashboard.wallet": ("wallet", "Wallet & payouts"),
         }
-        return {"active_nav": route_nav.get(endpoint, "dashboard")}
+        active_nav, shell_title = route_shell.get(endpoint, ("dashboard", "Overview"))
+        return {"active_nav": active_nav, "shell_title": shell_title}
 
     from app.routes import admin, dashboard, internal_api, proxies, wallets
     from app.routes import auth as auth_routes

@@ -70,15 +70,16 @@ def test_user_dashboard_explains_fee_quote_and_whitelist_values(app, client):
     client.post("/logout")
     login(client, "fee-copy@example.com", "member-password")
 
-    page = client.get("/dashboard").get_data(as_text=True)
+    wallet_page = client.get("/dashboard/wallet").get_data(as_text=True)
+    proxy_page = client.get("/dashboard/proxies").get_data(as_text=True)
 
-    assert "Minimum payout: $10.00" in page
-    assert "10% fee for $10.00–$49.99" in page
-    assert "2% fee from $50.00" in page
-    assert "processed within 48 hours" in page
-    assert "whitelist.proxy.acacondos.com" in page
-    assert "42.96.12.142" in page
-    assert "data-copy-target" in page
+    assert "Minimum payout: $10.00" in wallet_page
+    assert "10% fee for $10.00–$49.99" in wallet_page
+    assert "2% fee from $50.00" in wallet_page
+    assert "processed within 48 hours" in wallet_page
+    assert "whitelist.proxy.acacondos.com" in proxy_page
+    assert "42.96.12.142" in proxy_page
+    assert "data-copy-target" in proxy_page
 
 
 def test_verifying_payout_offers_guarded_transaction_replacement(app, client):
@@ -99,7 +100,7 @@ def test_verifying_and_failed_statuses_are_explained_to_admin_and_user(app, clie
 
     client.post("/logout")
     login(client, "payout-ui@example.com", "member-password")
-    user_page = client.get("/dashboard").get_data(as_text=True)
+    user_page = client.get("/dashboard/wallet").get_data(as_text=True)
     assert "Failed" in user_page
     assert "Payment verification failed; admin review is required." in user_page
     assert "Simulated verifier detail" not in user_page

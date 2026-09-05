@@ -7,7 +7,7 @@ def test_admin_integration_page_explains_connection_without_exposing_key(client)
     page = response.get_data(as_text=True)
 
     assert response.status_code == 200
-    assert "API &amp; integrations" in page or "API & integrations" in page
+    assert "Distribution API" in page
     assert "/api/v1/proxies" in page
     assert "/api/v1/proxy-raw" in page
     assert "/api/v1/proxy-transfer" in page
@@ -104,9 +104,10 @@ def test_integration_endpoint_uses_forwarded_https_host(client):
 
 def test_admin_workspace_titles_match_the_selected_route(client):
     login_admin(client)
-    assert "Checker policy - Earn Proxy" in client.get("/admin/checker").get_data(as_text=True)
+    assert "Health checker - Earn Proxy" in client.get("/admin/checker").get_data(as_text=True)
     assert "Users - Earn Proxy" in client.get("/admin/users").get_data(as_text=True)
     assert "Payouts - Earn Proxy" in client.get("/admin/payouts").get_data(as_text=True)
+    assert "Distribution API - Earn Proxy" in client.get("/admin/integrations").get_data(as_text=True)
 
 
 def test_admin_brand_link_does_not_route_through_contributor_dashboard(client):

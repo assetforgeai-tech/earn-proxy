@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}API &amp; integrations - Earn Proxy{% endblock %}
+{% block title %}Distribution API - Earn Proxy{% endblock %}
 {% block content %}
 <div class="page-head">
   <div>
@@ -8,16 +8,6 @@
     <p class="muted">Choose a feed for your downstream system. Credentials are returned only to an authenticated machine client, never displayed in this admin page.</p>
   </div>
 </div>
-
-<nav class="section-nav" aria-label="Admin sections">
-  <a href="{{ url_for('admin.dashboard') }}">Overview</a>
-  <a href="{{ url_for('admin.checker') }}">Checker</a>
-  <a href="{{ url_for('admin.users') }}">Users</a>
-  <a href="{{ url_for('admin.payouts') }}">Payouts</a>
-  <a href="{{ url_for('admin.integrations') }}" class="is-active">API &amp; integrations</a>
-  <a href="{{ url_for('admin.api_keys_workspace') }}">API keys</a>
-  <a href="{{ url_for('admin.transfer_proxy') }}">Transfer Proxy</a>
-</nav>
 
 <section class="panel integration-hero" aria-labelledby="integration-status-title">
   <div>

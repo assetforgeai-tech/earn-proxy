@@ -21,7 +21,7 @@ bp = Blueprint("proxies", __name__, url_prefix="/proxies")
 @login_required
 def create_proxy():
     if g.user["role"] != "user":
-        return form_error("Only user accounts can add proxies", 403, "dashboard.dashboard")
+        return form_error("Only user accounts can add proxies", 403, "dashboard.proxies")
     db = get_db()
     try:
         quota = max(1, min(10_000, int(current_app.config.get("MAX_ACTIVE_PROXIES_PER_USER", 100))))
@@ -39,7 +39,7 @@ def create_proxy():
         return form_error(
             f"This account has reached the maximum number of active proxies ({quota})",
             429,
-            "dashboard.dashboard",
+            "dashboard.proxies",
             field="raw_proxy",
             focus="raw_proxy",
         )
@@ -51,15 +51,15 @@ def create_proxy():
             max_active_proxies=quota,
         )
     except ProxyParseError as exc:
-        return form_error(str(exc), 400, "dashboard.dashboard", field="raw_proxy", focus="raw_proxy")
+        return form_error(str(exc), 400, "dashboard.proxies", field="raw_proxy", focus="raw_proxy")
     except DuplicateCredential as exc:
-        return form_error(str(exc), 409, "dashboard.dashboard", field="raw_proxy", focus="raw_proxy")
+        return form_error(str(exc), 409, "dashboard.proxies", field="raw_proxy", focus="raw_proxy")
     except ProxyQuotaExceeded as exc:
-        return form_error(str(exc), 429, "dashboard.dashboard", field="raw_proxy", focus="raw_proxy")
+        return form_error(str(exc), 429, "dashboard.proxies", field="raw_proxy", focus="raw_proxy")
     return form_success(
         {"id": proxy_id, "status": "pending"},
         status=201,
-        endpoint="dashboard.dashboard",
+        endpoint="dashboard.proxies",
         message="Proxy added and queued for checking.",
     )
 
@@ -73,15 +73,15 @@ def replace(proxy_id: int):
         return form_error(
             str(exc),
             400,
-            "dashboard.dashboard",
+            "dashboard.proxies",
             field="raw_proxy",
             focus=f"replace-{proxy_id}",
         )
     except LookupError as exc:
-        return form_error(str(exc), 404, "dashboard.dashboard")
+        return form_error(str(exc), 404, "dashboard.proxies")
     return form_success(
         {"id": proxy_id, "status": "pending"},
-        endpoint="dashboard.dashboard",
+        endpoint="dashboard.proxies",
         message="Proxy replaced and queued for checking.",
     )
 
@@ -92,8 +92,8 @@ def delete(proxy_id: int):
     try:
         archive_proxy(get_db(), proxy_id, g.user["id"])
     except LookupError as exc:
-        return form_error(str(exc), 404, "dashboard.dashboard")
+        return form_error(str(exc), 404, "dashboard.proxies")
     if is_browser_form():
         flash("Proxy removed. Historical earnings are retained.", "success")
-        return redirect(url_for("dashboard.dashboard"), code=303)
+        return redirect(url_for("dashboard.proxies"), code=303)
     return "", 204

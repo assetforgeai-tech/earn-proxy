@@ -6,22 +6,87 @@
   const sidebar = document.querySelector("#app-sidebar");
   const menuToggle = document.querySelector("#mobile-menu-toggle");
   const sidebarOverlay = document.querySelector("#sidebar-overlay");
+  const mobileQuery = window.matchMedia("(max-width: 1099px)");
+  const focusableSelector =
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  let drawerOpen = false;
 
-  const closeSidebar = () => {
-    sidebar?.classList.remove("open");
-    sidebarOverlay?.classList.remove("open");
-    menuToggle?.setAttribute("aria-expanded", "false");
+  const syncSidebarMode = () => {
+    if (!sidebar) return;
+    const mobile = mobileQuery.matches;
+    if (!mobile) {
+      drawerOpen = false;
+      sidebar.hidden = false;
+      sidebar.inert = false;
+      sidebar.setAttribute("aria-hidden", "false");
+      sidebar.classList.remove("open");
+      sidebarOverlay?.classList.remove("open");
+      if (sidebarOverlay) sidebarOverlay.hidden = true;
+      menuToggle?.setAttribute("aria-expanded", "false");
+      document.body.classList.remove("drawer-open");
+      return;
+    }
+    if (!drawerOpen) {
+      sidebar.classList.remove("open");
+      sidebar.hidden = true;
+      sidebar.inert = true;
+      sidebar.setAttribute("aria-hidden", "true");
+      sidebarOverlay?.classList.remove("open");
+      if (sidebarOverlay) sidebarOverlay.hidden = true;
+      menuToggle?.setAttribute("aria-expanded", "false");
+      document.body.classList.remove("drawer-open");
+    }
   };
 
-  menuToggle?.addEventListener("click", () => {
-    const open = !sidebar?.classList.contains("open");
-    sidebar?.classList.toggle("open", open);
-    sidebarOverlay?.classList.toggle("open", open);
-    menuToggle.setAttribute("aria-expanded", String(open));
-    if (open) sidebar?.querySelector('[aria-current="page"]')?.focus();
-  });
-  sidebarOverlay?.addEventListener("click", closeSidebar);
-  sidebar?.querySelectorAll(".nav-item").forEach((item) => item.addEventListener("click", closeSidebar));
+  const closeSidebar = ({ restoreFocus = true } = {}) => {
+    if (!sidebar || !mobileQuery.matches) return;
+    drawerOpen = false;
+    sidebar.classList.remove("open");
+    sidebar.inert = true;
+    sidebar.setAttribute("aria-hidden", "true");
+    sidebar.hidden = true;
+    sidebarOverlay?.classList.remove("open");
+    if (sidebarOverlay) sidebarOverlay.hidden = true;
+    menuToggle?.setAttribute("aria-expanded", "false");
+    document.body.classList.remove("drawer-open");
+    if (restoreFocus) window.requestAnimationFrame(() => menuToggle?.focus());
+  };
+
+  const openSidebar = () => {
+    if (!sidebar || !mobileQuery.matches) return;
+    drawerOpen = true;
+    sidebar.hidden = false;
+    sidebar.inert = false;
+    sidebar.setAttribute("aria-hidden", "false");
+    sidebar.classList.add("open");
+    if (sidebarOverlay) sidebarOverlay.hidden = false;
+    sidebarOverlay?.classList.add("open");
+    menuToggle?.setAttribute("aria-expanded", "true");
+    document.body.classList.add("drawer-open");
+    window.requestAnimationFrame(() => {
+      const focusTarget = sidebar.querySelector('[aria-current="page"]') || sidebar.querySelector(".nav-item, button");
+      focusTarget?.focus();
+    });
+  };
+
+  syncSidebarMode();
+  menuToggle?.addEventListener("click", () => (drawerOpen ? closeSidebar() : openSidebar()));
+  sidebarOverlay?.addEventListener("click", () => closeSidebar());
+  sidebar?.querySelectorAll(".nav-item").forEach((item) => item.addEventListener("click", () => closeSidebar({ restoreFocus: false })));
+  mobileQuery.addEventListener?.("change", syncSidebarMode);
+
+  const legacyDashboardRoutes = {
+    "#add-proxy": "/dashboard/proxies",
+    "#proxy-status": "/dashboard/proxies",
+    "#overview": "/dashboard/earnings",
+    "#wallet": "/dashboard/wallet",
+    "#request-payout": "/dashboard/wallet",
+    "#payout-history": "/dashboard/wallet",
+  };
+  const legacyRoute = legacyDashboardRoutes[window.location.hash];
+  if (window.location.pathname === "/dashboard" && legacyRoute) {
+    window.location.replace(`${legacyRoute}${window.location.hash}`);
+  }
 
   const themeToggle = document.querySelector("[data-theme-toggle]");
   themeToggle?.setAttribute("aria-pressed", String(document.body.classList.contains("theme-dark")));
@@ -31,13 +96,21 @@
     themeToggle.setAttribute("aria-pressed", String(dark));
   });
 
-  const pageSearch = document.querySelector("[data-page-search]");
   document.addEventListener("keydown", (event) => {
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
-      event.preventDefault();
-      pageSearch?.focus();
+    if (event.key === "Escape" && drawerOpen) closeSidebar();
+    if (event.key === "Tab" && drawerOpen && sidebar) {
+      const focusableElements = [...sidebar.querySelectorAll(focusableSelector)];
+      if (!focusableElements.length) return;
+      const first = focusableElements[0];
+      const last = focusableElements[focusableElements.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     }
-    if (event.key === "Escape") closeSidebar();
   });
 
   const dialog = document.querySelector("#confirm-dialog");

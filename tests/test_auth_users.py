@@ -34,6 +34,33 @@ def test_root_redirects_active_user_to_user_dashboard(app, client):
     assert response.headers["Location"].endswith("/dashboard")
 
 
+def test_authenticated_login_page_redirects_to_the_correct_workspace(app, client):
+    login_admin(client)
+    admin_response = client.get("/login")
+    assert admin_response.status_code == 302
+    assert admin_response.headers["Location"].endswith("/admin")
+
+    client.post("/logout")
+    register(client, "login-redirect@example.com", "member-password")
+    login_admin(client)
+    with app.app_context():
+        user_id = (
+            get_db()
+            .execute(
+                "SELECT id FROM users WHERE email=?",
+                ("login-redirect@example.com",),
+            )
+            .fetchone()["id"]
+        )
+    client.post(f"/admin/users/{user_id}/approve")
+    client.post("/logout")
+    login(client, "login-redirect@example.com", "member-password")
+
+    contributor_response = client.get("/login")
+    assert contributor_response.status_code == 302
+    assert contributor_response.headers["Location"].endswith("/dashboard")
+
+
 def test_registration_is_pending_until_admin_approves(app, client):
     response = register(client)
     assert response.status_code == 201

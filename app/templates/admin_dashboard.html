@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{% if admin_section == 'checker' %}Checker policy{% elif admin_section == 'users' %}Users{% elif admin_section == 'payouts' %}Payouts{% else %}Admin overview{% endif %} - Earn Proxy{% endblock %}
+{% block title %}{% if admin_section == 'checker' %}Health checker{% elif admin_section == 'users' %}Users{% elif admin_section == 'payouts' %}Payouts{% else %}Admin overview{% endif %} - Earn Proxy{% endblock %}
 {% block content %}
 {% set error_focus = request.args.get('error_focus', '') %}
 
@@ -21,16 +21,6 @@
     {% endif %}
   </div>
 </div>
-
-<nav id="admin-nav" class="section-nav" aria-label="Admin sections">
-  <a href="{{ url_for('admin.dashboard') }}"{% if admin_section == 'overview' %} class="is-active"{% endif %}>Overview</a>
-  <a href="{{ url_for('admin.checker') }}"{% if admin_section == 'checker' %} class="is-active"{% endif %}>Checker</a>
-  <a href="{{ url_for('admin.users') }}"{% if admin_section == 'users' %} class="is-active"{% endif %}>Users</a>
-  <a href="{{ url_for('admin.payouts') }}"{% if admin_section == 'payouts' %} class="is-active"{% endif %}>Payouts</a>
-  <a href="{{ url_for('admin.integrations') }}"{% if admin_section == 'integrations' %} class="is-active"{% endif %}>API &amp; integrations</a>
-  <a href="{{ url_for('admin.transfer_proxy') }}"{% if admin_section == 'transfer_proxy' %} class="is-active"{% endif %}>Transfer Proxy</a>
-  <a href="{{ url_for('admin.api_keys_workspace') }}"{% if admin_section == 'api_keys' %} class="is-active"{% endif %}>API keys</a>
-</nav>
 
 {% if admin_section == 'overview' and stats %}
   <section id="health-overview" class="section-target" aria-labelledby="health-overview-title">
@@ -62,10 +52,12 @@
     <div><p class="eyebrow">WORKSPACES</p><h2 id="admin-quick-links-title">Choose an area to manage</h2></div>
   </div>
   <div class="quick-link-grid">
-    <a class="quick-link" href="{{ url_for('admin.checker') }}"><strong>Checker policy</strong><span>Cadence, concurrency, retries, and API classes.</span></a>
-    <a class="quick-link" href="{{ url_for('admin.users') }}"><strong>User approvals</strong><span>Approve, pause, block, or remove accounts.</span></a>
-    <a class="quick-link" href="{{ url_for('admin.payouts') }}"><strong>Payout queue</strong><span>Review requests and record transaction hashes.</span></a>
-    <a class="quick-link" href="{{ url_for('admin.integrations') }}"><strong>API &amp; integrations</strong><span>Connect another system to the live proxy feed.</span></a>
+    <a class="quick-link" href="{{ url_for('admin.checker') }}"><strong>Health checker</strong><span>Cadence, concurrency, retries, and API classes.</span></a>
+    <a class="quick-link" href="{{ url_for('admin.users') }}"><strong>Users</strong><span>Approve, pause, block, or remove accounts.</span></a>
+    <a class="quick-link" href="{{ url_for('admin.payouts') }}"><strong>Payouts</strong><span>Review requests and record transaction hashes.</span></a>
+    <a class="quick-link" href="{{ url_for('admin.integrations') }}"><strong>Distribution API</strong><span>Connect another system to the live proxy feeds.</span></a>
+    <a class="quick-link" href="{{ url_for('admin.api_keys_workspace') }}"><strong>API keys</strong><span>Create, rotate, and revoke machine credentials.</span></a>
+    <a class="quick-link" href="{{ url_for('admin.transfer_proxy') }}"><strong>Transfer Proxy</strong><span>Open the isolated fixed-listener relay manager.</span></a>
   </div>
 </section>
 {% endif %}
@@ -89,8 +81,8 @@
     </div>
     <div class="field-group"><label for="health_concurrency">Health concurrency (max 20)</label><input id="health_concurrency" name="health_concurrency" type="number" min="1" max="20" value="{{ checker.health_concurrency if checker else 5 }}" aria-describedby="health-concurrency-hint"><small id="health-concurrency-hint" class="field-hint">Default 5. Increase only when the provider and VPS have headroom.</small></div>
     <div class="field-group"><label for="health_per_host_concurrency">Per-host concurrency (max 3)</label><input id="health_per_host_concurrency" name="health_per_host_concurrency" type="number" min="1" max="3" value="{{ checker.health_per_host_concurrency if checker else 2 }}" aria-describedby="host-concurrency-hint"><small id="host-concurrency-hint" class="field-hint">Caps simultaneous checks sharing one provider host.</small></div>
-    <div class="field-group"><label for="health_retry_first_minutes">First retry (minutes)</label><input id="health_retry_first_minutes" name="health_retry_first_minutes" type="number" min="1" max="30" value="{{ checker.health_retry_first_minutes if checker else 5 }}"></div>
-    <div class="field-group"><label for="health_retry_second_minutes">Second retry (minutes)</label><input id="health_retry_second_minutes" name="health_retry_second_minutes" type="number" min="2" max="60" value="{{ checker.health_retry_second_minutes if checker else 15 }}"></div>
+    <div class="field-group"><label for="health_retry_first_minutes">First retry (minutes)</label><input id="health_retry_first_minutes" name="health_retry_first_minutes" type="number" min="1" max="30" value="{{ checker.health_retry_first_minutes if checker else 5 }}" aria-describedby="first-retry-hint"><small id="first-retry-hint" class="field-hint">Retry a transient failure before changing the persisted state.</small></div>
+    <div class="field-group"><label for="health_retry_second_minutes">Second retry (minutes)</label><input id="health_retry_second_minutes" name="health_retry_second_minutes" type="number" min="2" max="60" value="{{ checker.health_retry_second_minutes if checker else 15 }}" aria-describedby="second-retry-hint"><small id="second-retry-hint" class="field-hint">Final confirmation window before a proxy is marked offline.</small></div>
     <div class="field-group"><label for="health_stale_minutes">API freshness limit (minutes)</label><input id="health_stale_minutes" name="health_stale_minutes" type="number" min="60" max="1440" value="{{ checker.health_stale_minutes if checker else 120 }}" aria-describedby="stale-hint"><small id="stale-hint" class="field-hint">Online rows older than this are withheld from the internal API.</small></div>
     <fieldset>
       <legend>Internal API output</legend>

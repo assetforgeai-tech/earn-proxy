@@ -28,11 +28,11 @@ def test_user_dashboard_shows_safe_proxy_controls_uptime_and_payout_history(app,
             (proxy_id,),
         )
         db.commit()
-    page = client.get("/dashboard").get_data(as_text=True)
+    page = client.get("/dashboard/proxies").get_data(as_text=True)
     assert "Replace" in page
     assert "Remove" in page
     assert "Online hours" in page
-    assert "Payout" in page
+    assert "Wallet &amp; payouts" in page
     assert "private-user" not in page
     assert "private-pass" not in page
 

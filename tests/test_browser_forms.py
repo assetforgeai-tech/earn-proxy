@@ -83,7 +83,7 @@ def test_admin_browser_forms_redirect_and_flash(app, client):
     assert 'value="3"' in page
 
 
-def test_user_browser_forms_redirect_and_dashboard_has_payout_form(app, client):
+def test_user_browser_forms_return_to_the_focused_contributor_workspace(app, client):
     user_id = _activate_user(app, client)
     login(client, "browser@example.com", "member-password")
 
@@ -96,11 +96,18 @@ def test_user_browser_forms_redirect_and_dashboard_has_payout_form(app, client):
     page = added.get_data(as_text=True)
     assert "Proxy added" in page
     assert "browser-proxy.example:9000" in page
-    assert 'action="/payouts"' in page
-    assert 'name="amount_usd"' in page
+    assert 'action="/payouts"' not in page
+    assert 'data-nav="proxy_pool" aria-current="page"' in page
 
     with app.app_context():
         proxy_id = add_proxy(get_db(), user_id, "second-proxy.example:9001:user:pass")
     removed = client.post(f"/proxies/{proxy_id}/delete", data={"ui": "1"})
     assert removed.status_code == 303
-    assert removed.headers["Location"].endswith("/dashboard")
+    assert removed.headers["Location"].endswith("/dashboard/proxies")
+
+    wallet = client.post(
+        "/wallet",
+        data={"address": "0x1111111111111111111111111111111111111111", "ui": "1"},
+    )
+    assert wallet.status_code == 303
+    assert wallet.headers["Location"].endswith("/dashboard/wallet")

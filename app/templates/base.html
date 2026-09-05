@@ -31,47 +31,51 @@
       <nav class="sidebar-nav" aria-label="{{ 'Admin' if is_admin else 'Contributor' }} workspace">
         {% if is_admin %}
         <p class="nav-label">Workspace</p>
-        <a class="nav-item" data-nav="overview" href="{{ url_for('admin.dashboard') }}"{% if current_nav == 'overview' %} aria-current="page"{% endif %}>
+        <a class="nav-item" data-nav="overview"{% if current_nav == 'overview' %} aria-current="page"{% endif %} href="{{ url_for('admin.dashboard') }}">
           <svg viewBox="0 0 24 24" fill="none"><path d="M4 13h6V4H4v9Zm0 7h6v-4H4v4Zm10 0h6v-9h-6v9Zm0-16v4h6V4h-6Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><span>Overview</span>
         </a>
-        <a class="nav-item" data-nav="checker" href="{{ url_for('admin.checker') }}"{% if current_nav == 'checker' %} aria-current="page"{% endif %}>
+        <a class="nav-item" data-nav="checker"{% if current_nav == 'checker' %} aria-current="page"{% endif %} href="{{ url_for('admin.checker') }}">
           <svg viewBox="0 0 24 24" fill="none"><path d="M4 6h16M7 12h10M10 18h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Health checker</span>
         </a>
-        <a class="nav-item" data-nav="users" href="{{ url_for('admin.users') }}"{% if current_nav == 'users' %} aria-current="page"{% endif %}>
+        <a class="nav-item" data-nav="users"{% if current_nav == 'users' %} aria-current="page"{% endif %} href="{{ url_for('admin.users') }}">
           <svg viewBox="0 0 24 24" fill="none"><path d="M8 10a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm8.5-1a3.5 3.5 0 1 0 0-7M2 21v-3a5 5 0 0 1 5-5h2a5 5 0 0 1 5 5v3m1-8h1a5 5 0 0 1 5 5v3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>Users</span>
         </a>
-        <a class="nav-item" data-nav="payouts" href="{{ url_for('admin.payouts') }}"{% if current_nav == 'payouts' %} aria-current="page"{% endif %}>
+        <a class="nav-item" data-nav="payouts"{% if current_nav == 'payouts' %} aria-current="page"{% endif %} href="{{ url_for('admin.payouts') }}">
           <svg viewBox="0 0 24 24" fill="none"><path d="M3.5 7.5h17v11h-17v-11Zm2-3h13v3h-13v-3Zm10 8h3" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><span>Payouts</span>
         </a>
         <p class="nav-label">Operations</p>
-        <a class="nav-item" data-nav="integrations" href="{{ url_for('admin.integrations') }}"{% if current_nav == 'integrations' %} aria-current="page"{% endif %}>
+        <a class="nav-item" data-nav="integrations"{% if current_nav == 'integrations' %} aria-current="page"{% endif %} href="{{ url_for('admin.integrations') }}">
           <svg viewBox="0 0 24 24" fill="none"><path d="m8 8-4 4 4 4m8-8 4 4-4 4m-2.5-11-3 14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Distribution API</span>
         </a>
-        <a class="nav-item" data-nav="api_keys" href="{{ url_for('admin.api_keys_workspace') }}"{% if current_nav == 'api_keys' %} aria-current="page"{% endif %}>
+        <a class="nav-item" data-nav="api_keys"{% if current_nav == 'api_keys' %} aria-current="page"{% endif %} href="{{ url_for('admin.api_keys_workspace') }}">
           <svg viewBox="0 0 24 24" fill="none"><circle cx="8" cy="15" r="4" stroke="currentColor" stroke-width="1.7"/><path d="m11 12 8-8m-3 3 2 2m-5 1 2 2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>API keys</span>
         </a>
-        <a class="nav-item" data-nav="transfer_proxy" href="{{ url_for('admin.transfer_proxy') }}"{% if current_nav == 'transfer_proxy' %} aria-current="page"{% endif %}>
+        <a class="nav-item" data-nav="transfer_proxy"{% if current_nav == 'transfer_proxy' %} aria-current="page"{% endif %} href="{{ url_for('admin.transfer_proxy') }}">
           <svg viewBox="0 0 24 24" fill="none"><path d="M4 12h16M15 7l5 5-5 5M9 17l-5-5 5-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Transfer Proxy</span>
         </a>
         {% else %}
         <p class="nav-label">Workspace</p>
-        <a class="nav-item" data-nav="dashboard" href="{{ url_for('dashboard.dashboard') }}#overview"{% if current_nav == 'dashboard' %} aria-current="page"{% endif %}>
+        <a class="nav-item" data-nav="dashboard"{% if current_nav == 'dashboard' %} aria-current="page"{% endif %} href="{{ url_for('dashboard.dashboard') }}">
           <svg viewBox="0 0 24 24" fill="none"><path d="M4 13h6V4H4v9Zm0 7h6v-4H4v4Zm10 0h6v-9h-6v9Zm0-16v4h6V4h-6Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><span>Overview</span>
         </a>
-        <a class="nav-item" data-nav="proxy_pool" href="{{ url_for('dashboard.dashboard') }}#proxy-status">
+        <a class="nav-item" data-nav="proxy_pool"{% if current_nav == 'proxy_pool' %} aria-current="page"{% endif %} href="{{ url_for('dashboard.proxies') }}">
           <svg viewBox="0 0 24 24" fill="none"><path d="M5 7.5A2.5 2.5 0 1 0 5 2.5a2.5 2.5 0 0 0 0 5ZM19 7.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM12 21.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM7.2 6.2l3.2 10.6M16.8 6.2l-3.2 10.6M7.5 5h9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>Proxy pool</span>
         </a>
-        <a class="nav-item" data-nav="earnings" href="{{ url_for('dashboard.dashboard') }}#overview"><svg viewBox="0 0 24 24" fill="none"><path d="M4 18V9m5 9V5m6 13v-7m5 7V3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Earnings</span></a>
-        <a class="nav-item" data-nav="wallet" href="{{ url_for('dashboard.dashboard') }}#wallet"><svg viewBox="0 0 24 24" fill="none"><path d="M3.5 7.5h17v11h-17v-11Zm2-3h13v3h-13v-3Zm10 8h3" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><span>Wallet &amp; payouts</span></a>
+        <a class="nav-item" data-nav="earnings"{% if current_nav == 'earnings' %} aria-current="page"{% endif %} href="{{ url_for('dashboard.earnings') }}"><svg viewBox="0 0 24 24" fill="none"><path d="M4 18V9m5 9V5m6 13v-7m5 7V3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Earnings</span></a>
+        <a class="nav-item" data-nav="wallet"{% if current_nav == 'wallet' %} aria-current="page"{% endif %} href="{{ url_for('dashboard.wallet') }}"><svg viewBox="0 0 24 24" fill="none"><path d="M3.5 7.5h17v11h-17v-11Zm2-3h13v3h-13v-3Zm10 8h3" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><span>Wallet &amp; payouts</span></a>
         {% endif %}
       </nav>
+      <div class="drawer-account">
+        <div class="account-summary"><span class="avatar" aria-hidden="true">{{ g.user.email[:2]|upper }}</span><span class="account-copy"><strong>{{ g.user.email }}</strong><small>{{ 'Platform owner' if is_admin else 'Contributor' }}</small></span></div>
+        <form method="post" action="{{ url_for('auth.logout') }}" data-submit-once="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button ghost drawer-signout" type="submit" data-loading-label="Signing out...">Sign out</button></form>
+      </div>
       <div class="sidebar-footer"><div class="system-card"><div><strong>All systems operational</strong><span class="status-dot" aria-label="Operational"></span></div><p>Health checks and payouts are monitored.</p></div></div>
     </aside>
-    <button id="sidebar-overlay" class="sidebar-overlay" type="button" aria-label="Close navigation" tabindex="-1"></button>
+    <button id="sidebar-overlay" class="sidebar-overlay" type="button" aria-label="Close navigation" tabindex="-1" hidden></button>
     <div class="app-main">
       <header class="app-topbar">
         <button id="mobile-menu-toggle" class="icon-button menu-button" type="button" aria-label="Open navigation" aria-controls="app-sidebar" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none"><path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
-        <label class="global-search"><svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.7"/><path d="m16 16 4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><input type="search" aria-label="Search current workspace" placeholder="Search current workspace..." data-page-search><kbd>Ctrl K</kbd></label>
+        <div class="topbar-context"><span class="topbar-kicker">EARN PROXY</span><strong>{{ shell_title|default('Workspace') }}</strong></div>
         <div class="topbar-actions">
           <button class="icon-button theme-button" type="button" aria-label="Toggle theme" data-theme-toggle><svg viewBox="0 0 24 24" fill="none"><path d="M20.4 15.1A8.5 8.5 0 0 1 8.9 3.6 8.5 8.5 0 1 0 20.4 15Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg></button>
           <div class="account-summary"><span class="avatar" aria-hidden="true">{{ g.user.email[:2]|upper }}</span><span class="account-copy"><strong>{{ g.user.email }}</strong><small>{{ 'Platform owner' if is_admin else 'Contributor' }}</small></span></div>

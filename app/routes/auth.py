@@ -63,6 +63,9 @@ def register():
 @bp.route("/login", methods=("GET", "POST"))
 def login():
     if request.method == "GET":
+        if g.user is not None:
+            endpoint = "admin.dashboard" if g.user["role"] == "admin" else "dashboard.dashboard"
+            return redirect(url_for(endpoint))
         return render_template("login.html")
     email = str(request.form.get("email") or "").strip().lower()
     password = str(request.form.get("password") or "")

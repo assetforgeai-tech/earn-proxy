@@ -246,7 +246,7 @@ def test_user_dashboard_masks_credentials(app, client):
     login(client)
     client.post("/proxies", data={"raw_proxy": "edge.example:9000:private-user:private-pass"})
 
-    page = client.get("/dashboard").get_data(as_text=True)
+    page = client.get("/dashboard/proxies").get_data(as_text=True)
     assert "edge.example:9000" in page
     assert "private-user" not in page
     assert "private-pass" not in page

@@ -18,7 +18,7 @@ def test_user_can_save_wallet_but_ui_never_shows_full_address(app, client):
     _active_user(app, client)
     address = "0x1111111111111111111111111111111111111111"
     assert client.post("/wallet", data={"address": address}).status_code == 200
-    page = client.get("/dashboard").get_data(as_text=True)
+    page = client.get("/dashboard/wallet").get_data(as_text=True)
     assert address not in page
     assert "0x1111…1111" in page
 

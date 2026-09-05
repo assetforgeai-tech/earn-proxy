@@ -1010,6 +1010,10 @@ body.authenticated .app-sidebar {
   box-shadow: 8px 0 28px rgba(16, 24, 40, .025);
 }
 
+body.authenticated .app-sidebar[aria-hidden="true"] {
+  visibility: hidden;
+}
+
 body.authenticated .brand-lockup {
   min-height: 80px;
   display: flex;
@@ -1083,6 +1087,10 @@ body.authenticated .app-sidebar .brand {
   border-top: 1px solid var(--shell-line);
 }
 
+.drawer-account {
+  display: none;
+}
+
 body.authenticated .system-card {
   padding: 14px;
   border: 1px solid var(--shell-line);
@@ -1109,6 +1117,25 @@ body.authenticated .system-card {
   border-bottom: 1px solid var(--shell-line);
   background: rgba(255,255,255,.94);
   backdrop-filter: blur(12px);
+}
+
+.topbar-context {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.topbar-kicker {
+  color: var(--shell-muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .12em;
+}
+
+.topbar-context strong {
+  color: var(--shell-ink);
+  font-size: 16px;
+  letter-spacing: -.02em;
 }
 
 .global-search {
@@ -1161,6 +1188,13 @@ body.authenticated .button.ghost:hover { background: #e4e7ec; }
 body.authenticated input, body.authenticated select { border-color: var(--shell-line); border-radius: 9px; }
 body.authenticated table { border-color: var(--shell-line); }
 body.authenticated .badge.active, body.authenticated .badge.online, body.authenticated .badge.allow, body.authenticated .badge.approved, body.authenticated .badge.confirmed { background: #ecfdf3; color: #039855; }
+body.authenticated .quick-link { border-color: var(--shell-line); background: #f9fafb; color: var(--shell-ink); }
+body.authenticated .quick-link:hover, body.authenticated .quick-link:focus-visible { background: var(--shell-primary-soft); border-color: #c7d2fe; }
+body.authenticated .policy-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+body.authenticated .policy-grid article { display: grid; gap: 5px; padding: 16px; border: 1px solid var(--shell-line); border-radius: 12px; background: #f9fafb; }
+body.authenticated .policy-grid span { color: var(--shell-muted); font-size: 13px; }
+body.authenticated .copy-value, body.authenticated .code-card, body.authenticated .integration-card code { background: #f9fafb; border-color: var(--shell-line); }
+body.authenticated .info-callout { border-color: #c7d2fe; background: #f5f7ff; }
 
 body.authenticated.theme-dark {
   --shell-bg: #101828;
@@ -1178,7 +1212,15 @@ body.authenticated.theme-dark .global-search,
 body.authenticated.theme-dark .icon-button,
 body.authenticated.theme-dark .system-card,
 body.authenticated.theme-dark .panel,
-body.authenticated.theme-dark .stats article { background: var(--shell-surface); color: var(--shell-ink); }
+body.authenticated.theme-dark .stats article,
+body.authenticated.theme-dark .quick-link,
+body.authenticated.theme-dark .policy-grid article,
+body.authenticated.theme-dark .copy-value,
+body.authenticated.theme-dark .code-card,
+body.authenticated.theme-dark .integration-card,
+body.authenticated.theme-dark .integration-card code,
+body.authenticated.theme-dark .info-callout,
+body.authenticated.theme-dark .empty { background: var(--shell-surface); color: var(--shell-ink); }
 body.authenticated.theme-dark .global-search input,
 body.authenticated.theme-dark .account-copy strong,
 body.authenticated.theme-dark .system-card strong { color: var(--shell-ink); }
@@ -1194,29 +1236,44 @@ body.authenticated.theme-dark textarea { background: #1d2939; color: var(--shell
 body.authenticated.theme-dark .button.ghost { background: #1d2939; color: #eaecf0; }
 body.authenticated.theme-dark .button.ghost:hover { background: #273548; }
 body.authenticated.theme-dark table { color: var(--shell-ink); }
+body.authenticated.theme-dark .quick-link:hover,
+body.authenticated.theme-dark .quick-link:focus-visible { background: #202b63; border-color: #465fff; }
+body.authenticated.theme-dark .policy-grid span,
+body.authenticated.theme-dark .integration-card p { color: var(--shell-muted); }
+body.authenticated.theme-dark .drawer-account { border-color: var(--shell-line); }
 
 .sidebar-overlay { display: none; }
 .auth-shell { min-height: 100vh; max-width: 1180px; margin: 0 auto; padding: 38px 24px 80px; }
 
-@media (max-width: 900px) {
+@media (max-width: 1099px) {
   body.authenticated .app-sidebar { transform: translateX(-101%); transition: transform .18s ease; box-shadow: 18px 0 38px rgba(16,24,40,.16); }
   body.authenticated .app-sidebar.open { transform: translateX(0); }
   body.authenticated .app-main { margin-left: 0; }
   body.authenticated .app-topbar { padding: 0 20px; }
   body.authenticated .menu-button { display: grid; }
   body.authenticated .sidebar-overlay.open { display: block; position: fixed; z-index: 35; inset: 0; border: 0; background: rgba(16,24,40,.45); }
+  body.authenticated .drawer-account { display: grid; gap: 12px; padding: 16px; border-top: 1px solid var(--shell-line); }
+  body.authenticated .drawer-account .account-summary { padding: 0; }
+  body.authenticated .drawer-signout { width: 100% !important; }
   body.authenticated .shell { padding: 24px 20px 60px; }
 }
 
 @media (max-width: 680px) {
   body.authenticated .app-topbar { min-height: 68px; gap: 10px; }
-  body.authenticated .global-search { width: auto; flex: 1; }
-  body.authenticated .global-search kbd, body.authenticated .account-copy, body.authenticated .theme-button, body.authenticated .topbar-signout { display: none; }
+  body.authenticated .account-copy, body.authenticated .theme-button, body.authenticated .topbar-signout { display: none; }
   body.authenticated .account-summary { padding-left: 0; }
   body.authenticated .shell { padding: 20px 14px 76px; }
   body.authenticated .page-head { flex-direction: column; }
   body.authenticated .panel { padding: 17px; border-radius: 13px; }
+  body.authenticated .policy-grid { grid-template-columns: 1fr; }
 }
+
+@media (min-width: 681px) and (max-width: 1099px) {
+  body.authenticated .shell { padding: 26px; }
+  body.authenticated .page-head h1 { font-size: 28px; }
+}
+
+body.drawer-open { overflow: hidden; }
 
 @media (prefers-reduced-motion: reduce) {
   body.authenticated .app-sidebar { transition: none; }

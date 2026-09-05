@@ -50,7 +50,7 @@ def test_dashboard_exposes_progressive_forms_confirmation_and_freshness(app, cli
             (proxy_id,),
         )
         db.commit()
-    page = client.get("/dashboard").get_data(as_text=True)
+    page = client.get("/dashboard/proxies").get_data(as_text=True)
     assert 'data-submit-once="true"' in page
     assert "data-loading-label" in page
     assert "data-confirm-dialog" in page
@@ -62,8 +62,8 @@ def test_dashboard_exposes_progressive_forms_confirmation_and_freshness(app, cli
     assert "Stale result" in page
     assert 'class="mono breakable"' in page
     assert 'data-label="Endpoint"' in page
-    assert 'id="dashboard-nav"' in page
-    assert 'href="#request-payout"' in page
+    assert 'id="dashboard-nav"' not in page
+    assert 'href="/dashboard/wallet"' in page
     assert "<caption>" in page
     assert 'scope="col"' in page
 
@@ -75,9 +75,22 @@ def test_admin_dashboard_uses_accessible_confirmation_and_section_navigation(cli
     assert "data-confirm-dialog" in page
     assert "data-confirm-trigger" in page
     assert "confirm(" not in page
-    assert 'id="admin-nav"' in page
+    assert 'id="admin-nav"' not in page
+    assert 'data-nav="users" aria-current="page"' in page
     assert "<caption>" in page
     assert 'scope="col"' in page
+
+
+def test_checker_retry_fields_are_connected_to_their_helper_text(client):
+    login_admin(client)
+    page = client.get("/admin/checker").get_data(as_text=True)
+
+    assert 'id="health_retry_first_minutes"' in page
+    assert 'aria-describedby="first-retry-hint"' in page
+    assert 'id="first-retry-hint"' in page
+    assert 'id="health_retry_second_minutes"' in page
+    assert 'aria-describedby="second-retry-hint"' in page
+    assert 'id="second-retry-hint"' in page
 
 
 def test_json_error_contract_remains_json(client):

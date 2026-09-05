@@ -9,16 +9,6 @@
   </div>
 </div>
 
-<nav class="section-nav" aria-label="Admin sections">
-  <a href="{{ url_for('admin.dashboard') }}">Overview</a>
-  <a href="{{ url_for('admin.checker') }}">Checker</a>
-  <a href="{{ url_for('admin.users') }}">Users</a>
-  <a href="{{ url_for('admin.payouts') }}">Payouts</a>
-  <a href="{{ url_for('admin.integrations') }}">API &amp; integrations</a>
-  <a href="{{ url_for('admin.transfer_proxy') }}">Transfer Proxy</a>
-  <a href="{{ url_for('admin.api_keys_workspace') }}" class="is-active">API keys</a>
-</nav>
-
 {% if new_token %}
 <section class="panel token-reveal" aria-labelledby="token-reveal-title">
   <div class="panel-head">
@@ -74,8 +64,8 @@
             <th scope="row" data-label="Name" class="breakable">{{ key.name }}</th>
             <td data-label="Prefix" class="mono breakable">{{ key.token_prefix }}</td>
             <td data-label="Source">{{ key.source|capitalize }}</td>
-            <td data-label="Created"><time datetime="{{ key.created_at }}">{{ key.created_at }}</time></td>
-            <td data-label="Last used">{{ key.last_used_at or 'Never' }}</td>
+            <td data-label="Created"><time datetime="{{ key.created_at }}">{{ key.created_at|timestamp_label }}</time></td>
+            <td data-label="Last used">{% if key.last_used_at %}<time datetime="{{ key.last_used_at }}">{{ key.last_used_at|timestamp_label }}</time>{% else %}Never{% endif %}</td>
             <td data-label="Status"><span class="badge {{ 'revoked' if key.revoked_at else 'active' }}">{{ 'Revoked' if key.revoked_at else 'Active' }}</span></td>
             <td data-label="Actions" class="actions">
               {% if not key.revoked_at %}

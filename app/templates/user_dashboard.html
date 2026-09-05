@@ -1,25 +1,28 @@
 {% extends "base.html" %}
-{% block title %}Dashboard - Earn Proxy{% endblock %}
+{% block title %}{{ shell_title|default('Dashboard') }} - Earn Proxy{% endblock %}
 {% block content %}
 {% set error_focus = request.args.get('error_focus', '') %}
 
 <div class="page-head">
   <div>
     <p class="eyebrow">CONTRIBUTOR DASHBOARD</p>
-    <h1>Your earning endpoints</h1>
-    <p class="muted">Only a safe host:port preview is shown here. Credentials never appear in the UI.</p>
+    {% if dashboard_section == 'proxies' %}
+      <h1>Manage your proxy pool</h1>
+      <p class="muted">Add, replace, and monitor endpoints. Only a safe host:port preview is shown here.</p>
+    {% elif dashboard_section == 'earnings' %}
+      <h1>Track your earnings</h1>
+      <p class="muted">See how online time becomes pending and available balance.</p>
+    {% elif dashboard_section == 'wallet' %}
+      <h1>Wallet &amp; payouts</h1>
+      <p class="muted">Manage your USDT BEP20 wallet and request manual payouts.</p>
+    {% else %}
+      <h1>Your earning overview</h1>
+      <p class="muted">A quick view of balance and pool health. Credentials never appear in the UI.</p>
+    {% endif %}
   </div>
 </div>
 
-<nav id="dashboard-nav" class="section-nav" aria-label="Dashboard sections">
-  <a href="#overview">Overview</a>
-  <a href="#add-proxy">Add proxy</a>
-  <a href="#wallet">Wallet</a>
-  <a href="#request-payout">Request payout</a>
-  <a href="#proxy-status">Proxy status</a>
-  <a href="#payout-history">Payouts</a>
-</nav>
-
+{% if dashboard_section in ('overview', 'earnings') %}
 <section id="overview" class="stats" aria-label="Earnings overview">
   <article>
     <span>Pending</span>
@@ -37,7 +40,43 @@
     <small>Active endpoints currently visible to your account.</small>
   </article>
 </section>
+{% endif %}
 
+{% if dashboard_section == 'overview' %}
+<section class="panel workspace-intro" aria-labelledby="overview-next-title">
+  <div class="panel-head">
+    <div>
+      <p class="eyebrow">NEXT STEPS</p>
+      <h2 id="overview-next-title">Keep your pool earning</h2>
+      <p class="muted">Use the sidebar as the single path to your proxy, earnings, and payout workspaces.</p>
+    </div>
+  </div>
+  <div class="policy-grid">
+    <article><strong>Proxy pool</strong><span>Replace endpoints when their health changes.</span></article>
+    <article><strong>Earnings</strong><span>Keep qualifying endpoints online through probation.</span></article>
+    <article><strong>Wallet</strong><span>Review the address carefully before requesting a payout.</span></article>
+  </div>
+</section>
+{% endif %}
+
+{% if dashboard_section == 'earnings' %}
+<section class="panel" aria-labelledby="earning-policy-title">
+  <div class="panel-head">
+    <div>
+      <p class="eyebrow">EARNING POLICY</p>
+      <h2 id="earning-policy-title">Stay online to move balance out of pending</h2>
+      <p class="muted">Earnings accrue while an eligible proxy stays online. The seven-day continuous-online period protects the pool from short-term submissions.</p>
+    </div>
+  </div>
+  <div class="policy-grid">
+    <article><strong>Pending</strong><span>Accrues from qualifying online time.</span></article>
+    <article><strong>Available</strong><span>Can be requested once it clears the probation period.</span></article>
+    <article><strong>Minimum payout</strong><span>$10.00 gross, processed manually within 48 hours.</span></article>
+  </div>
+</section>
+{% endif %}
+
+{% if dashboard_section == 'proxies' %}
 <section id="add-proxy" class="panel section-target">
   <div class="panel-head">
     <div>
@@ -68,7 +107,9 @@
     </div>
   </aside>
 </section>
+{% endif %}
 
+{% if dashboard_section == 'wallet' %}
 <section id="wallet" class="panel section-target">
   <div class="panel-head">
     <div>
@@ -113,7 +154,9 @@
     <span class="field-hint" data-payout-sla>Requests are processed within 48 hours.</span>
   </div>
 </section>
+{% endif %}
 
+{% if dashboard_section == 'proxies' %}
 <section id="proxy-status" class="panel section-target">
   <div class="panel-head">
     <div>
@@ -181,7 +224,9 @@
     <div class="empty">No proxy yet. Add your first endpoint above.</div>
   {% endif %}
 </section>
+{% endif %}
 
+{% if dashboard_section == 'wallet' %}
 <section id="payout-history" class="panel section-target">
   <div class="panel-head">
     <h2>Payout history</h2>
@@ -215,4 +260,5 @@
     <div class="empty">No payout requests yet.</div>
   {% endif %}
 </section>
+{% endif %}
 {% endblock %}

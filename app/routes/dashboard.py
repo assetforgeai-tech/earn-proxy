@@ -66,6 +66,28 @@ def index():
 @bp.get("/dashboard")
 @login_required
 def dashboard():
+    return _render_dashboard("overview")
+
+
+@bp.get("/dashboard/proxies")
+@login_required
+def proxies():
+    return _render_dashboard("proxies")
+
+
+@bp.get("/dashboard/earnings")
+@login_required
+def earnings():
+    return _render_dashboard("earnings")
+
+
+@bp.get("/dashboard/wallet")
+@login_required
+def wallet():
+    return _render_dashboard("wallet")
+
+
+def _render_dashboard(section: str):
     db = get_db()
     if g.user["role"] == "admin":
         return redirect(url_for("admin.dashboard"))
@@ -104,4 +126,5 @@ def dashboard():
         health_interval_minutes=settings.health_interval_minutes,
         whitelist_host=current_app.config.get("WHITELIST_HOST", "whitelist.proxy.acacondos.com"),
         whitelist_ip=current_app.config.get("WHITELIST_IP", ""),
+        dashboard_section=section,
     )
