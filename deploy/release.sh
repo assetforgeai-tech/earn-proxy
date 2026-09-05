@@ -58,6 +58,8 @@ tar -xf "$archive" -C "$release_dir"
 "$release_dir/.venv/bin/python" -m pip install --disable-pip-version-check --upgrade "pip>=25.3" "setuptools>=83"
 "$release_dir/.venv/bin/python" -m pip install --disable-pip-version-check "$release_dir"
 "$release_dir/.venv/bin/python" -m pip check
+chown -R root:root "$release_dir"
+chmod -R go-w "$release_dir"
 
 set -a
 source /etc/earn-proxy.env

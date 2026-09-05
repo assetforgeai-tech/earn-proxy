@@ -21,6 +21,8 @@ def test_release_installer_builds_the_venv_at_its_final_absolute_path():
     assert 'python3 -m venv "$release_dir/.venv"' not in installer
     assert '"$release_dir/.venv/bin/python" -m pip install' in installer
     assert '"$release_dir/.venv/bin/python" -m pip check' in installer
+    assert 'chown -R root:root "$release_dir"' in installer
+    assert 'chmod -R go-w "$release_dir"' in installer
     assert "cp -a /opt/earn-proxy/.venv" not in installer
     assert "sed -i" not in installer
 
