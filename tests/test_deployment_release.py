@@ -45,10 +45,25 @@ def test_release_installer_preserves_database_config_and_previous_units():
     installer = (ROOT / "deploy" / "release.sh").read_text()
 
     assert 'backup_dir="/var/backups/earn-proxy/${backup_stamp}-${revision}"' in installer
+    assert 'database_path="$(awk -F= ' in installer
+    assert 'database_path="${database_path:-/var/lib/earn-proxy/earn-proxy.db}"' in installer
     assert "source.backup(destination)" in installer
     assert 'cp -a /etc/earn-proxy.env "$backup_dir/earn-proxy.env"' in installer
     assert 'cp -a /etc/systemd/system/earn-proxy-*.service "$backup_dir/systemd/"' in installer
     assert 'install -m 0644 "$backup_dir"/systemd/earn-proxy-*.service /etc/systemd/system/' in installer
+
+    backup = installer.index("source.backup(destination)")
+    preflight = installer.index("systemd-run --quiet --wait --pipe --collect")
+    assert backup < preflight
+
+
+def test_release_installer_removes_an_unactivated_release_after_failure():
+    installer = (ROOT / "deploy" / "release.sh").read_text()
+
+    assert "activated=0" in installer
+    assert 'if [[ "$activated" -eq 0 && -d "$release_dir" ]]; then' in installer
+    assert 'rm -rf -- "$release_dir"' in installer
+    assert "activated=1" in installer
 
 
 def test_release_preflight_rejects_a_venv_created_for_another_release(tmp_path, monkeypatch):

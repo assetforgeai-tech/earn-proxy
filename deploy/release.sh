@@ -24,6 +24,9 @@ next_link="/opt/.earn-proxy-next"
 archive="$(mktemp --tmpdir earn-proxy-release.XXXXXX.tar)"
 backup_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 backup_dir="/var/backups/earn-proxy/${backup_stamp}-${revision}"
+database_path="$(awk -F= '$1 == "EARN_PROXY_DATABASE" { sub(/^[[:space:]]+/, "", $2); gsub(/^\"|\"$/, "", $2); print $2; exit }' /etc/earn-proxy.env)"
+database_path="${database_path:-/var/lib/earn-proxy/earn-proxy.db}"
+activated=0
 services=(
   earn-proxy-web
   earn-proxy-checker
@@ -34,6 +37,9 @@ services=(
 
 cleanup() {
   rm -f -- "$archive" "$next_link"
+  if [[ "$activated" -eq 0 && -d "$release_dir" ]]; then
+    rm -rf -- "$release_dir"
+  fi
 }
 trap cleanup EXIT
 
@@ -63,14 +69,8 @@ tar -xf "$archive" -C "$release_dir"
 chown -R root:root "$release_dir"
 chmod -R go-w "$release_dir"
 
-systemd-run --quiet --wait --pipe --collect \
-  --uid=earnproxy --gid=earnproxy \
-  --working-directory="$release_dir" \
-  --property=EnvironmentFile=/etc/earn-proxy.env \
-  "$release_dir/.venv/bin/python" -m deploy.release_preflight --release-dir "$release_dir"
-
 install -d -o root -g root -m 0700 "$backup_dir/systemd"
-"$release_dir/.venv/bin/python" - /var/lib/earn-proxy/earn-proxy.db "$backup_dir/earn-proxy.db" <<'PY'
+"$release_dir/.venv/bin/python" - "$database_path" "$backup_dir/earn-proxy.db" <<'PY'
 import sqlite3
 import sys
 
@@ -83,6 +83,12 @@ destination.close()
 PY
 cp -a /etc/earn-proxy.env "$backup_dir/earn-proxy.env"
 cp -a /etc/systemd/system/earn-proxy-*.service "$backup_dir/systemd/"
+
+systemd-run --quiet --wait --pipe --collect \
+  --uid=earnproxy --gid=earnproxy \
+  --working-directory="$release_dir" \
+  --property=EnvironmentFile=/etc/earn-proxy.env \
+  "$release_dir/.venv/bin/python" -m deploy.release_preflight --release-dir "$release_dir"
 
 install -m 0644 "$release_dir"/deploy/earn-proxy-*.service /etc/systemd/system/
 systemctl daemon-reload
@@ -101,8 +107,10 @@ if ! systemctl restart "${services[@]}" || ! timeout 30 bash -c '
     systemctl daemon-reload
     systemctl restart "${services[@]}"
   fi
+  rm -rf -- "$release_dir"
   exit 1
 fi
 
+activated=1
 printf 'release active: %s\n' "$release_dir"
 printf 'rollback release: %s\n' "${previous_release:-none}"
