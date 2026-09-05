@@ -23,10 +23,9 @@ transfer.proxy.acacondos.com {
 }
 
 whitelist.proxy.acacondos.com {
-    respond "42.96.12.142\n" 200 {
-        header Content-Type text/plain
-        header Cache-Control "public, max-age=300"
-    }
+    header Content-Type text/plain
+    header Cache-Control "public, max-age=300"
+    respond "42.96.12.142\n" 200
 }
 
 earn.proxy.acacondos.com {
