@@ -267,3 +267,9 @@ def test_transfer_api_returns_service_unavailable_when_relay_feed_fails(client, 
 
     assert response.status_code == 503
     assert response.get_json() == {"error": "Transfer feed is temporarily unavailable"}
+
+
+def test_transfer_feed_limit_allows_the_full_fixed_listener_range():
+    from app.routes.internal_api import MAX_TRANSFER_FEED_BYTES
+
+    assert MAX_TRANSFER_FEED_BYTES >= 5_000_000

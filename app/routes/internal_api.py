@@ -14,6 +14,7 @@ from app.services.settings import get_setting
 
 bp = Blueprint("internal_api", __name__, url_prefix="/internal/api/v1")
 api_bp = Blueprint("api", __name__, url_prefix="/api/v1")
+MAX_TRANSFER_FEED_BYTES = 5_000_000
 
 
 def _api_key_required() -> bool:
@@ -98,7 +99,7 @@ def _transfer_rows():
         timeout=(2, 5),
     )
     response.raise_for_status()
-    if len(response.content) > 1_000_000:
+    if len(response.content) > MAX_TRANSFER_FEED_BYTES:
         raise RuntimeError("Transfer feed response is too large")
     payload = response.json()
     rows = payload.get("items", []) if isinstance(payload, dict) else payload
