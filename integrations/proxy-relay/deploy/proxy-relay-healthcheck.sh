@@ -15,21 +15,31 @@ for unit in proxy-relay.service proxy-relay-engine.service caddy.service; do
 done
 if ! curl --noproxy '*' --fail --silent --show-error --max-time 10 http://127.0.0.1:8000/healthz >/dev/null 2>&1; then failures+=("healthz failed"); fi
 
-counts=$(python3 - <<'PY'
+read -r live entries listeners missing_ports < <(python3 - <<'PY'
 import json
 import sqlite3
+import subprocess
 
 db = sqlite3.connect('/opt/proxy-relay/relay.db')
 live = db.execute("select count(*) from proxies where status in ('live','live_unverified') and enabled=1 and detected_protocol in ('http','socks5')").fetchone()[0]
 with open('/opt/proxy-relay/relay.json', encoding='utf-8') as handle:
     relay = json.load(handle)
-print(live, len(relay.get('entries', [])))
+expected_ports = {int(entry['port']) for entry in relay.get('entries', [])}
+listening_ports = set()
+for line in subprocess.check_output(["ss", "-ltnH"], text=True).splitlines():
+    fields = line.split()
+    if len(fields) < 4:
+        continue
+    try:
+        listening_ports.add(int(fields[3].rsplit(':', 1)[1]))
+    except (IndexError, ValueError):
+        continue
+missing_ports = sorted(expected_ports - listening_ports)
+print(live, len(expected_ports), len(expected_ports & listening_ports), len(missing_ports))
 PY
 )
-read -r live entries <<<"$counts"
 if [[ "$live" != "$entries" ]]; then failures+=("database/listener config mismatch live=$live entries=$entries"); fi
-listeners=$(ss -ltnH | awk '{split($4,a,":"); port=a[length(a)]+0; if (port >= 20001 && port <= 39999) count++} END {print count+0}')
-if [[ "$listeners" != "$entries" ]]; then failures+=("socket/config mismatch listeners=$listeners entries=$entries"); fi
+if ((missing_ports > 0)); then failures+=("socket/config mismatch listeners=$listeners entries=$entries missing=$missing_ports"); fi
 
 read -r cpu_percent memory_percent disk_percent < <(python3 - <<'PY'
 import os
