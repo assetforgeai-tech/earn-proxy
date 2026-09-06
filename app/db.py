@@ -74,6 +74,10 @@ CREATE INDEX IF NOT EXISTS proxies_exit_idx
     ON proxies(exit_ip, duplicate_of, created_at);
 CREATE INDEX IF NOT EXISTS proxies_distribution_idx
     ON proxies(status, eligibility, duplicate_of, archived_at);
+CREATE INDEX IF NOT EXISTS proxies_user_inventory_idx
+    ON proxies(user_id, archived_at, status, detected_protocol, eligibility, created_at, id);
+CREATE INDEX IF NOT EXISTS proxies_user_endpoint_idx
+    ON proxies(user_id, archived_at, host, port, id);
 
 CREATE TABLE IF NOT EXISTS proxy_geo_cache (
     exit_ip TEXT PRIMARY KEY,
@@ -475,6 +479,11 @@ def migrate_db(db) -> None:
             "CREATE INDEX IF NOT EXISTS proxies_distribution_idx "
             "ON proxies(status,eligibility,duplicate_of,archived_at)"
         )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS proxies_user_inventory_idx "
+            "ON proxies(user_id,archived_at,status,detected_protocol,eligibility,created_at,id)"
+        )
+        db.execute("CREATE INDEX IF NOT EXISTS proxies_user_endpoint_idx ON proxies(user_id,archived_at,host,port,id)")
         if _table_exists(db, "api_keys"):
             db.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS api_keys_public_id_uidx ON api_keys(public_id) WHERE public_id <> ''"

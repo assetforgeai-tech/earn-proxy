@@ -36,7 +36,7 @@
   </article>
   <article>
     <span>Proxies</span>
-    <strong>{{ proxies|length }}</strong>
+    <strong>{{ inventory.total_count }}</strong>
     <small>Active endpoints currently visible to your account.</small>
   </article>
 </section>
@@ -190,7 +190,73 @@
       <h2>Proxy status</h2>
       <p class="muted">Health sweep target: {{ health_interval_minutes }} minutes. Stale results are clearly marked.</p>
     </div>
-    <span class="muted">{{ proxies|length }} endpoint{{ '' if proxies|length == 1 else 's' }}</span>
+    <span class="muted">{{ inventory.filtered_count }} matching · {{ inventory.total_count }} total</span>
+  </div>
+  <div class="inventory-summary" aria-label="Proxy inventory counts">
+    <div class="inventory-count-group">
+      <span class="inventory-count-label">Status</span>
+      <div class="inventory-count-list">
+        <a class="inventory-count {% if not inventory.query.status %}is-active{% endif %}" href="{{ inventory.filter_url(status='') }}"><span>All</span><strong>{{ inventory.total_count }}</strong></a>
+        {% for value in ('online', 'pending', 'offline', 'blocked', 'suspect') %}<a class="inventory-count {{ value }} {% if inventory.query.status == value %}is-active{% endif %}" href="{{ inventory.filter_url(status=value) }}"><span>{{ value|capitalize }}</span><strong>{{ inventory.status_counts.get(value, 0) }}</strong></a>{% endfor %}
+      </div>
+    </div>
+    <div class="inventory-count-group">
+      <span class="inventory-count-label">Protocol</span>
+      <div class="inventory-count-list">
+        {% for value, label in (('socks5', 'SOCKS5'), ('http', 'HTTP'), ('unknown', 'Unknown')) %}<a class="inventory-count {% if inventory.query.protocol == value %}is-active{% endif %}" href="{{ inventory.filter_url(protocol=value) }}"><span>{{ label }}</span><strong>{{ inventory.protocol_counts.get(value, 0) }}</strong></a>{% endfor %}
+      </div>
+    </div>
+    <div class="inventory-count-group">
+      <span class="inventory-count-label">Eligibility</span>
+      <div class="inventory-count-list">
+        {% for value in ('allow', 'risk', 'pending') %}<a class="inventory-count {{ value }} {% if inventory.query.eligibility == value %}is-active{% endif %}" href="{{ inventory.filter_url(eligibility=value) }}"><span>{{ value|capitalize }}</span><strong>{{ inventory.eligibility_counts.get(value, 0) }}</strong></a>{% endfor %}
+      </div>
+    </div>
+  </div>
+  <form class="inventory-toolbar" method="get" action="{{ url_for('dashboard.proxies') }}" role="search">
+    <div class="field-group inventory-search">
+      <label for="proxy-search">Search endpoint</label>
+      <input id="proxy-search" name="q" type="search" value="{{ inventory.query.search }}" placeholder="Search host or port" autocomplete="off">
+    </div>
+    <div class="field-group">
+      <label for="proxy-status-filter">Status</label>
+      <select id="proxy-status-filter" name="status">
+        <option value="">All statuses</option>
+        {% for value in ('pending', 'online', 'offline', 'blocked', 'suspect') %}<option value="{{ value }}"{% if inventory.query.status == value %} selected{% endif %}>{{ value|capitalize }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="field-group">
+      <label for="proxy-protocol-filter">Protocol</label>
+      <select id="proxy-protocol-filter" name="protocol">
+        <option value="">All protocols</option>
+        <option value="http"{% if inventory.query.protocol == 'http' %} selected{% endif %}>HTTP</option>
+        <option value="socks5"{% if inventory.query.protocol == 'socks5' %} selected{% endif %}>SOCKS5</option>
+        <option value="unknown"{% if inventory.query.protocol == 'unknown' %} selected{% endif %}>Unknown</option>
+      </select>
+    </div>
+    <div class="field-group">
+      <label for="proxy-eligibility-filter">Eligibility</label>
+      <select id="proxy-eligibility-filter" name="eligibility">
+        <option value="">All eligibility</option>
+        <option value="allow"{% if inventory.query.eligibility == 'allow' %} selected{% endif %}>Allow</option>
+        <option value="risk"{% if inventory.query.eligibility == 'risk' %} selected{% endif %}>Risk</option>
+        <option value="pending"{% if inventory.query.eligibility == 'pending' %} selected{% endif %}>Pending</option>
+      </select>
+    </div>
+    <div class="field-group">
+      <label for="proxy-per-page">Rows per page</label>
+      <select id="proxy-per-page" name="per_page">
+        {% for size in (10, 25, 50, 100) %}<option value="{{ size }}"{% if inventory.query.per_page == size %} selected{% endif %}>{{ size }}</option>{% endfor %}
+      </select>
+    </div>
+    <input type="hidden" name="sort" value="{{ inventory.query.sort }}">
+    <input type="hidden" name="direction" value="{{ inventory.query.direction }}">
+    <button class="button primary" type="submit">Apply filters</button>
+    <a class="button ghost" href="{{ inventory.reset_url }}">Clear filters</a>
+  </form>
+  <div class="inventory-results-meta" aria-live="polite">
+    <strong>{% if inventory.filtered_count %}Showing {{ inventory.start_index }}–{{ inventory.end_index }} of {{ inventory.filtered_count }}{% else %}No matching proxies{% endif %}</strong>
+    <span>Sort by {{ inventory.query.sort }} · {{ inventory.query.direction|upper }}</span>
   </div>
   {% if proxies %}
     <div class="table-wrap">
@@ -198,13 +264,13 @@
         <caption>Masked proxy endpoints and their latest health state</caption>
         <thead>
           <tr>
-            <th scope="col">Endpoint</th>
-            <th scope="col">Protocol</th>
-            <th scope="col">Status</th>
-            <th scope="col">Eligibility</th>
-            <th scope="col">Online hours</th>
-            <th scope="col">Offline hours</th>
-            <th scope="col">Freshness</th>
+            <th scope="col" aria-sort="{% if inventory.query.sort == 'endpoint' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.endpoint }}">Endpoint <span aria-hidden="true">↕</span></a></th>
+            <th scope="col" aria-sort="{% if inventory.query.sort == 'protocol' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.protocol }}">Protocol <span aria-hidden="true">↕</span></a></th>
+            <th scope="col" aria-sort="{% if inventory.query.sort == 'status' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.status }}">Status <span aria-hidden="true">↕</span></a></th>
+            <th scope="col" aria-sort="{% if inventory.query.sort == 'eligibility' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.eligibility }}">Eligibility <span aria-hidden="true">↕</span></a></th>
+            <th scope="col" aria-sort="{% if inventory.query.sort == 'online' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.online }}">Online hours <span aria-hidden="true">↕</span></a></th>
+            <th scope="col" aria-sort="{% if inventory.query.sort == 'offline' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.offline }}">Offline hours <span aria-hidden="true">↕</span></a></th>
+            <th scope="col" aria-sort="{% if inventory.query.sort == 'checked' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.checked }}">Freshness <span aria-hidden="true">↕</span></a></th>
             <th scope="col">Actions</th>
           </tr>
         </thead>
@@ -247,8 +313,17 @@
         </tbody>
       </table>
     </div>
+    <nav class="pagination" aria-label="Proxy pages">
+      <a class="button small ghost{% if inventory.query.page <= 1 %} is-disabled{% endif %}" href="{{ inventory.previous_url }}"{% if inventory.query.page <= 1 %} aria-disabled="true" tabindex="-1"{% endif %}>Previous</a>
+      <div class="pagination-pages">
+        {% for link in inventory.page_links %}
+          {% if link.ellipsis %}<span class="pagination-ellipsis" aria-hidden="true">…</span>{% else %}<a class="page-link{% if link.current %} is-current{% endif %}" href="{{ link.url }}"{% if link.current %} aria-current="page"{% endif %}>{{ link.number }}</a>{% endif %}
+        {% endfor %}
+      </div>
+      <a class="button small ghost{% if inventory.query.page >= inventory.total_pages %} is-disabled{% endif %}" href="{{ inventory.next_url }}"{% if inventory.query.page >= inventory.total_pages %} aria-disabled="true" tabindex="-1"{% endif %}>Next</a>
+    </nav>
   {% else %}
-    <div class="empty">No proxy yet. Add your first endpoint above.</div>
+    <div class="empty">No proxy matches these filters. <a href="{{ inventory.reset_url }}">Clear filters</a> or add a new endpoint above.</div>
   {% endif %}
 </section>
 {% endif %}

@@ -81,6 +81,8 @@ CSV uploads may contain one raw proxy per row, a header named `raw_proxy` (alias
 
 Imports are limited to 512 KB and 5,000 lines by default. Configure `EARN_PROXY_MAX_IMPORT_BYTES` and `EARN_PROXY_MAX_IMPORT_LINES` to change those bounds. Blank lines are ignored. Valid entries are encrypted and queued with `pending` status. Credential duplicates are skipped globally, including duplicates owned by another account and duplicates repeated within the same batch; import feedback only exposes safe `host:port` labels.
 
+The contributor proxy workspace uses server-side inventory controls. `GET /dashboard/proxies` accepts `q` (host/port search), `status`, `protocol`, `eligibility`, `sort`, `direction`, `per_page` (`10`, `25`, `50`, or `100`), and `page`. Counts and filters are scoped to the signed-in contributor; only the selected page is rendered, so large inventories do not load every row into the browser.
+
 The existing single-entry `POST /proxies` route remains available. Bulk clients can use `POST /proxies/import` with JSON:
 
 ```json
