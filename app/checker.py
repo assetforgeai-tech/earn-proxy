@@ -300,7 +300,7 @@ def _quorum(results: dict, *, require_tls: bool) -> str:
     if not counts:
         return ""
     value, count = counts.most_common(1)[0]
-    return value if count >= 2 else ""
+    return value if count >= 2 and count > len(values) / 2 else ""
 
 
 def _classify_curl_failure(returncode: int) -> str:

@@ -91,13 +91,35 @@ def test_verified_quorum_accepts_proxio_as_one_independent_json_source():
             return response
         if probe == other_probe:
             return curl_response(probe, ip="203.0.113.83")
-        return curl_response(probe, ip="203.0.113.84")
+        return curl_response(probe, code="503", ip="")
 
     result = check_proxy(PROXY, runner=runner)
 
     assert result["status"] == "live"
     assert result["exit_ip"] == "203.0.113.83"
     assert result["egress_trusted"] is True
+
+
+def test_four_endpoint_two_two_split_has_no_egress_quorum():
+    ips = {
+        PROBE_URLS[0]: "203.0.113.85",
+        PROBE_URLS[1]: "203.0.113.85",
+        PROBE_URLS[2]: "203.0.113.86",
+        PROXIO_WHOAMI_URL: "203.0.113.86",
+    }
+
+    def runner(cmd, **kwargs):
+        probe = cmd[-1]
+        if probe == PROXIO_WHOAMI_URL:
+            response = curl_response(probe, ip="")
+            response.stdout = f'{{"ip":"{ips[probe]}"}}__PROBE_META__:200|{probe}|0\n'
+            return response
+        return curl_response(probe, ip=ips[probe])
+
+    result = check_proxy(PROXY, runner=runner)
+
+    assert result["status"] == "inconclusive"
+    assert result["exit_ip"] == ""
 
 
 def test_verified_quorum_requires_two_independent_https_hosts():

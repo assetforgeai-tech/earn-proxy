@@ -120,7 +120,7 @@ def _quorum(results):
     if not counts:
         return ''
     ip,count=counts.most_common(1)[0]
-    return ip if count>=2 else ''
+    return ip if count>=2 and count>len(valid)/2 else ''
 
 
 def _insecure_quorum(results):
@@ -135,7 +135,7 @@ def _insecure_quorum(results):
     if not counts:
         return ''
     ip,count=counts.most_common(1)[0]
-    return ip if count>=2 else ''
+    return ip if count>=2 and count>len(valid)/2 else ''
 
 
 def _plain_http_quorum(results):
@@ -150,7 +150,7 @@ def _plain_http_quorum(results):
     if not counts:
         return ''
     ip,count=counts.most_common(1)[0]
-    return ip if count>=2 else ''
+    return ip if count>=2 and count>len(valid)/2 else ''
 
 
 def check_proxy(proxy, timeout=10, runner=subprocess.run):

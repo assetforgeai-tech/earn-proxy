@@ -28,6 +28,6 @@ The curl `%{remote_ip}` value was the same Cloudflare edge address for every sam
 
 ## Deployment limit
 
-The integration limits Prox.io to five requests per second in each of the two checker processes. This keeps their combined sustained ceiling within the tested 10 RPS. Prox.io remains one member of a multi-host HTTPS quorum; it is not a single source of truth, and its rate limits or failures do not independently mark a proxy dead.
+The integration limits Prox.io to five requests per second in each of the two checker processes. This keeps their combined sustained ceiling within the tested 10 RPS. Prox.io remains one member of a multi-host HTTPS quorum; a result needs at least two agreeing sources and a strict majority of valid IP observations, so a 2-2 split is inconclusive. It is not a single source of truth, and its rate limits or failures do not independently mark a proxy dead.
 
 These results establish observed behavior for this run only. They are not a provider SLA or a guarantee of future capacity.

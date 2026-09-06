@@ -80,12 +80,35 @@ def test_checker_accepts_proxio_as_one_independent_json_quorum_source():
             )
         if probe==other_probe:
             return curl_response(probe,ip='203.0.113.83')
-        return curl_response(probe,ip='203.0.113.84')
+        return curl_response(probe,ip='',code='503')
 
     result=check_proxy(PROXY,runner=runner)
 
     assert result['status']=='live'
     assert result['exit_ip']=='203.0.113.83'
+
+
+def test_four_endpoint_two_two_split_has_no_egress_quorum():
+    ips={
+        PROBE_URLS[0]:'203.0.113.85',
+        PROBE_URLS[1]:'203.0.113.85',
+        PROBE_URLS[2]:'203.0.113.86',
+        PROXIO_WHOAMI_URL:'203.0.113.86',
+    }
+    def runner(cmd, **kwargs):
+        probe=cmd[-1]
+        if probe==PROXIO_WHOAMI_URL:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=f'{{"ip":"{ips[probe]}"}}__PROBE_META__:200|{probe}|0\n',
+                stderr='',
+            )
+        return curl_response(probe,ip=ips[probe])
+
+    result=check_proxy(PROXY,runner=runner)
+
+    assert result['status']=='inconclusive'
+    assert result['exit_ip']==''
 
 
 def test_checker_uses_four_independent_https_probe_hosts():
