@@ -27,7 +27,7 @@ Each worker uses durable SQLite claims. A claim has a short lease and is release
 
 ## Health-check policy
 
-New, changed, or suspect rows use a strong qualification pass. A stable row uses one fast request through the previously detected protocol and rotates among the configured public IP endpoints. A fast failure or egress change triggers strong confirmation; a third-party endpoint failure is recorded as `inconclusive` and is retried instead of immediately marking the proxy dead.
+New, changed, or suspect rows use a strong qualification pass. A stable row uses one fast request through the previously detected protocol and rotates among the configured public IP endpoints. The checker reads the documented JSON `ip` field from `api.prox.io.vn/v1/check/whoami`; curl socket metadata such as `%{remote_ip}` is never treated as proxy identity. A fast failure or egress change triggers strong confirmation; a third-party endpoint failure is recorded as `inconclusive` and is retried instead of immediately marking the proxy dead.
 
 Confirmed failures use short retries: the first failure waits 5 minutes, the second waits 15 minutes and marks the row `suspect`, and the third independent confirmed failure marks it `offline`. A successful result resets the streak. Online rows older than the stale-success limit (default 120 minutes) are withheld from the internal API until a fresh success is recorded.
 

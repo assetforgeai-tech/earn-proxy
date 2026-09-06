@@ -1,15 +1,19 @@
-import ipaddress, re, subprocess, time
+import ipaddress, json, re, subprocess, threading, time
 from collections import Counter
 from urllib.parse import urlsplit
 
 HTTP_PROBE_URLS=('http://ifconfig.me/ip','http://icanhazip.com')
-HTTPS_PROBE_URLS=('https://ifconfig.me/ip','https://icanhazip.com','https://checkip.amazonaws.com')
+PROXIO_WHOAMI_URL='https://api.prox.io.vn/v1/check/whoami'
+PROXIO_MIN_INTERVAL_SECONDS=0.2
+HTTPS_PROBE_URLS=('https://ifconfig.me/ip','https://icanhazip.com','https://checkip.amazonaws.com',PROXIO_WHOAMI_URL)
 PROBE_URLS=HTTPS_PROBE_URLS
 PROXY_DEADLINE=36
 PROBE_ATTEMPTS=2
 CAPTIVE_HOSTS={'giahan.vnpt.com.vn'}
 CAPTIVE_MARKERS=('giahan.vnpt.com.vn','/internet/logo.svg','provider_blocked')
 PROBE_META='__PROBE_META__:'
+_proxio_rate_lock=threading.Lock()
+_proxio_next_request_at=0.0
 
 
 def parse_exit_ip(value):
@@ -18,6 +22,31 @@ def parse_exit_ip(value):
         return str(ipaddress.ip_address(candidate))
     except ValueError:
         return ''
+
+
+def parse_probe_exit_ip(probe, value):
+    if str(probe or '').strip()!=PROXIO_WHOAMI_URL:
+        return parse_exit_ip(value)
+    try:
+        payload=json.loads(str(value or ''))
+    except (TypeError,ValueError,json.JSONDecodeError):
+        return ''
+    if not isinstance(payload,dict):
+        return ''
+    return parse_exit_ip(payload.get('ip'))
+
+
+def _wait_for_probe_slot(probe,clock=time.monotonic,sleeper=time.sleep):
+    if str(probe or '').strip()!=PROXIO_WHOAMI_URL:
+        return
+    global _proxio_next_request_at
+    with _proxio_rate_lock:
+        now=clock()
+        delay=max(0.0,_proxio_next_request_at-now)
+        if delay:
+            sleeper(delay)
+            now=clock()
+        _proxio_next_request_at=max(now,_proxio_next_request_at)+PROXIO_MIN_INTERVAL_SECONDS
 
 
 def captive_error(body, meta=''):
@@ -47,6 +76,16 @@ def _meta_valid(meta, probe, require_tls=False):
     )
 
 
+def _meta_http_code(meta):
+    code=str(meta or '').strip().split('|',1)[0]
+    return int(code) if code.isdigit() else 0
+
+
+def _probe_endpoint_http_failure(response):
+    code=_meta_http_code(response.get('meta',''))
+    return code==429 or code>=500
+
+
 def _probe_once(proxy_url, probe, insecure, timeout, runner):
     cmd=['curl','--silent','--show-error','--location','--max-redirs','3',
          '--connect-timeout',str(round(min(5,timeout),1)),
@@ -55,6 +94,8 @@ def _probe_once(proxy_url, probe, insecure, timeout, runner):
         cmd.append('--insecure')
     cmd += ['--write-out',f'\n{PROBE_META}%{{http_code}}|%{{url_effective}}|%{{ssl_verify_result}}\n',probe]
     try:
+        if runner is subprocess.run:
+            _wait_for_probe_slot(probe)
         result=runner(cmd,capture_output=True,text=True,timeout=timeout+1,check=False)
     except Exception as exc:
         return None,str(exc)
@@ -72,7 +113,7 @@ def _quorum(results):
     for probe,response in results.items():
         if not response or response['returncode']!=0 or not _meta_valid(response['meta'],probe,require_tls=True):
             continue
-        ip=parse_exit_ip(response['body'])
+        ip=parse_probe_exit_ip(probe,response['body'])
         if ip:
             valid.append((probe,ip))
     counts=Counter(ip for _,ip in valid)
@@ -87,7 +128,7 @@ def _insecure_quorum(results):
     for probe,response in results.items():
         if not response or response['returncode']!=0 or not _meta_valid(response['meta'],probe):
             continue
-        ip=parse_exit_ip(response['body'])
+        ip=parse_probe_exit_ip(probe,response['body'])
         if ip:
             valid.append((probe,ip))
     counts=Counter(ip for _,ip in valid)
@@ -102,7 +143,7 @@ def _plain_http_quorum(results):
     for probe,response in results.items():
         if not response or response['returncode']!=0 or not _meta_valid(response['meta'],probe):
             continue
-        ip=parse_exit_ip(response['body'])
+        ip=parse_probe_exit_ip(probe,response['body'])
         if ip:
             valid.append(ip)
     counts=Counter(valid)
@@ -135,6 +176,7 @@ def check_proxy(proxy, timeout=10, runner=subprocess.run):
                 if error: errors.append(error); saw_transient=True; continue
                 blocked=captive_error(response['body'],response['meta'])
                 if blocked: protocol_blocked.append(blocked); continue
+                if _probe_endpoint_http_failure(response): saw_transient=True
                 if response['returncode'] in (28,7,52,55,56): saw_transient=True
                 verified[probe]=response
             if protocol_blocked:
@@ -150,6 +192,7 @@ def check_proxy(proxy, timeout=10, runner=subprocess.run):
                     if error: errors.append(error); saw_transient=True; continue
                     blocked=captive_error(response['body'],response['meta'])
                     if blocked: protocol_blocked.append(blocked); continue
+                    if _probe_endpoint_http_failure(response): saw_transient=True
                     if response['returncode'] in (28,7,52,55,56): saw_transient=True
                     insecure[probe]=response
                 ip=_insecure_quorum(insecure)
@@ -163,6 +206,7 @@ def check_proxy(proxy, timeout=10, runner=subprocess.run):
                 if error: errors.append(error); saw_transient=True; continue
                 blocked=captive_error(response['body'],response['meta'])
                 if blocked: protocol_blocked.append(blocked); continue
+                if _probe_endpoint_http_failure(response): saw_transient=True
                 if response['returncode'] in (28,7,52,55,56): saw_transient=True
                 plain_http[probe]=response
             ip=_plain_http_quorum(plain_http)

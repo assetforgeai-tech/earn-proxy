@@ -5,7 +5,19 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 sys.path.insert(0, str(pathlib.Path(__file__).parents[1]))
-from checker import HTTP_PROBE_URLS, PROBE_URLS, PROXY_DEADLINE, check_proxy, parse_exit_ip
+import checker as checker_module
+
+from checker import (
+    HTTP_PROBE_URLS,
+    PROXIO_MIN_INTERVAL_SECONDS,
+    PROXIO_WHOAMI_URL,
+    PROBE_URLS,
+    PROXY_DEADLINE,
+    _wait_for_probe_slot,
+    check_proxy,
+    parse_exit_ip,
+    parse_probe_exit_ip,
+)
 
 
 PROXY={'host':'upstream','port':1080,'username':'u','password':'p','protocol':'socks5'}
@@ -27,10 +39,59 @@ def test_exit_ip_parser_rejects_html_and_accepts_ip_literals():
     assert parse_exit_ip('<!doctype html><title>Portal</title>') == ''
 
 
-def test_checker_uses_three_independent_https_probe_hosts():
-    assert len(PROBE_URLS)==3
+def test_proxio_probe_parser_accepts_only_the_json_ip_field():
+    body='{"ip":"203.0.113.81","http":{"remote_ip":"198.51.100.9"}}'
+    assert parse_probe_exit_ip(PROXIO_WHOAMI_URL,body)=='203.0.113.81'
+    assert parse_probe_exit_ip(PROXIO_WHOAMI_URL,'{"remote_ip":"198.51.100.9"}')==''
+    assert parse_probe_exit_ip(PROXIO_WHOAMI_URL,'not-json')==''
+    assert parse_probe_exit_ip(PROBE_URLS[0],'203.0.113.82\n')=='203.0.113.82'
+
+
+def test_proxio_probe_rate_limiter_caps_sustained_calls(monkeypatch):
+    clock={'now':100.0}
+    sleeps=[]
+    monkeypatch.setattr(checker_module,'_proxio_next_request_at',0.0)
+
+    def monotonic():
+        return clock['now']
+
+    def sleeper(seconds):
+        sleeps.append(seconds)
+        clock['now']+=seconds
+
+    _wait_for_probe_slot(PROXIO_WHOAMI_URL,clock=monotonic,sleeper=sleeper)
+    _wait_for_probe_slot(PROXIO_WHOAMI_URL,clock=monotonic,sleeper=sleeper)
+    _wait_for_probe_slot(PROBE_URLS[0],clock=monotonic,sleeper=sleeper)
+
+    assert len(sleeps)==1
+    assert round(sleeps[0],3)==PROXIO_MIN_INTERVAL_SECONDS
+
+
+def test_checker_accepts_proxio_as_one_independent_json_quorum_source():
+    other_probe=next(probe for probe in PROBE_URLS if probe!=PROXIO_WHOAMI_URL)
+    def runner(cmd, **kwargs):
+        probe=cmd[-1]
+        if probe==PROXIO_WHOAMI_URL:
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"ip":"203.0.113.83","http":{"remote_ip":"198.51.100.9"}}'
+                       f'__PROBE_META__:200|{probe}|0\n',
+                stderr='',
+            )
+        if probe==other_probe:
+            return curl_response(probe,ip='203.0.113.83')
+        return curl_response(probe,ip='203.0.113.84')
+
+    result=check_proxy(PROXY,runner=runner)
+
+    assert result['status']=='live'
+    assert result['exit_ip']=='203.0.113.83'
+
+
+def test_checker_uses_four_independent_https_probe_hosts():
+    assert len(PROBE_URLS)==4
     assert all(url.startswith('https://') for url in PROBE_URLS)
-    assert len({urlsplit(url).hostname for url in PROBE_URLS})==3
+    assert len({urlsplit(url).hostname for url in PROBE_URLS})==4
 
 
 def test_checker_requires_two_matching_verified_endpoints_for_live():
@@ -45,7 +106,7 @@ def test_checker_requires_two_matching_verified_endpoints_for_live():
     result=check_proxy(PROXY,runner=runner)
 
     assert result['status']!='live'
-    assert len({cmd[-1] for cmd in calls})==5
+    assert len({cmd[-1] for cmd in calls})==6
 
 
 def test_checker_accepts_two_of_three_matching_verified_endpoints():
@@ -111,13 +172,24 @@ def test_checker_does_not_mix_missing_probe_evidence_between_retries():
     assert result['status']!='live'
 
 
-def test_checker_rejects_non_2xx_response_even_when_body_is_an_ip():
+def test_checker_treats_probe_5xx_as_inconclusive_even_when_body_is_an_ip():
     def runner(cmd, **kwargs):
         return curl_response(cmd[-1],ip='203.0.113.13',code='503')
 
     result=check_proxy(PROXY,runner=runner)
 
-    assert result['status']=='dead'
+    assert result['status']=='inconclusive'
+    assert result['exit_ip']==''
+
+
+def test_proxio_rate_limit_is_inconclusive_not_proxy_death():
+    def runner(cmd, **kwargs):
+        probe=cmd[-1]
+        return curl_response(probe,ip='',code='429' if probe==PROXIO_WHOAMI_URL else '503')
+
+    result=check_proxy(PROXY,runner=runner)
+
+    assert result['status']=='inconclusive'
     assert result['exit_ip']==''
 
 
@@ -158,7 +230,7 @@ def test_checker_returns_inconclusive_when_all_attempts_timeout():
     assert result['status']=='inconclusive'
     assert result['protocol']=='unknown'
     assert result['exit_ip']==''
-    assert len(calls)==10
+    assert len(calls)==12
 
 
 def test_checker_requires_successful_curl_exit_for_quorum():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import ipaddress
+import json
 import re
 import secrets
 import subprocess
@@ -14,10 +15,13 @@ from urllib.parse import quote, urlsplit
 from app.network_safety import UnsafeProxyTarget, resolve_public_proxy_host
 
 HTTP_PROBE_URLS = ("http://ifconfig.me/ip", "http://icanhazip.com")
+PROXIO_WHOAMI_URL = "https://api.prox.io.vn/v1/check/whoami"
+PROXIO_MIN_INTERVAL_SECONDS = 0.2
 PROBE_URLS = (
     "https://ifconfig.me/ip",
     "https://icanhazip.com",
     "https://checkip.amazonaws.com",
+    PROXIO_WHOAMI_URL,
 )
 PROXY_DEADLINE = 36
 PROBE_ATTEMPTS = 2
@@ -33,6 +37,8 @@ MAX_PROBE_BODY_BYTES = 4096
 MAX_PROBE_OUTPUT_BYTES = MAX_PROBE_BODY_BYTES + 2048
 MAX_PROBE_STDERR_BYTES = 4096
 MAX_READ_CHUNK_BYTES = 1024
+_proxio_rate_lock = threading.Lock()
+_proxio_next_request_at = 0.0
 
 
 def parse_exit_ip(value: str) -> str:
@@ -40,6 +46,33 @@ def parse_exit_ip(value: str) -> str:
         return str(ipaddress.ip_address(str(value or "").strip()))
     except ValueError:
         return ""
+
+
+def parse_probe_exit_ip(probe: str, value: str) -> str:
+    """Parse an egress IP according to the response contract of a probe host."""
+    if str(probe or "").strip() != PROXIO_WHOAMI_URL:
+        return parse_exit_ip(value)
+    try:
+        payload = json.loads(str(value or ""))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return parse_exit_ip(payload.get("ip"))
+
+
+def _wait_for_probe_slot(probe: str, *, clock=time.monotonic, sleeper=time.sleep) -> None:
+    """Keep this process within the externally verified Prox.io request rate."""
+    if str(probe or "").strip() != PROXIO_WHOAMI_URL:
+        return
+    global _proxio_next_request_at
+    with _proxio_rate_lock:
+        now = clock()
+        delay = max(0.0, _proxio_next_request_at - now)
+        if delay:
+            sleeper(delay)
+            now = clock()
+        _proxio_next_request_at = max(now, _proxio_next_request_at) + PROXIO_MIN_INTERVAL_SECONDS
 
 
 def _captive_error(body: str, meta: str = "") -> str:
@@ -214,6 +247,7 @@ def _probe_once(proxy: dict, probe: str, insecure: bool, timeout: float, runner,
     )
     try:
         if runner is subprocess.run:
+            _wait_for_probe_slot(probe)
             result = _bounded_subprocess_run(command, proxy_config, timeout)
         else:
             result = runner(
@@ -259,7 +293,7 @@ def _quorum(results: dict, *, require_tls: bool) -> str:
             or not _meta_valid(response["meta"], probe, require_tls=require_tls)
         ):
             continue
-        value = parse_exit_ip(response["body"])
+        value = parse_probe_exit_ip(probe, response["body"])
         if value:
             values.append(value)
     counts = Counter(values)
@@ -481,7 +515,7 @@ def check_proxy_fast(
             next_probe_index=next_index,
             failed_probe_endpoint=probe,
         )
-    exit_ip = parse_exit_ip(response["body"])
+    exit_ip = parse_probe_exit_ip(probe, response["body"])
     if not exit_ip:
         return _probe_result(
             status="inconclusive",

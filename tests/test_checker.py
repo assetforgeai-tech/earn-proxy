@@ -6,11 +6,15 @@ from types import SimpleNamespace
 from app.checker import (
     MAX_PROBE_OUTPUT_BYTES,
     PROBE_URLS,
+    PROXIO_MIN_INTERVAL_SECONDS,
+    PROXIO_WHOAMI_URL,
     _bounded_subprocess_run,
+    _wait_for_probe_slot,
     check_proxy,
     check_proxy_fast,
     check_proxy_strong,
     parse_exit_ip,
+    parse_probe_exit_ip,
 )
 
 PROXY = {
@@ -43,6 +47,57 @@ def test_exit_ip_parser_accepts_ip_literals_and_rejects_markup():
     assert parse_exit_ip("203.0.113.8\n") == "203.0.113.8"
     assert parse_exit_ip("2001:db8::8\n") == "2001:db8::8"
     assert parse_exit_ip("<!doctype html>") == ""
+
+
+def test_proxio_probe_parser_accepts_only_the_json_ip_field():
+    body = '{"ip":"203.0.113.81","http":{"remote_ip":"198.51.100.9"}}'
+
+    assert parse_probe_exit_ip(PROXIO_WHOAMI_URL, body) == "203.0.113.81"
+    assert parse_probe_exit_ip(PROXIO_WHOAMI_URL, '{"remote_ip":"198.51.100.9"}') == ""
+    assert parse_probe_exit_ip(PROXIO_WHOAMI_URL, "not-json") == ""
+    assert parse_probe_exit_ip(PROBE_URLS[0], "203.0.113.82\n") == "203.0.113.82"
+
+
+def test_proxio_probe_rate_limiter_caps_sustained_calls(monkeypatch):
+    clock = {"now": 100.0}
+    sleeps = []
+    monkeypatch.setattr("app.checker._proxio_next_request_at", 0.0)
+
+    def monotonic():
+        return clock["now"]
+
+    def sleeper(seconds):
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    _wait_for_probe_slot(PROXIO_WHOAMI_URL, clock=monotonic, sleeper=sleeper)
+    _wait_for_probe_slot(PROXIO_WHOAMI_URL, clock=monotonic, sleeper=sleeper)
+    _wait_for_probe_slot(PROBE_URLS[0], clock=monotonic, sleeper=sleeper)
+
+    assert len(sleeps) == 1
+    assert round(sleeps[0], 3) == PROXIO_MIN_INTERVAL_SECONDS
+
+
+def test_verified_quorum_accepts_proxio_as_one_independent_json_source():
+    other_probe = next(probe for probe in PROBE_URLS if probe != PROXIO_WHOAMI_URL)
+
+    def runner(cmd, **kwargs):
+        probe = cmd[-1]
+        if probe == PROXIO_WHOAMI_URL:
+            response = curl_response(probe, ip="")
+            response.stdout = (
+                f'{{"ip":"203.0.113.83","http":{{"remote_ip":"198.51.100.9"}}}}__PROBE_META__:200|{probe}|0\n'
+            )
+            return response
+        if probe == other_probe:
+            return curl_response(probe, ip="203.0.113.83")
+        return curl_response(probe, ip="203.0.113.84")
+
+    result = check_proxy(PROXY, runner=runner)
+
+    assert result["status"] == "live"
+    assert result["exit_ip"] == "203.0.113.83"
+    assert result["egress_trusted"] is True
 
 
 def test_verified_quorum_requires_two_independent_https_hosts():
@@ -144,6 +199,17 @@ def test_repeated_timeouts_are_inconclusive_not_dead():
 def test_probe_endpoint_outage_is_inconclusive_not_dead():
     def runner(cmd, **kwargs):
         return curl_response(cmd[-1], code="503", ip="")
+
+    result = check_proxy(PROXY, runner=runner)
+
+    assert result["status"] == "inconclusive"
+    assert result["failure_kind"] == "probe_endpoint"
+
+
+def test_proxio_rate_limit_is_inconclusive_not_proxy_death():
+    def runner(cmd, **kwargs):
+        probe = cmd[-1]
+        return curl_response(probe, code="429" if probe == PROXIO_WHOAMI_URL else "503", ip="")
 
     result = check_proxy(PROXY, runner=runner)
 
