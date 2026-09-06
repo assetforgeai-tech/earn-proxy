@@ -62,7 +62,7 @@ Public registration is admitted before password hashing through shared per-clien
 
 Sign-in attempts are admitted through shared client-IP and global buckets before password verification. The defaults allow 30 attempts per client and 1000 globally in 15 minutes; an account-wide lockout is deliberately not used because it would let an unauthenticated caller deny service to a known account. Tune `EARN_PROXY_LOGIN_IP_MAX_ATTEMPTS`, `EARN_PROXY_LOGIN_GLOBAL_MAX_ATTEMPTS`, and `EARN_PROXY_LOGIN_RATE_WINDOW_SECONDS` alongside any upstream login protection.
 
-Approved contributors may keep up to 100 active proxy rows by default. Set `EARN_PROXY_MAX_ACTIVE_PROXIES_PER_USER` to match the expected per-account inventory; archived rows and historical earnings do not consume the quota.
+Approved contributors may keep up to 5,000 active proxy rows by default. Set `EARN_PROXY_MAX_ACTIVE_PROXIES_PER_USER` to match the expected per-account inventory; archived rows and historical earnings do not consume the quota.
 
 ## Contributor proxy import
 

@@ -46,6 +46,7 @@ def test_production_rejects_env_example_placeholders(tmp_path):
 def test_session_cookie_security_defaults(app):
     assert app.config["SESSION_COOKIE_HTTPONLY"] is True
     assert app.config["SESSION_COOKIE_SAMESITE"] == "Lax"
+    assert app.config["MAX_ACTIVE_PROXIES_PER_USER"] == 5000
     assert app.config["MAX_CONTENT_LENGTH"] == 1024 * 1024
     assert app.config["MAX_PROXY_IMPORT_BYTES"] == 512 * 1024
     assert app.config["MAX_PROXY_IMPORT_LINES"] == 5000

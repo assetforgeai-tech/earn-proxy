@@ -171,9 +171,9 @@ def create_proxy():
         return form_error("Only user accounts can add proxies", 403, "dashboard.proxies")
     db = get_db()
     try:
-        quota = max(1, min(10_000, int(current_app.config.get("MAX_ACTIVE_PROXIES_PER_USER", 100))))
+        quota = max(1, min(10_000, int(current_app.config.get("MAX_ACTIVE_PROXIES_PER_USER", 5_000))))
     except (TypeError, ValueError):
-        quota = 100
+        quota = 5_000
     # Fast rejection keeps malformed input out of the service when the quota
     # is already exhausted; add_proxy repeats this check under a write lock.
     active_count = int(
@@ -219,7 +219,7 @@ def import_proxies():
     db = get_db()
     try:
         lines, _ = _import_lines_from_request()
-        quota = max(1, min(10_000, int(current_app.config.get("MAX_ACTIVE_PROXIES_PER_USER", 100))))
+        quota = max(1, min(10_000, int(current_app.config.get("MAX_ACTIVE_PROXIES_PER_USER", 5_000))))
         result = bulk_add_proxies(
             db,
             g.user["id"],
