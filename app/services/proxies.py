@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from app.crypto import decrypt_secret, encrypt_secret
-from app.proxy_parser import ParsedProxy, parse_proxy
+from app.proxy_parser import ParsedProxy, ProxyParseError, parse_proxy
 from app.services.earnings import expire_pending_cycle, reset_probation
 
 
@@ -17,9 +19,196 @@ class ProxyQuotaExceeded(ValueError):
     pass
 
 
+class ProxyImportLimitExceeded(ValueError):
+    pass
+
+
+MAX_BULK_IMPORT_ISSUES = 100
+
+
+@dataclass(frozen=True)
+class BulkImportIssue:
+    line: int
+    category: str
+    reason: str
+    value: str = ""
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "line": self.line,
+            "category": self.category,
+            "reason": self.reason,
+            "value": self.value,
+        }
+
+
+@dataclass(frozen=True)
+class BulkImportResult:
+    submitted: int
+    added: int
+    duplicates: int
+    invalid: int
+    quota_skipped: int
+    ignored_blank: int
+    issues: tuple[BulkImportIssue, ...]
+    issues_truncated: int = 0
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "submitted": self.submitted,
+            "added": self.added,
+            "duplicates": self.duplicates,
+            "invalid": self.invalid,
+            "quota_skipped": self.quota_skipped,
+            "ignored_blank": self.ignored_blank,
+            "issues": [issue.as_dict() for issue in self.issues],
+            "issues_truncated": self.issues_truncated,
+        }
+
+
 def credential_fingerprint(parsed: ParsedProxy) -> str:
     normalized = "\0".join([parsed.host.lower(), str(parsed.port), parsed.username, parsed.password])
     return hashlib.sha256(normalized.encode()).hexdigest()
+
+
+def _safe_issue_value(parsed: ParsedProxy | None) -> str:
+    """Return only the public endpoint; never echo credentials in feedback."""
+    if parsed is None:
+        return ""
+    return f"{parsed.host}:{parsed.port}"
+
+
+def bulk_add_proxies(
+    db,
+    user_id: int,
+    raw_lines: Iterable[str],
+    *,
+    max_active_proxies: int | None = None,
+    max_lines: int = 5_000,
+) -> BulkImportResult:
+    """Parse and insert a bounded batch while preserving global deduplication."""
+    try:
+        line_values = str(raw_lines).splitlines() if isinstance(raw_lines, str) else list(raw_lines)
+    except TypeError as exc:
+        raise ProxyImportLimitExceeded("Proxy import input is invalid") from exc
+    if len(line_values) > max(1, int(max_lines)):
+        raise ProxyImportLimitExceeded(f"A single import can contain at most {int(max_lines)} lines")
+
+    quota = None
+    if max_active_proxies is not None:
+        quota = max(1, min(10_000, int(max_active_proxies)))
+
+    parsed_rows: list[tuple[int, ParsedProxy, str]] = []
+    issues: list[BulkImportIssue] = []
+    issues_truncated = 0
+
+    def record_issue(issue: BulkImportIssue) -> None:
+        nonlocal issues_truncated
+        if len(issues) < MAX_BULK_IMPORT_ISSUES:
+            issues.append(issue)
+        else:
+            issues_truncated += 1
+
+    submitted = 0
+    ignored_blank = 0
+    invalid = 0
+    for line_number, raw_line in enumerate(line_values, 1):
+        value = str(raw_line or "").strip()
+        if not value:
+            ignored_blank += 1
+            continue
+        submitted += 1
+        try:
+            parsed = parse_proxy(value)
+        except ProxyParseError as exc:
+            invalid += 1
+            record_issue(BulkImportIssue(line_number, "invalid", str(exc), ""))
+            continue
+        parsed_rows.append((line_number, parsed, credential_fingerprint(parsed)))
+
+    added = 0
+    duplicates = 0
+    quota_skipped = 0
+    owns_transaction = not db.in_transaction
+    if owns_transaction:
+        db.execute("BEGIN IMMEDIATE")
+    try:
+        active_count = 0
+        if quota is not None:
+            active_count = int(
+                db.execute(
+                    "SELECT COUNT(*) AS count FROM proxies WHERE user_id=? AND archived_at IS NULL",
+                    (user_id,),
+                ).fetchone()["count"]
+            )
+        seen_fingerprints: set[str] = set()
+        now = datetime.now(UTC).isoformat()
+        for line_number, parsed, fingerprint in parsed_rows:
+            public_value = _safe_issue_value(parsed)
+            if fingerprint in seen_fingerprints:
+                duplicates += 1
+                record_issue(
+                    BulkImportIssue(
+                        line_number, "duplicate", "Proxy credential already exists in this import", public_value
+                    )
+                )
+                continue
+            seen_fingerprints.add(fingerprint)
+            exists = db.execute(
+                "SELECT 1 FROM proxies WHERE credential_fingerprint=? LIMIT 1",
+                (fingerprint,),
+            ).fetchone()
+            if exists:
+                duplicates += 1
+                record_issue(BulkImportIssue(line_number, "duplicate", "Proxy credential already exists", public_value))
+                continue
+            if quota is not None and active_count >= quota:
+                quota_skipped += 1
+                record_issue(BulkImportIssue(line_number, "quota", "Account proxy limit reached", public_value))
+                continue
+            db.execute(
+                """
+                INSERT INTO proxies(
+                    user_id, host, port, protocol_hint, username_encrypted, password_encrypted,
+                    credential_fingerprint, next_check_at, probation_started_at, accrual_cursor_at,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    parsed.host,
+                    parsed.port,
+                    parsed.protocol,
+                    encrypt_secret(parsed.username),
+                    encrypt_secret(parsed.password),
+                    fingerprint,
+                    now,
+                    now,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            added += 1
+            active_count += 1
+        if owns_transaction:
+            db.commit()
+    except Exception:
+        if owns_transaction and db.in_transaction:
+            db.rollback()
+        raise
+
+    issues.sort(key=lambda issue: issue.line)
+    return BulkImportResult(
+        submitted=submitted,
+        added=added,
+        duplicates=duplicates,
+        invalid=invalid,
+        quota_skipped=quota_skipped,
+        ignored_blank=ignored_blank,
+        issues=tuple(issues),
+        issues_truncated=issues_truncated,
+    )
 
 
 def add_proxy(db, user_id: int, raw_proxy: str, *, max_active_proxies: int | None = None) -> int:

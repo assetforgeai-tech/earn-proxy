@@ -62,7 +62,10 @@ def parse_proxy(raw: str) -> ParsedProxy:
         raise ProxyParseError("Proxy value is too long")
 
     if "://" in value:
-        parsed = urlsplit(value)
+        try:
+            parsed = urlsplit(value)
+        except ValueError as exc:
+            raise ProxyParseError("Proxy URL is invalid") from exc
         try:
             port = parsed.port
         except ValueError as exc:

@@ -64,6 +64,36 @@ Sign-in attempts are admitted through shared client-IP and global buckets before
 
 Approved contributors may keep up to 100 active proxy rows by default. Set `EARN_PROXY_MAX_ACTIVE_PROXIES_PER_USER` to match the expected per-account inventory; archived rows and historical earnings do not consume the quota.
 
+## Contributor proxy import
+
+The contributor proxy workspace accepts one proxy or a batch. Users can paste one proxy per line, upload a UTF-8 `.txt` or `.csv` file, or combine pasted and uploaded input in the same request. Supported raw formats are:
+
+```text
+host:port
+host:port:username:password
+username:password@host:port
+http://username:password@host:port
+https://username:password@host:port
+socks5://username:password@host:port
+```
+
+CSV uploads may contain one raw proxy per row, a header named `raw_proxy` (aliases: `proxy`, `url`, or `endpoint`), or structured headers `host,port,username,password,protocol`. Structured header aliases include `ip`/`server`, `user`/`login`, `pass`/`secret`, and `scheme`/`type`. Headerless multi-column CSV is rejected so columns cannot be interpreted incorrectly.
+
+Imports are limited to 512 KB and 5,000 lines by default. Configure `EARN_PROXY_MAX_IMPORT_BYTES` and `EARN_PROXY_MAX_IMPORT_LINES` to change those bounds. Blank lines are ignored. Valid entries are encrypted and queued with `pending` status. Credential duplicates are skipped globally, including duplicates owned by another account and duplicates repeated within the same batch; import feedback only exposes safe `host:port` labels.
+
+The existing single-entry `POST /proxies` route remains available. Bulk clients can use `POST /proxies/import` with JSON:
+
+```json
+{
+  "raw_proxies": [
+    "proxy-one.example:9000:user:password",
+    "socks5://user:password@proxy-two.example:1080"
+  ]
+}
+```
+
+Browser clients submit `multipart/form-data` with `raw_proxies`, optional `proxy_file`, and the normal CSRF token. The response reports `added`, `duplicates`, `invalid`, `quota_skipped`, `ignored_blank`, and credential-safe per-line issues.
+
 Each contributor may have up to 10 nonterminal payout requests (`requested`, `approved`, or `verifying`) queued at once. Terminal history (`confirmed`, `failed`, and legacy `sent`) remains durable without consuming this queue limit. Set `EARN_PROXY_MAX_OUTSTANDING_PAYOUTS_PER_USER` to tune the bound; values are clamped to 1-1000.
 
 ## Internal API

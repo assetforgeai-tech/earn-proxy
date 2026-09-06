@@ -37,6 +37,24 @@ def test_user_dashboard_shows_safe_proxy_controls_uptime_and_payout_history(app,
     assert "private-pass" not in page
 
 
+def test_user_proxy_workspace_exposes_bulk_text_file_import_and_supported_formats(app, client):
+    _activate_user(app, client)
+    page = client.get("/dashboard/proxies").get_data(as_text=True)
+
+    assert 'action="/proxies/import"' in page
+    assert 'name="raw_proxies"' in page
+    assert 'name="proxy_file"' in page
+    assert 'enctype="multipart/form-data"' in page
+    assert "One proxy per line" in page
+    assert "host:port" in page
+    assert "host:port:username:password" in page
+    assert "username:password@host:port" in page
+    assert "socks5://username:password@host:port" in page
+    assert "https://username:password@host:port" in page
+    assert "raw_proxy" in page
+    assert "host,port,username,password,protocol" in page
+
+
 def test_admin_dashboard_exposes_create_delete_and_payout_controls(app, client):
     register(client, "admin-ui-user@example.com", "member-password")
     client.post("/logout")

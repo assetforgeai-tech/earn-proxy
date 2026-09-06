@@ -80,9 +80,11 @@ def create_app(test_config: dict | None = None) -> Flask:
         LOGIN_RATE_WINDOW_SECONDS=int(os.environ.get("EARN_PROXY_LOGIN_RATE_WINDOW_SECONDS", "900")),
         MAX_ACTIVE_PROXIES_PER_USER=int(os.environ.get("EARN_PROXY_MAX_ACTIVE_PROXIES_PER_USER", "100")),
         MAX_OUTSTANDING_PAYOUTS_PER_USER=int(os.environ.get("EARN_PROXY_MAX_OUTSTANDING_PAYOUTS_PER_USER", "10")),
-        MAX_CONTENT_LENGTH=64 * 1024,
-        MAX_FORM_MEMORY_SIZE=64 * 1024,
+        MAX_CONTENT_LENGTH=1024 * 1024,
+        MAX_FORM_MEMORY_SIZE=1024 * 1024,
         MAX_FORM_PARTS=64,
+        MAX_PROXY_IMPORT_BYTES=int(os.environ.get("EARN_PROXY_MAX_IMPORT_BYTES", str(512 * 1024))),
+        MAX_PROXY_IMPORT_LINES=int(os.environ.get("EARN_PROXY_MAX_IMPORT_LINES", "5000")),
     )
     if test_config:
         app.config.update(test_config)

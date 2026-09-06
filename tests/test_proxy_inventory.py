@@ -7,6 +7,7 @@ from app.proxy_parser import ProxyParseError, parse_proxy
 from app.services.proxies import (
     DuplicateCredential,
     add_proxy,
+    bulk_add_proxies,
     reconcile_exit_ip,
     reveal_proxy,
 )
@@ -100,6 +101,133 @@ def test_duplicate_fingerprint_cannot_be_bypassed_by_changing_protocol_hint(app)
         add_proxy(db, first_user, "http://alice:secret@proxy.example:9000")
         with pytest.raises(DuplicateCredential):
             add_proxy(db, second_user, "socks5://alice:secret@proxy.example:9000")
+
+
+def test_bulk_proxy_import_adds_multiline_input_and_ignores_blank_lines(app):
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "bulk@example.com", "password", status="active")
+
+        result = bulk_add_proxies(
+            db,
+            user_id,
+            """
+            socks5://alice:first-secret@one.example:1080
+
+            two.example:8080:bob:second-secret
+            carol:third-secret@three.example:9000
+            """,
+            max_active_proxies=10,
+        )
+        rows = db.execute(
+            "SELECT host,port,protocol_hint,status FROM proxies WHERE user_id=? ORDER BY id",
+            (user_id,),
+        ).fetchall()
+
+    assert result.submitted == 3
+    assert result.added == 3
+    assert result.ignored_blank == 3
+    assert result.duplicates == 0
+    assert result.invalid == 0
+    assert result.quota_skipped == 0
+    assert [tuple(row) for row in rows] == [
+        ("one.example", 1080, "socks5", "pending"),
+        ("two.example", 8080, "auto", "pending"),
+        ("three.example", 9000, "auto", "pending"),
+    ]
+
+
+def test_bulk_proxy_import_reports_global_and_within_batch_duplicates_without_secrets(app):
+    with app.app_context():
+        db = get_db()
+        first_user = create_user(db, "bulk-first@example.com", "password", status="active")
+        second_user = create_user(db, "bulk-second@example.com", "password", status="active")
+        add_proxy(db, first_user, "existing.example:9000:alice:existing-secret")
+
+        result = bulk_add_proxies(
+            db,
+            second_user,
+            "\n".join(
+                [
+                    "existing.example:9000:alice:existing-secret",
+                    "new.example:9001:bob:new-secret",
+                    "http://bob:new-secret@new.example:9001",
+                    "not-a-proxy:private-secret",
+                ]
+            ),
+            max_active_proxies=10,
+        )
+
+    assert result.added == 1
+    assert result.duplicates == 2
+    assert result.invalid == 1
+    assert [issue.line for issue in result.issues] == [1, 3, 4]
+    serialized = str(result.as_dict())
+    assert "existing-secret" not in serialized
+    assert "new-secret" not in serialized
+    assert "private-secret" not in serialized
+
+
+def test_bulk_proxy_import_reports_malformed_urls_as_invalid_lines(app):
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "bulk-malformed@example.com", "password", status="active")
+
+        result = bulk_add_proxies(
+            db,
+            user_id,
+            "http://[broken.example:9000:user:secret",
+            max_active_proxies=10,
+        )
+
+    assert result.added == 0
+    assert result.invalid == 1
+    assert result.issues[0].line == 1
+    assert "secret" not in str(result.as_dict())
+
+
+def test_bulk_proxy_import_partially_fills_remaining_quota_in_input_order(app):
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "bulk-quota@example.com", "password", status="active")
+        add_proxy(db, user_id, "first.example:8000:u:first")
+
+        result = bulk_add_proxies(
+            db,
+            user_id,
+            "second.example:8001:u:second\nthird.example:8002:u:third",
+            max_active_proxies=2,
+        )
+        hosts = [
+            row["host"]
+            for row in db.execute(
+                "SELECT host FROM proxies WHERE user_id=? AND archived_at IS NULL ORDER BY id",
+                (user_id,),
+            ).fetchall()
+        ]
+
+    assert result.added == 1
+    assert result.quota_skipped == 1
+    assert result.issues[-1].category == "quota"
+    assert hosts == ["first.example", "second.example"]
+
+
+def test_bulk_proxy_import_bounds_safe_issue_details(app):
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "bulk-issue-limit@example.com", "password", status="active")
+        result = bulk_add_proxies(
+            db,
+            user_id,
+            ["not-a-proxy"] * 125,
+            max_active_proxies=200,
+            max_lines=200,
+        )
+
+    assert result.invalid == 125
+    assert len(result.issues) == 100
+    assert result.issues_truncated == 25
+    assert result.as_dict()["issues_truncated"] == 25
 
 
 def test_earliest_verified_egress_is_canonical_globally(app):

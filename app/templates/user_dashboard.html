@@ -80,20 +80,47 @@
 <section id="add-proxy" class="panel section-target">
   <div class="panel-head">
     <div>
-      <h2>Add proxy</h2>
-      <p class="muted">Credentials are encrypted at rest and hidden after submission.</p>
+      <p class="eyebrow">SECURE IMPORT</p>
+      <h2>Add proxy or import a full list</h2>
+      <p class="muted">One proxy per line. Paste a list, upload a UTF-8 text file, or combine both in one import.</p>
     </div>
   </div>
-  <form class="inline-form" method="post" action="{{ url_for('proxies.create_proxy') }}" data-submit-once="true">
+  <form class="proxy-import-form" method="post" action="{{ url_for('proxies.import_proxies') }}" enctype="multipart/form-data" data-submit-once="true">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="ui" value="1">
-    <div class="field-group">
-      <label for="raw_proxy">Raw proxy</label>
-      <input id="raw_proxy" name="raw_proxy" placeholder="host:port:user:password" autocomplete="off" required aria-describedby="raw-proxy-hint{% if error_focus == 'raw_proxy' %} raw-proxy-error{% endif %}"{% if error_focus == 'raw_proxy' %} aria-invalid="true"{% endif %}>
-      <small id="raw-proxy-hint" class="field-hint">Supported forms include host:port:user:password and protocol://user:password@host:port.</small>
-      {% if error_focus == 'raw_proxy' %}<small id="raw-proxy-error" class="field-error">Review the proxy value and try again.</small>{% endif %}
+    <div class="proxy-import-grid">
+      <div class="field-group proxy-list-field">
+        <label for="raw_proxies">Proxy list</label>
+        <textarea id="raw_proxies" name="raw_proxies" rows="10" placeholder="proxy.example:8080:username:password&#10;socks5://username:password@proxy.example:1080" autocomplete="off" spellcheck="false" aria-describedby="proxy-import-hint proxy-format-guide{% if error_focus == 'raw_proxies' %} proxy-import-error{% endif %}"{% if error_focus == 'raw_proxies' %} aria-invalid="true"{% endif %}></textarea>
+        <small id="proxy-import-hint" class="field-hint">Blank lines are ignored. Valid proxies are encrypted and queued for checking immediately after import.</small>
+        {% if error_focus == 'raw_proxies' %}<small id="proxy-import-error" class="field-error">Review the lines reported in the import message and try again.</small>{% endif %}
+      </div>
+      <aside id="proxy-format-guide" class="format-guide" aria-labelledby="format-guide-title">
+        <div>
+          <span class="format-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M7 3h7l4 4v14H7V3Zm7 0v5h5M10 12h5m-5 4h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+          <h3 id="format-guide-title">Supported formats</h3>
+          <p>Protocol is optional. When omitted, the checker tries SOCKS5 first and then HTTP.</p>
+        </div>
+        <code>host:port</code>
+        <code>host:port:username:password</code>
+        <code>username:password@host:port</code>
+        <code>http://username:password@host:port</code>
+        <code>https://username:password@host:port</code>
+        <code>socks5://username:password@host:port</code>
+      </aside>
     </div>
-    <button class="button primary" type="submit" data-loading-label="Adding proxy...">Add securely</button>
+    <div class="proxy-upload-row">
+      <div class="field-group file-field">
+        <label for="proxy_file">Import file <span class="optional">Optional</span></label>
+        <input id="proxy_file" name="proxy_file" type="file" accept=".txt,.csv,text/plain,text/csv" aria-describedby="proxy-file-hint">
+        <small id="proxy-file-hint" class="field-hint">UTF-8 <code>.txt</code> or <code>.csv</code>, up to 512 KB and 5,000 lines. CSV accepts one raw proxy per row, a <code>raw_proxy</code> column, or headers <code>host,port,username,password,protocol</code>.</small>
+      </div>
+      <div class="import-submit-copy">
+        <strong>Credentials stay private</strong>
+        <span>Duplicate credentials are skipped globally, including proxies submitted by another account.</span>
+      </div>
+      <button class="button primary" type="submit" data-loading-label="Importing proxies...">Import securely</button>
+    </div>
   </form>
   <aside class="info-callout whitelist-callout" aria-labelledby="whitelist-title">
     <div>
