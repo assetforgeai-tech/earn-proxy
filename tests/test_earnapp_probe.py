@@ -138,3 +138,38 @@ def test_earnapp_probe_rejects_an_invalid_authenticated_exit_ip(monkeypatch):
     assert result["eligibility"] == "pending"
     assert result["exit_ip"] == ""
     assert result["verdict"] != "CID_SET"
+
+
+def test_earnapp_probe_does_not_hang_when_tls_close_never_finishes(monkeypatch):
+    class Writer:
+        def write(self, _data):
+            return None
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            return None
+
+        async def wait_closed(self):
+            await asyncio.Event().wait()
+
+    async def fake_open(*_args, **_kwargs):
+        return object(), Writer()
+
+    async def decline_frame(*_args, **_kwargs):
+        return 1, True, b'{"type":"ipc_post","cmd":"tunnel_init_decline","msg":{"reason":"earnapp_blacklist"}}'
+
+    monkeypatch.setattr("app.earnapp_probe._open_wss_tunnel", fake_open)
+    monkeypatch.setattr("app.earnapp_probe.read_server_frame", decline_frame)
+    monkeypatch.setattr("app.earnapp_probe.CLOSE_WAIT_SECONDS", 0.01, raising=False)
+
+    async def run_probe():
+        return await asyncio.wait_for(
+            probe_earnapp_proxy("8.8.8.8", 1080, protocol="socks5", timeout_ms=4000),
+            timeout=0.2,
+        )
+
+    result = asyncio.run(run_probe())
+
+    assert result["verdict"] == "BLACKLIST"

@@ -21,11 +21,18 @@ WSS_PORT = 443
 SDK = "1.617.813"
 EARN_UA = f"Hola earnapp/{SDK}"
 DEFAULT_WAIT_MS = 18_000
+CLOSE_WAIT_SECONDS = 1.0
 MAKEFLAGS = (
     "DIST=APP RELEASE=y IS_IOS=y IOS_SDK=y IOS_UNITY=n "
     "CONFIG_BATREQ=y CONFIG_BAT_CYCLE=y CONFIG_BAT_PLATFORM=app_macr_ios_sdk"
 )
 _WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+async def _close_writer(writer: asyncio.StreamWriter) -> None:
+    writer.close()
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(writer.wait_closed(), timeout=CLOSE_WAIT_SECONDS)
 
 
 def build_tls_context() -> ssl.SSLContext:
@@ -265,9 +272,7 @@ async def _open_wss_tunnel(
             raise ConnectionError("WSS handshake returned an invalid accept token")
         return reader, writer
     except Exception:
-        writer.close()
-        with contextlib.suppress(Exception):
-            await writer.wait_closed()
+        await _close_writer(writer)
         raise
 
 
@@ -383,8 +388,6 @@ async def probe_earnapp_proxy(
     finally:
         result["latency_ms"] = max(0, int((asyncio.get_running_loop().time() - started) * 1000))
         if writer is not None:
-            writer.close()
-            with contextlib.suppress(Exception):
-                await writer.wait_closed()
+            await _close_writer(writer)
     result["eligibility"] = classify_verdict(str(result["verdict"]), str(result["reason"]))
     return result
