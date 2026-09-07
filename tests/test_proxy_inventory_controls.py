@@ -110,3 +110,54 @@ def test_proxy_inventory_never_exposes_credentials_in_search_or_pagination(app, 
     page = response.get_data(as_text=True)
     assert "secret-" not in page
     assert "user-" not in page
+
+
+def test_proxy_inventory_filters_and_labels_global_egress_identity(app, client):
+    user_id = _activate_user(app, client, "inventory-egress@example.com")
+    with app.app_context():
+        db = get_db()
+        canonical = add_proxy(db, user_id, "egress-a.example:9000:u-a:p-a")
+        duplicate = add_proxy(db, user_id, "egress-b.example:9001:u-b:p-b")
+        add_proxy(db, user_id, "egress-c.example:9002:u-c:p-c")
+        db.execute(
+            "UPDATE proxies SET status='online', exit_ip='198.51.100.10', "
+            "egress_attestation_source='https_quorum' WHERE id=?",
+            (canonical,),
+        )
+        db.execute(
+            "UPDATE proxies SET status='online', exit_ip='198.51.100.10', "
+            "egress_attestation_source='earnapp_tls', duplicate_of=? WHERE id=?",
+            (canonical, duplicate),
+        )
+        db.commit()
+
+    all_rows = client.get("/dashboard/proxies").get_data(as_text=True)
+    duplicate_rows = client.get("/dashboard/proxies?identity=duplicate").get_data(as_text=True)
+
+    assert "Egress identity" in all_rows
+    assert "Canonical" in all_rows
+    assert "Duplicate egress" in all_rows
+    assert "Awaiting probe" in all_rows
+    assert "Duplicate egress does not earn or enter API distribution." in all_rows
+    assert "198.51.100.10" not in all_rows
+    assert "egress-b.example:9001" in duplicate_rows
+    assert "egress-a.example:9000" not in duplicate_rows
+    assert "egress-c.example:9002" not in duplicate_rows
+    assert "Showing 1–1 of 1" in duplicate_rows
+    assert 'value="duplicate" selected' in duplicate_rows
+
+
+def test_proxy_inventory_keeps_untrusted_duplicate_pointer_in_awaiting_state(app, client):
+    user_id = _activate_user(app, client, "inventory-egress-untrusted@example.com")
+    with app.app_context():
+        db = get_db()
+        canonical = add_proxy(db, user_id, "untrusted-a.example:9000:u-a:p-a")
+        malformed = add_proxy(db, user_id, "untrusted-b.example:9001:u-b:p-b")
+        db.execute("UPDATE proxies SET duplicate_of=? WHERE id=?", (canonical, malformed))
+        db.commit()
+
+    duplicate_rows = client.get("/dashboard/proxies?identity=duplicate").get_data(as_text=True)
+    awaiting_rows = client.get("/dashboard/proxies?identity=awaiting").get_data(as_text=True)
+
+    assert "untrusted-b.example:9001" not in duplicate_rows
+    assert "untrusted-b.example:9001" in awaiting_rows

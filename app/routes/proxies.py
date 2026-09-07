@@ -155,7 +155,7 @@ def _import_summary(result) -> str:
         parts.append(f"{result.quota_skipped} skipped by quota")
     if result.ignored_blank:
         parts.append(f"{result.ignored_blank} blank line(s) ignored")
-    message = "Import complete: " + ", ".join(parts) + "."
+    message = "Import complete: " + ", ".join(parts) + ". Egress duplicates are evaluated after trusted checks."
     if result.issues:
         line_labels = ", ".join(f"line {issue.line} ({issue.category})" for issue in result.issues[:8])
         hidden_count = max(0, len(result.issues) - 8) + int(result.issues_truncated or 0)

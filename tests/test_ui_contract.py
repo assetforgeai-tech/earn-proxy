@@ -53,6 +53,8 @@ def test_user_proxy_workspace_exposes_bulk_text_file_import_and_supported_format
     assert "https://username:password@host:port" in page
     assert "raw_proxy" in page
     assert "host,port,username,password,protocol" in page
+    assert "Egress duplicates are detected after the first trusted probe" in page
+    assert "do not earn or enter API distribution" in page
 
 
 def test_admin_dashboard_exposes_create_delete_and_payout_controls(app, client):

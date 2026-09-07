@@ -5,6 +5,7 @@ from conftest import login, login_admin, register
 ADMIN_NAV_LABELS = (
     "Overview",
     "Health checker",
+    "Egress duplicates",
     "Users",
     "Payouts",
     "Distribution API",
@@ -59,6 +60,7 @@ def test_admin_sidebar_is_the_only_workspace_navigation_and_uses_canonical_label
     for path in (
         "/admin",
         "/admin/checker",
+        "/admin/egress-duplicates",
         "/admin/users",
         "/admin/payouts",
         "/admin/integrations",
@@ -76,12 +78,13 @@ def test_admin_overview_is_the_only_page_with_complete_quick_links(client):
     login_admin(client)
     overview = client.get("/admin").get_data(as_text=True)
 
-    assert overview.count('class="quick-link"') == 6
+    assert overview.count('class="quick-link"') == 7
     for label in ADMIN_NAV_LABELS[1:]:
         assert f"<strong>{label}</strong>" in overview
 
     for path in (
         "/admin/checker",
+        "/admin/egress-duplicates",
         "/admin/users",
         "/admin/payouts",
         "/admin/integrations",

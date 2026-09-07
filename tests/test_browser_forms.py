@@ -133,6 +133,7 @@ def test_user_can_import_multiline_text_and_utf8_text_file(app, client):
     assert response.status_code == 200
     page = response.get_data(as_text=True)
     assert "3 added" in page
+    assert "Egress duplicates are evaluated after trusted checks" in page
     assert "text-one.example:9000" in page
     assert "file-one.example:9002" in page
     assert "text-secret" not in page

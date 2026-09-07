@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}Egress duplicates - Earn Proxy{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">INVENTORY INTEGRITY</p>
+    {% if member_inventory %}
+      <h1>Duplicate egress members.</h1>
+      <p class="muted">Credential-safe members for trusted exit IP <span class="mono">{{ member_inventory.exit_ip }}</span>.</p>
+    {% else %}
+      <h1>Duplicate egress groups.</h1>
+      <p class="muted">Trusted probe results grouped globally by public exit IP. Only the canonical row enters distribution and earnings.</p>
+    {% endif %}
+  </div>
+</div>
+
+{% if member_inventory %}
+<section class="panel section-target" aria-labelledby="egress-members-title">
+  <div class="panel-head">
+    <div>
+      <h2 id="egress-members-title">Members sharing {{ member_inventory.exit_ip }}</h2>
+      <p class="muted">{{ member_inventory.total }} proxies · credentials remain hidden.</p>
+    </div>
+    <a class="button ghost" href="{{ member_inventory.list_url }}">Back to groups</a>
+  </div>
+  <form class="inventory-toolbar egress-member-toolbar" method="get" action="{{ url_for('admin.egress_duplicate_members', exit_ip=member_inventory.exit_ip) }}">
+    <div class="field-group">
+      <label for="egress-member-per-page">Rows per page</label>
+      <select id="egress-member-per-page" name="per_page">
+        {% for size in (25, 50, 100) %}<option value="{{ size }}"{% if member_inventory.per_page == size %} selected{% endif %}>{{ size }}</option>{% endfor %}
+      </select>
+    </div>
+    <button class="button primary" type="submit">Apply</button>
+  </form>
+  <div class="inventory-results-meta" aria-live="polite">
+    <strong>Showing {{ member_inventory.start_index }}–{{ member_inventory.end_index }} of {{ member_inventory.total }} proxies</strong>
+    <span>Canonical endpoint listed first</span>
+  </div>
+  <div class="table-wrap">
+    <table class="responsive-table compact-table">
+      <caption>Members sharing {{ member_inventory.exit_ip }}</caption>
+      <thead><tr><th scope="col">Endpoint</th><th scope="col">Contributor</th><th scope="col">Status</th><th scope="col">Role</th></tr></thead>
+      <tbody>
+        {% for member in member_inventory.members %}
+          <tr>
+            <th scope="row" data-label="Endpoint" class="mono breakable">{{ member.host }}:{{ member.port }}</th>
+            <td data-label="Contributor" class="breakable">{{ member.email }}</td>
+            <td data-label="Status"><span class="badge {{ member.status }}">{{ member.status|capitalize }}</span></td>
+            <td data-label="Role"><span class="badge {{ 'duplicate' if member.duplicate_of else 'canonical' }}">{{ 'Duplicate' if member.duplicate_of else 'Canonical' }}</span></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <nav class="pagination" aria-label="Duplicate egress member pages">
+    <a class="button small ghost{% if member_inventory.page <= 1 %} is-disabled{% endif %}" href="{{ member_inventory.previous_url }}"{% if member_inventory.page <= 1 %} aria-disabled="true" tabindex="-1"{% endif %}>Previous</a>
+    <span class="muted">Page {{ member_inventory.page }} of {{ member_inventory.total_pages }}</span>
+    <a class="button small ghost{% if member_inventory.page >= member_inventory.total_pages %} is-disabled{% endif %}" href="{{ member_inventory.next_url }}"{% if member_inventory.page >= member_inventory.total_pages %} aria-disabled="true" tabindex="-1"{% endif %}>Next</a>
+  </nav>
+</section>
+{% else %}
+<section class="panel section-target" aria-labelledby="egress-duplicates-title">
+  <div class="panel-head">
+    <div>
+      <h2 id="egress-duplicates-title">Duplicate egress groups</h2>
+      <p class="muted">{{ inventory.total }} group{{ '' if inventory.total == 1 else 's' }} · credentials remain hidden.</p>
+    </div>
+    <span class="badge duplicate">Global dedupe</span>
+  </div>
+
+  <form class="inventory-toolbar egress-duplicate-toolbar" method="get" action="{{ url_for('admin.egress_duplicates') }}" role="search">
+    <div class="field-group inventory-search">
+      <label for="egress-search">Search exit IP</label>
+      <input id="egress-search" name="q" type="search" value="{{ inventory.search }}" placeholder="198.51.100.10" autocomplete="off">
+    </div>
+    <div class="field-group">
+      <label for="egress-per-page">Groups per page</label>
+      <select id="egress-per-page" name="per_page">
+        {% for size in (25, 50, 100) %}<option value="{{ size }}"{% if inventory.per_page == size %} selected{% endif %}>{{ size }}</option>{% endfor %}
+      </select>
+    </div>
+    <button class="button primary" type="submit">Apply filter</button>
+    <a class="button ghost" href="{{ inventory.reset_url }}">Clear filter</a>
+  </form>
+
+  <div class="inventory-results-meta" aria-live="polite">
+    <strong>{% if inventory.total %}Showing {{ inventory.start_index }}–{{ inventory.end_index }} of {{ inventory.total }} groups{% else %}No duplicate egress groups{% endif %}</strong>
+    <span>Canonical endpoint listed first</span>
+  </div>
+
+  {% if inventory.groups %}
+    <div class="table-wrap">
+      <table class="responsive-table compact-table">
+        <caption>Trusted duplicate egress groups</caption>
+        <thead><tr><th scope="col">Exit IP</th><th scope="col">Canonical endpoint</th><th scope="col">Proxies</th><th scope="col">Accounts</th><th scope="col">Duplicates</th><th scope="col">Action</th></tr></thead>
+        <tbody>
+          {% for group in inventory.groups %}
+            <tr>
+              <th scope="row" data-label="Exit IP" class="mono breakable">{{ group.exit_ip }}</th>
+              <td data-label="Canonical endpoint" class="mono breakable">{{ group.canonical_host }}:{{ group.canonical_port }}</td>
+              <td data-label="Proxies">{{ group.proxy_count }} proxies</td>
+              <td data-label="Accounts">{{ group.account_count }} accounts</td>
+              <td data-label="Duplicates">{{ group.duplicate_count }} duplicates</td>
+              <td data-label="Action"><a class="button small ghost" href="{{ url_for('admin.egress_duplicate_members', exit_ip=group.exit_ip) }}">View members</a></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <nav class="pagination" aria-label="Duplicate egress pages">
+      <a class="button small ghost{% if inventory.page <= 1 %} is-disabled{% endif %}" href="{{ inventory.previous_url }}"{% if inventory.page <= 1 %} aria-disabled="true" tabindex="-1"{% endif %}>Previous</a>
+      <span class="muted">Page {{ inventory.page }} of {{ inventory.total_pages }}</span>
+      <a class="button small ghost{% if inventory.page >= inventory.total_pages %} is-disabled{% endif %}" href="{{ inventory.next_url }}"{% if inventory.page >= inventory.total_pages %} aria-disabled="true" tabindex="-1"{% endif %}>Next</a>
+    </nav>
+  {% else %}
+    <div class="empty">No trusted egress IP is currently shared by more than one active proxy.</div>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

@@ -124,6 +124,8 @@ def create_app(test_config: dict | None = None) -> Flask:
         route_shell = {
             "admin.dashboard": ("overview", "Overview"),
             "admin.checker": ("checker", "Health checker"),
+            "admin.egress_duplicates": ("egress_duplicates", "Egress duplicates"),
+            "admin.egress_duplicate_members": ("egress_duplicates", "Egress duplicates"),
             "admin.users": ("users", "Users"),
             "admin.payouts": ("payouts", "Payouts"),
             "admin.integrations": ("integrations", "Distribution API"),

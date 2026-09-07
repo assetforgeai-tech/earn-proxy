@@ -18,6 +18,7 @@ INVENTORY_PAGE_SIZES = (10, 25, 50, 100)
 INVENTORY_STATUSES = ("pending", "online", "offline", "blocked", "suspect")
 INVENTORY_PROTOCOLS = ("http", "socks5", "unknown")
 INVENTORY_ELIGIBILITIES = ("allow", "risk", "pending")
+INVENTORY_IDENTITIES = ("canonical", "duplicate", "awaiting")
 INVENTORY_SORT_COLUMNS = {
     "endpoint": ("LOWER(p.host)", "p.port", "p.id"),
     "status": ("p.status", "LOWER(p.host)", "p.port", "p.id"),
@@ -38,6 +39,7 @@ class InventoryQuery:
     status: str
     protocol: str
     eligibility: str
+    identity: str
     sort: str
     direction: str
 
@@ -65,6 +67,7 @@ def _inventory_query(args) -> InventoryQuery:
     status = str(args.get("status") or "").strip().lower()
     protocol = str(args.get("protocol") or "").strip().lower()
     eligibility = str(args.get("eligibility") or "").strip().lower()
+    identity = str(args.get("identity") or "").strip().lower()
     sort = str(args.get("sort") or "created").strip().lower()
     direction = str(args.get("direction") or "desc").strip().lower()
     return InventoryQuery(
@@ -74,6 +77,7 @@ def _inventory_query(args) -> InventoryQuery:
         status=status if status in INVENTORY_STATUSES else "",
         protocol=protocol if protocol in INVENTORY_PROTOCOLS else "",
         eligibility=eligibility if eligibility in INVENTORY_ELIGIBILITIES else "",
+        identity=identity if identity in INVENTORY_IDENTITIES else "",
         sort=sort if sort in INVENTORY_SORT_COLUMNS else "created",
         direction=direction if direction in {"asc", "desc"} else "desc",
     )
@@ -103,6 +107,13 @@ def _inventory_conditions(user_id: int, query: InventoryQuery) -> tuple[list[str
     if query.eligibility:
         conditions.append("p.eligibility=?")
         parameters.append(query.eligibility)
+    trusted = "p.egress_attestation_source IN ('https_quorum','earnapp_tls')"
+    if query.identity == "canonical":
+        conditions.append(f"{trusted} AND p.exit_ip IS NOT NULL AND trim(p.exit_ip)<>'' AND p.duplicate_of IS NULL")
+    elif query.identity == "duplicate":
+        conditions.append(f"{trusted} AND p.exit_ip IS NOT NULL AND trim(p.exit_ip)<>'' AND p.duplicate_of IS NOT NULL")
+    elif query.identity == "awaiting":
+        conditions.append(f"NOT ({trusted} AND p.exit_ip IS NOT NULL AND trim(p.exit_ip)<>'')")
     return conditions, parameters
 
 
@@ -112,6 +123,7 @@ def _inventory_url_args(query: InventoryQuery, **overrides: object) -> dict[str,
         "status": query.status,
         "protocol": query.protocol,
         "eligibility": query.eligibility,
+        "identity": query.identity,
         "sort": query.sort,
         "direction": query.direction,
         "per_page": query.per_page,
@@ -161,6 +173,7 @@ def _inventory_page(db, user_id: int, query: InventoryQuery) -> dict[str, object
             status=query.status,
             protocol=query.protocol,
             eligibility=query.eligibility,
+            identity=query.identity,
             sort=query.sort,
             direction=query.direction,
         )
@@ -212,6 +225,32 @@ def _inventory_page(db, user_id: int, query: InventoryQuery) -> dict[str, object
         "status_counts": grouped_count("status"),
         "protocol_counts": grouped_count("detected_protocol"),
         "eligibility_counts": grouped_count("eligibility"),
+        "identity_counts": {
+            "canonical": int(
+                db.execute(
+                    "SELECT COUNT(*) AS count FROM proxies p WHERE "
+                    + " AND ".join(base_conditions)
+                    + " AND p.egress_attestation_source IN ('https_quorum','earnapp_tls') AND p.exit_ip IS NOT NULL AND trim(p.exit_ip)<>'' AND p.duplicate_of IS NULL",
+                    base_parameters,
+                ).fetchone()["count"]
+            ),
+            "duplicate": int(
+                db.execute(
+                    "SELECT COUNT(*) AS count FROM proxies p WHERE "
+                    + " AND ".join(base_conditions)
+                    + " AND p.egress_attestation_source IN ('https_quorum','earnapp_tls') AND p.exit_ip IS NOT NULL AND trim(p.exit_ip)<>'' AND p.duplicate_of IS NOT NULL",
+                    base_parameters,
+                ).fetchone()["count"]
+            ),
+            "awaiting": int(
+                db.execute(
+                    "SELECT COUNT(*) AS count FROM proxies p WHERE "
+                    + " AND ".join(base_conditions)
+                    + " AND NOT (p.egress_attestation_source IN ('https_quorum','earnapp_tls') AND p.exit_ip IS NOT NULL AND trim(p.exit_ip)<>'')",
+                    base_parameters,
+                ).fetchone()["count"]
+            ),
+        },
         "filter_url": filter_url,
         "sort_urls": sort_urls,
         "page_links": page_links,
@@ -260,6 +299,17 @@ def _freshness_view(proxy, *, now: datetime, stale_minutes: int) -> dict[str, ob
         "last": _timestamp_view(proxy["last_checked_at"], empty_label="Never"),
         "next": _timestamp_view(proxy["next_check_at"], empty_label="Pending schedule"),
     }
+
+
+def _identity_view(proxy) -> dict[str, str]:
+    """Expose dedupe state without revealing egress identity to contributors."""
+    source = str(proxy["egress_attestation_source"] or "").strip().lower()
+    trusted = source in {"https_quorum", "earnapp_tls"} and bool(str(proxy["exit_ip"] or "").strip())
+    if trusted and proxy["duplicate_of"] is not None:
+        return {"state": "duplicate", "label": "Duplicate egress"}
+    if trusted:
+        return {"state": "canonical", "label": "Canonical"}
+    return {"state": "awaiting", "label": "Awaiting probe"}
 
 
 @bp.get("/")
@@ -319,6 +369,7 @@ def _render_dashboard(section: str):
                 now=now,
                 stale_minutes=settings.health_stale_minutes,
             ),
+            "identity": _identity_view(proxy),
         }
         for proxy in proxies
     ]

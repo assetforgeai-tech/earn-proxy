@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import ipaddress
+import math
 import sqlite3
 from datetime import UTC, datetime
 
-from flask import Blueprint, current_app, g, jsonify, redirect, render_template, request, url_for
+from flask import Blueprint, abort, current_app, g, jsonify, redirect, render_template, request, url_for
 
 from app.auth import admin_required
 from app.db import get_db
@@ -30,6 +32,133 @@ from app.services.users import create_user
 
 bp = Blueprint("admin", __name__, url_prefix="/admin")
 
+EGRESS_DUPLICATE_PAGE_SIZES = (25, 50, 100)
+
+
+def _egress_duplicate_query(args) -> tuple[int, int, str]:
+    try:
+        page = max(1, min(10_000_000, int(str(args.get("page") or "1"))))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        requested = int(str(args.get("per_page") or "25"))
+    except (TypeError, ValueError):
+        requested = 25
+    per_page = requested if requested in EGRESS_DUPLICATE_PAGE_SIZES else 25
+    search = str(args.get("q") or "").strip()[:100]
+    return page, per_page, search
+
+
+def _egress_duplicate_page(db, args) -> dict[str, object]:
+    page, per_page, search = _egress_duplicate_query(args)
+    conditions = [
+        "p.archived_at IS NULL",
+        "p.exit_ip IS NOT NULL",
+        "trim(p.exit_ip)<>''",
+        "p.egress_attestation_source IN ('https_quorum','earnapp_tls')",
+    ]
+    parameters: list[object] = []
+    if search:
+        conditions.append("p.exit_ip LIKE ? ESCAPE '\\'")
+        escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        parameters.append(f"%{escaped}%")
+    where = " AND ".join(conditions)
+    total = int(
+        db.execute(
+            "SELECT COUNT(*) AS count FROM (SELECT p.exit_ip FROM proxies p WHERE "
+            + where
+            + " GROUP BY p.exit_ip HAVING COUNT(*)>1)",
+            parameters,
+        ).fetchone()["count"]
+    )
+    total_pages = max(1, math.ceil(total / per_page))
+    page = min(page, total_pages)
+    rows = db.execute(
+        """
+        SELECT p.exit_ip,
+               COUNT(*) AS proxy_count,
+               SUM(CASE WHEN p.duplicate_of IS NOT NULL THEN 1 ELSE 0 END) AS duplicate_count,
+               COUNT(DISTINCT p.user_id) AS account_count,
+               MIN(CASE WHEN p.duplicate_of IS NULL THEN p.host END) AS canonical_host,
+               MIN(CASE WHEN p.duplicate_of IS NULL THEN p.port END) AS canonical_port
+        FROM proxies p
+        WHERE """
+        + where
+        + " GROUP BY p.exit_ip HAVING COUNT(*)>1 ORDER BY proxy_count DESC, p.exit_ip LIMIT ? OFFSET ?",
+        [*parameters, per_page, (page - 1) * per_page],
+    ).fetchall()
+
+    def page_url(**overrides: object) -> str:
+        values = {"q": search, "per_page": per_page, "page": page}
+        values.update(overrides)
+        return url_for(
+            "admin.egress_duplicates",
+            **{key: value for key, value in values.items() if value not in ("", None)},
+        )
+
+    return {
+        "groups": rows,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+        "start_index": (page - 1) * per_page + 1 if total else 0,
+        "end_index": min(page * per_page, total),
+        "search": search,
+        "previous_url": page_url(page=max(1, page - 1)),
+        "next_url": page_url(page=min(total_pages, page + 1)),
+        "reset_url": url_for("admin.egress_duplicates"),
+    }
+
+
+def _egress_duplicate_members_page(db, exit_ip: str, args) -> dict[str, object]:
+    try:
+        normalized_exit = str(ipaddress.ip_address(exit_ip))
+    except ValueError:
+        abort(404)
+    page, per_page, _ = _egress_duplicate_query(args)
+    trusted_members = (
+        "p.archived_at IS NULL AND p.exit_ip=? AND p.egress_attestation_source IN ('https_quorum','earnapp_tls')"
+    )
+    total = int(
+        db.execute(
+            "SELECT COUNT(*) AS count FROM proxies p WHERE " + trusted_members,
+            (normalized_exit,),
+        ).fetchone()["count"]
+    )
+    if total < 2:
+        abort(404)
+    total_pages = max(1, math.ceil(total / per_page))
+    page = min(page, total_pages)
+    members = db.execute(
+        "SELECT p.host,p.port,p.status,p.duplicate_of,u.email FROM proxies p JOIN users u ON u.id=p.user_id "
+        "WHERE " + trusted_members + " ORDER BY p.duplicate_of IS NOT NULL, p.created_at, p.id LIMIT ? OFFSET ?",
+        (normalized_exit, per_page, (page - 1) * per_page),
+    ).fetchall()
+
+    def page_url(**overrides: object) -> str:
+        values = {"per_page": per_page, "page": page}
+        values.update(overrides)
+        return url_for(
+            "admin.egress_duplicate_members",
+            exit_ip=normalized_exit,
+            **values,
+        )
+
+    return {
+        "exit_ip": normalized_exit,
+        "members": members,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+        "start_index": (page - 1) * per_page + 1,
+        "end_index": min(page * per_page, total),
+        "previous_url": page_url(page=max(1, page - 1)),
+        "next_url": page_url(page=min(total_pages, page + 1)),
+        "list_url": url_for("admin.egress_duplicates"),
+    }
+
 
 @bp.get("")
 @admin_required
@@ -52,6 +181,34 @@ def checker():
         api_include_risk=get_setting(db, "api_include_risk", "1") == "1",
         admin_section="checker",
     )
+
+
+@bp.get("/egress-duplicates")
+@admin_required
+def egress_duplicates():
+    response = current_app.make_response(
+        render_template(
+            "admin_egress_duplicates.html",
+            inventory=_egress_duplicate_page(get_db(), request.args),
+            admin_section="egress_duplicates",
+        )
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@bp.get("/egress-duplicates/<path:exit_ip>")
+@admin_required
+def egress_duplicate_members(exit_ip: str):
+    response = current_app.make_response(
+        render_template(
+            "admin_egress_duplicates.html",
+            member_inventory=_egress_duplicate_members_page(get_db(), exit_ip, request.args),
+            admin_section="egress_duplicates",
+        )
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @bp.get("/users")

@@ -754,13 +754,22 @@ form[aria-busy="true"] .button {
 }
 
 .inventory-count.pending,
-.inventory-count.suspect {
+.inventory-count.suspect,
+.inventory-count.awaiting {
   border-color: #e7d49d;
+}
+
+.inventory-count.duplicate {
+  border-color: #e4b5ad;
+}
+
+.inventory-count.canonical {
+  border-color: #abd8c7;
 }
 
 .inventory-toolbar {
   display: grid;
-  grid-template-columns: minmax(180px, 1.5fr) repeat(4, minmax(110px, 0.7fr)) auto auto;
+  grid-template-columns: minmax(180px, 1.5fr) repeat(5, minmax(110px, 0.7fr)) auto auto;
   gap: 10px;
   align-items: end;
   margin-bottom: 14px;
@@ -861,6 +870,19 @@ select {
 .pagination .is-disabled {
   pointer-events: none;
   opacity: 0.48;
+}
+
+.egress-duplicate-toolbar {
+  grid-template-columns: minmax(220px, 1fr) minmax(150px, 0.35fr) auto auto;
+}
+
+.egress-member-toolbar {
+  grid-template-columns: minmax(150px, 220px) auto;
+  justify-content: start;
+}
+
+.compact-table {
+  min-width: 620px;
 }
 
 .settings-grid {
@@ -971,11 +993,22 @@ thead th {
 .badge.pending,
 .badge.inconclusive,
 .badge.suspect,
+.badge.awaiting,
 .badge.requested,
 .badge.stale,
 .badge.verifying {
   background: var(--amber-soft);
   color: #80500b;
+}
+
+.badge.duplicate {
+  background: var(--red-soft);
+  color: #8f2c26;
+}
+
+.badge.canonical {
+  background: var(--teal-soft);
+  color: #09614f;
 }
 
 .freshness {
@@ -1090,6 +1123,10 @@ thead th {
 
   .inventory-toolbar {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .egress-duplicate-toolbar {
+    grid-template-columns: 1fr;
   }
 
   .inventory-search {
@@ -1653,6 +1690,9 @@ body.authenticated.theme-dark .drawer-account { border-color: var(--shell-line);
   body.authenticated .drawer-account .account-summary { padding: 0; }
   body.authenticated .drawer-signout { width: 100% !important; }
   body.authenticated .shell { padding: 24px 20px 60px; }
+  body.authenticated .inventory-toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  body.authenticated .inventory-search { grid-column: 1 / -1; }
+  body.authenticated .inventory-toolbar .button { width: 100%; }
 }
 
 @media (max-width: 680px) {

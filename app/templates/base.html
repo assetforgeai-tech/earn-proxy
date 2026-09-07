@@ -37,6 +37,9 @@
         <a class="nav-item" data-nav="checker"{% if current_nav == 'checker' %} aria-current="page"{% endif %} href="{{ url_for('admin.checker') }}">
           <svg viewBox="0 0 24 24" fill="none"><path d="M4 6h16M7 12h10M10 18h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Health checker</span>
         </a>
+        <a class="nav-item" data-nav="egress_duplicates"{% if current_nav == 'egress_duplicates' %} aria-current="page"{% endif %} href="{{ url_for('admin.egress_duplicates') }}">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M7 4h10M7 20h10M5 8h14M5 16h14M9 4v4m6-4v4m-6 8v4m6-4v4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>Egress duplicates</span>
+        </a>
         <a class="nav-item" data-nav="users"{% if current_nav == 'users' %} aria-current="page"{% endif %} href="{{ url_for('admin.users') }}">
           <svg viewBox="0 0 24 24" fill="none"><path d="M8 10a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm8.5-1a3.5 3.5 0 1 0 0-7M2 21v-3a5 5 0 0 1 5-5h2a5 5 0 0 1 5 5v3m1-8h1a5 5 0 0 1 5 5v3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>Users</span>
         </a>

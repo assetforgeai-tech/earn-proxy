@@ -12,6 +12,7 @@ ADMIN_PASSWORD = os.environ["EARN_PROXY_ADMIN_PASSWORD"]
 ADMIN_ROUTES = (
     ("Overview", "/admin"),
     ("Health checker", "/admin/checker"),
+    ("Egress duplicates", "/admin/egress-duplicates"),
     ("Users", "/admin/users"),
     ("Payouts", "/admin/payouts"),
     ("Distribution API", "/admin/integrations"),
@@ -55,7 +56,23 @@ def create_approved_contributor(page: Page) -> tuple[str, str]:
 
 
 def assert_no_overflow(page: Page) -> None:
-    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    overflow = page.evaluate(
+        """() => ({
+          viewport: window.innerWidth,
+          documentWidth: document.documentElement.scrollWidth,
+          offenders: [...document.querySelectorAll('body *')]
+            .filter((element) => element.getBoundingClientRect().right > window.innerWidth + 1)
+            .slice(0, 8)
+            .map((element) => ({
+              tag: element.tagName,
+              id: element.id,
+              className: element.className?.toString?.() || '',
+              right: Math.round(element.getBoundingClientRect().right),
+              scrollWidth: element.scrollWidth,
+            })),
+        })"""
+    )
+    assert overflow["documentWidth"] <= overflow["viewport"], f"{page.url}: {overflow}"
 
 
 def audit_admin(page: Page, width: int, height: int) -> None:
@@ -73,6 +90,22 @@ def audit_admin(page: Page, width: int, height: int) -> None:
             assert page.locator("#app-sidebar").get_attribute("aria-hidden") == "false"
             page.keyboard.press("Escape")
             assert page.locator("#app-sidebar").get_attribute("aria-hidden") == "true"
+
+    page.goto(f"{BASE_URL}/admin/egress-duplicates", wait_until="networkidle")
+    member_link = page.get_by_role("link", name="View members").first
+    if member_link.count():
+        member_link.click()
+        page.wait_for_load_state("networkidle")
+        assert page.get_by_role("heading", name="Duplicate egress members.").is_visible()
+        assert page.locator('#app-sidebar [data-nav="egress_duplicates"]').get_attribute("aria-current") == "page"
+        assert_no_overflow(page)
+
+    if width >= 681:
+        theme_toggle = page.get_by_role("button", name="Toggle theme")
+        theme_toggle.click()
+        assert page.locator("body").evaluate("body => body.classList.contains('theme-dark')")
+        assert_no_overflow(page)
+        theme_toggle.click()
 
     if width <= 1099:
         toggle = page.get_by_role("button", name="Open navigation")
