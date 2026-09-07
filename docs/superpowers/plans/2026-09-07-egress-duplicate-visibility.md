@@ -203,6 +203,8 @@ python scripts/smoke_ui.py
 
 Verified against an isolated local instance with relay configuration present: navigation UX, interaction/responsive, and desktop/mobile smoke audits passed.
 
-- [ ] **Step 3: Commit, push, deploy, verify production**
+- [x] **Step 3: Commit, push, deploy, verify production**
 
 Use the existing release script. Confirm services active, `/healthz` healthy, contributor counts equal production DB identity counts, admin group totals match, and the raw API returns only canonical rows.
+
+Production verification: release `7cb647e21f7a04c7c0dc57e4d37fb23b4e652e3a` is active on the VPS; all five services are enabled/active; `/healthz` is healthy; the database reports 2,056 active proxies, 88 canonical rows, 1,968 duplicate rows, 88 duplicate groups, and zero identity mismatches; the authenticated raw API returns 88 canonical rows.
