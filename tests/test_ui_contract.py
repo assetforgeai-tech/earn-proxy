@@ -31,6 +31,14 @@ def test_user_dashboard_shows_safe_proxy_controls_uptime_and_payout_history(app,
     page = client.get("/dashboard/proxies").get_data(as_text=True)
     assert "Replace" in page
     assert "Remove" in page
+    assert 'class="responsive-table proxy-inventory-table"' in page
+    assert "data-replace-proxy-trigger" in page
+    assert 'id="replace-proxy-dialog"' in page
+    assert page.count('name="raw_proxy"') == 1
+    assert f'data-replace-action="/proxies/{proxy_id}/replace"' in page
+    assert 'data-replace-endpoint="safe.example:9000"' in page
+    assert '<details id="add-proxy"' in page
+    assert "import-panel-summary" in page
     assert "Online hours" in page
     assert "Wallet &amp; payouts" in page
     assert "private-user" not in page

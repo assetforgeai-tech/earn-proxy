@@ -132,7 +132,7 @@
   </div>
   {% if users %}
     <div class="table-wrap">
-      <table class="responsive-table">
+      <table class="responsive-table compact-data-table">
         <caption>Contributor account lifecycle controls</caption>
         <thead><tr><th scope="col">Email</th><th scope="col">Status</th><th scope="col">Earn</th><th scope="col">Actions</th></tr></thead>
         <tbody>
@@ -164,7 +164,7 @@
   <div class="panel-head"><div><h2>Payout queue</h2><p class="muted">Approve the request, transfer USDT manually, then submit the transaction hash for automatic on-chain verification.</p></div><span class="muted">{{ payouts|length }} request{{ '' if payouts|length == 1 else 's' }}</span></div>
   {% if payouts %}
     <div class="table-wrap">
-      <table class="responsive-table">
+      <table class="responsive-table compact-data-table payout-table">
         <caption>Manual payout approvals with automatic BSC transaction verification</caption>
         <thead><tr><th scope="col">User</th><th scope="col">Gross</th><th scope="col">Fee</th><th scope="col">Net</th><th scope="col">Processing deadline</th><th scope="col">Status</th><th scope="col">Transaction hash</th><th scope="col">Actions</th></tr></thead>
         <tbody>

@@ -37,7 +37,7 @@
     <span>Canonical endpoint listed first</span>
   </div>
   <div class="table-wrap">
-    <table class="responsive-table compact-table">
+    <table class="responsive-table compact-data-table compact-table">
       <caption>Members sharing {{ member_inventory.exit_ip }}</caption>
       <thead><tr><th scope="col">Endpoint</th><th scope="col">Contributor</th><th scope="col">Status</th><th scope="col">Role</th></tr></thead>
       <tbody>
@@ -90,7 +90,7 @@
 
   {% if inventory.groups %}
     <div class="table-wrap">
-      <table class="responsive-table compact-table">
+      <table class="responsive-table compact-data-table compact-table">
         <caption>Trusted duplicate egress groups</caption>
         <thead><tr><th scope="col">Exit IP</th><th scope="col">Canonical endpoint</th><th scope="col">Proxies</th><th scope="col">Accounts</th><th scope="col">Duplicates</th><th scope="col">Action</th></tr></thead>
         <tbody>

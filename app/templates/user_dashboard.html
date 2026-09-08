@@ -77,14 +77,16 @@
 {% endif %}
 
 {% if dashboard_section == 'proxies' %}
-<section id="add-proxy" class="panel section-target">
-  <div class="panel-head">
-    <div>
-      <p class="eyebrow">SECURE IMPORT</p>
-      <h2>Add proxy or import a full list</h2>
-      <p class="muted">One proxy per line. Paste a list, upload a UTF-8 text file, or combine both in one import.</p>
-    </div>
-  </div>
+<details id="add-proxy" class="panel section-target import-panel"{% if error_focus == 'raw_proxies' %} open{% endif %}>
+  <summary class="panel-head import-panel-summary">
+    <span>
+      <span class="eyebrow">SECURE IMPORT</span>
+      <strong>Add proxy or import a full list</strong>
+      <small>One proxy per line. Paste lines or upload a UTF-8 file. Credentials stay private.</small>
+    </span>
+    <span class="import-panel-toggle" aria-hidden="true">Add proxies <span>+</span></span>
+  </summary>
+  <div class="import-panel-body">
   <form class="proxy-import-form" method="post" action="{{ url_for('proxies.import_proxies') }}" enctype="multipart/form-data" data-submit-once="true">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="ui" value="1">
@@ -95,19 +97,20 @@
         <small id="proxy-import-hint" class="field-hint">Blank lines are ignored. Valid proxies are encrypted and queued for checking immediately after import.</small>
         {% if error_focus == 'raw_proxies' %}<small id="proxy-import-error" class="field-error">Review the lines reported in the import message and try again.</small>{% endif %}
       </div>
-      <aside id="proxy-format-guide" class="format-guide" aria-labelledby="format-guide-title">
-        <div>
+      <details id="proxy-format-guide" class="format-guide" open>
+        <summary>
           <span class="format-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M7 3h7l4 4v14H7V3Zm7 0v5h5M10 12h5m-5 4h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
-          <h3 id="format-guide-title">Supported formats</h3>
-          <p>Protocol is optional. When omitted, the checker tries SOCKS5 first and then HTTP.</p>
+          <span><strong id="format-guide-title">Supported formats</strong><small>Protocol optional · SOCKS5 tried first</small></span>
+        </summary>
+        <div class="format-list" aria-labelledby="format-guide-title">
+          <code>host:port</code>
+          <code>host:port:username:password</code>
+          <code>username:password@host:port</code>
+          <code>http://username:password@host:port</code>
+          <code>https://username:password@host:port</code>
+          <code>socks5://username:password@host:port</code>
         </div>
-        <code>host:port</code>
-        <code>host:port:username:password</code>
-        <code>username:password@host:port</code>
-        <code>http://username:password@host:port</code>
-        <code>https://username:password@host:port</code>
-        <code>socks5://username:password@host:port</code>
-      </aside>
+      </details>
     </div>
     <div class="proxy-upload-row">
       <div class="field-group file-field">
@@ -133,7 +136,8 @@
       <div class="copy-field"><code id="whitelist-ip" class="copy-value">{{ whitelist_ip }}</code><button class="button small ghost" type="button" data-copy-target="whitelist-ip" aria-label="Copy whitelist IP address">Copy IP</button></div>
     </div>
   </aside>
-</section>
+  </div>
+</details>
 {% endif %}
 
 {% if dashboard_section == 'wallet' %}
@@ -188,8 +192,7 @@
   <div class="panel-head">
     <div>
       <h2>Proxy status</h2>
-      <p class="muted">Health sweep target: {{ health_interval_minutes }} minutes. Stale results are clearly marked.</p>
-      <p class="muted">Duplicate egress does not earn or enter API distribution.</p>
+      <p class="muted">Health sweep target: {{ health_interval_minutes }} minutes · Duplicate egress does not earn or enter API distribution.</p>
     </div>
     <span class="muted">{{ inventory.filtered_count }} matching · {{ inventory.total_count }} total</span>
   </div>
@@ -276,7 +279,7 @@
   </div>
   {% if proxies %}
     <div class="table-wrap">
-      <table class="responsive-table">
+      <table class="responsive-table proxy-inventory-table">
         <caption>Masked proxy endpoints and their latest health state</caption>
         <thead>
           <tr>
@@ -299,26 +302,18 @@
               <td data-label="Protocol">{{ proxy.detected_protocol|upper }}</td>
               <td data-label="Status"><span class="badge {{ proxy.status }}">{{ proxy.status|capitalize }}</span></td>
               <td data-label="Eligibility"><span class="badge {{ proxy.eligibility }}">{{ proxy.eligibility|capitalize }}</span></td>
-              <td data-label="Egress identity"><span class="badge {{ item.identity.state }}">{{ item.identity.label }}</span>{% if item.identity.state == 'duplicate' %}<small class="field-hint">Not distributed or earned</small>{% elif item.identity.state == 'awaiting' %}<small class="field-hint">Waiting for trusted probe</small>{% endif %}</td>
-              <td data-label="Online hours">{{ '%.2f'|format(item.uptime.online) }}</td>
-              <td data-label="Offline hours">{{ '%.2f'|format(item.uptime.offline) }}</td>
+              <td data-label="Egress identity"><span class="badge {{ item.identity.state }}">{{ item.identity.label }}</span>{% if item.identity.state == 'duplicate' %}<small class="visually-hidden">Not distributed or earned.</small>{% elif item.identity.state == 'awaiting' %}<small class="visually-hidden">Waiting for trusted probe.</small>{% endif %}</td>
+              <td data-label="Online hours" class="numeric-cell">{{ '%.2f'|format(item.uptime.online) }}</td>
+              <td data-label="Offline hours" class="numeric-cell">{{ '%.2f'|format(item.uptime.offline) }}</td>
               <td data-label="Freshness">
                 <div class="freshness {{ item.freshness.state }}">
                   <strong>{{ item.freshness.label }}</strong>
                   <span>Last checked: {% if item.freshness.last.iso %}<time datetime="{{ item.freshness.last.iso }}">{{ item.freshness.last.label }}</time>{% else %}{{ item.freshness.last.label }}{% endif %}</span>
-                  <span>Next check: {% if item.freshness.next.iso %}<time datetime="{{ item.freshness.next.iso }}">{{ item.freshness.next.label }}</time>{% else %}{{ item.freshness.next.label }}{% endif %}</span>
+                  <span class="visually-hidden">Next check: {% if item.freshness.next.iso %}<time datetime="{{ item.freshness.next.iso }}">{{ item.freshness.next.label }}</time>{% else %}{{ item.freshness.next.label }}{% endif %}</span>
                 </div>
               </td>
-              <td data-label="Actions" class="actions">
-                <form method="post" action="{{ url_for('proxies.replace', proxy_id=proxy.id) }}" data-submit-once="true">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                  <input type="hidden" name="ui" value="1">
-                  <label for="replace-{{ proxy.id }}">Replacement proxy</label>
-                  <input id="replace-{{ proxy.id }}" name="raw_proxy" placeholder="New raw proxy" autocomplete="off" required aria-describedby="replace-hint-{{ proxy.id }}{% if error_focus == 'replace-' ~ proxy.id %} replace-error-{{ proxy.id }}{% endif %}"{% if error_focus == 'replace-' ~ proxy.id %} aria-invalid="true"{% endif %}>
-                  <small id="replace-hint-{{ proxy.id }}" class="field-hint">Replaces this endpoint after validation.</small>
-                  {% if error_focus == 'replace-' ~ proxy.id %}<small id="replace-error-{{ proxy.id }}" class="field-error">Review the replacement proxy.</small>{% endif %}
-                  <button class="button small ghost" type="submit" data-loading-label="Replacing...">Replace</button>
-                </form>
+              <td data-label="Actions" class="actions proxy-row-actions">
+                <button class="button small ghost" type="button" data-replace-proxy-trigger data-replace-action="{{ url_for('proxies.replace', proxy_id=proxy.id) }}" data-replace-endpoint="{{ proxy.host }}:{{ proxy.port }}" aria-haspopup="dialog" aria-controls="replace-proxy-dialog">Replace</button>
                 <form method="post" action="{{ url_for('proxies.delete', proxy_id=proxy.id) }}" data-confirm-dialog data-confirm-title="Remove proxy?" data-confirm-message="Its earning history is retained, but this endpoint stops being distributed." data-confirm-label="Remove proxy" data-submit-once="true">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                   <input type="hidden" name="ui" value="1">
@@ -340,6 +335,25 @@
       </div>
       <a class="button small ghost{% if inventory.query.page >= inventory.total_pages %} is-disabled{% endif %}" href="{{ inventory.next_url }}"{% if inventory.query.page >= inventory.total_pages %} aria-disabled="true" tabindex="-1"{% endif %}>Next</a>
     </nav>
+    <dialog id="replace-proxy-dialog" class="confirm-dialog replace-proxy-dialog" aria-labelledby="replace-proxy-title" aria-describedby="replace-proxy-message" data-replace-error-id="{{ error_focus[8:] if error_focus.startswith('replace-') else '' }}">
+      <form id="replace-proxy-form" class="dialog-body" method="post" action="{{ url_for('dashboard.proxies') }}" data-submit-once="true">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="ui" value="1">
+        <p class="eyebrow">REPLACE ENDPOINT</p>
+        <h2 id="replace-proxy-title">Replace proxy</h2>
+        <p id="replace-proxy-message" class="muted">Enter the replacement for <strong class="mono" data-replace-proxy-endpoint>this endpoint</strong>. It is validated, encrypted, and queued for checking.</p>
+        <div class="field-group">
+          <label for="replace-proxy-input">Replacement proxy</label>
+          <input id="replace-proxy-input" name="raw_proxy" placeholder="New raw proxy" autocomplete="off" required aria-describedby="replace-proxy-hint{% if error_focus.startswith('replace-') %} replace-proxy-error{% endif %}"{% if error_focus.startswith('replace-') %} aria-invalid="true"{% endif %}>
+          <small id="replace-proxy-hint" class="field-hint">Supported formats match the import form above.</small>
+          {% if error_focus.startswith('replace-') %}<small id="replace-proxy-error" class="field-error">Review the replacement proxy.</small>{% endif %}
+        </div>
+        <div class="dialog-actions">
+          <button class="button ghost" type="button" data-replace-proxy-cancel>Cancel</button>
+          <button class="button primary" type="submit" data-loading-label="Replacing...">Replace proxy</button>
+        </div>
+      </form>
+    </dialog>
   {% else %}
     <div class="empty">No proxy matches these filters. <a href="{{ inventory.reset_url }}">Clear filters</a> or add a new endpoint above.</div>
   {% endif %}

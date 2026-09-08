@@ -67,6 +67,7 @@ with sync_playwright() as playwright:
     page.goto(f"{BASE_URL}/dashboard/proxies")
     page.wait_for_load_state("networkidle")
     endpoint = f"audit-{uuid.uuid4().hex}.example:9000"
+    page.locator("#add-proxy > summary").click()
     page.get_by_label("Proxy list").fill(f"{endpoint}:masked-user:masked-pass")
     page.get_by_role("button", name="Import securely").click()
     page.wait_for_load_state("networkidle")
@@ -91,6 +92,7 @@ with sync_playwright() as playwright:
     mobile.get_by_role("button", name="Open navigation").click()
     assert mobile.get_by_role("link", name="Proxy pool", exact=True).get_attribute("aria-current") == "page"
     mobile.keyboard.press("Escape")
+    mobile.locator("#add-proxy > summary").click()
     assert mobile.get_by_role("button", name="Import securely").is_visible()
     endpoint_cell = mobile.locator('tbody th[data-label="Endpoint"]').first
     assert endpoint_cell.evaluate("element => element.scrollWidth <= element.clientWidth")

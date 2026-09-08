@@ -153,3 +153,123 @@ def test_theme_control_has_a_persisted_visual_theme_contract():
     assert ".theme-dark" in css
     assert "localStorage" in js
     assert "data-theme-toggle" in (Path(__file__).parents[1] / "app" / "templates" / "base.html").read_text()
+
+
+def test_data_heavy_workspaces_use_compact_table_contract(client):
+    root = Path(__file__).parents[1]
+    user_template = (root / "app" / "templates" / "user_dashboard.html").read_text()
+    admin_template = (root / "app" / "templates" / "admin_dashboard.html").read_text()
+    api_keys_template = (root / "app" / "templates" / "admin_api_keys.html").read_text()
+    duplicates_template = (root / "app" / "templates" / "admin_egress_duplicates.html").read_text()
+    css = (root / "app" / "static" / "app.css").read_text()
+    js = (root / "app" / "static" / "app.js").read_text()
+
+    assert "proxy-inventory-table" in user_template
+    assert "compact-data-table" in admin_template
+    assert "compact-data-table" in api_keys_template
+    assert "compact-data-table" in duplicates_template
+    assert ".proxy-row-actions" in css
+    assert ".compact-data-table" in css
+    assert "openReplaceDialog" in js
+    assert "replaceDialog.showModal()" in js
+
+
+def test_proxy_actions_fit_one_compact_touch_safe_row():
+    root = Path(__file__).parents[1]
+    css = (root / "app" / "static" / "app.css").read_text()
+
+    assert ".proxy-inventory-table {\n  min-width: 1000px;" in css
+    assert ".proxy-inventory-table th:nth-child(9) { width: 17%; }" in css
+    assert (
+        ".proxy-row-actions {\n  display: flex;\n  min-width: 0;\n  align-items: center;\n  gap: 6px;\n  flex-wrap: nowrap;"
+        in css
+    )
+    assert ".proxy-row-actions .button {\n  min-height: 44px;" in css
+    assert "body.authenticated .responsive-table .proxy-row-actions form" in css
+
+
+def test_proxy_endpoint_column_keeps_host_port_readable_on_desktop():
+    root = Path(__file__).parents[1]
+    css = (root / "app" / "static" / "app.css").read_text()
+
+    assert ".proxy-inventory-table th:nth-child(1) { width: 20%; }" in css
+    assert "@media (min-width: 701px)" in css
+    desktop_rule = css[css.index("@media (min-width: 701px)") :]
+    assert 'body.authenticated .proxy-inventory-table tbody th[scope="row"]' in desktop_rule
+    assert "white-space: nowrap;" in desktop_rule
+
+
+def test_proxy_action_cascade_keeps_controls_inline_after_legacy_actions_rules():
+    root = Path(__file__).parents[1]
+    css = (root / "app" / "static" / "app.css").read_text()
+
+    action_rule = css.index("body.authenticated .proxy-inventory-table .proxy-row-actions {")
+    form_rule = css.index("body.authenticated .proxy-inventory-table .proxy-row-actions form {")
+    assert "flex-wrap: nowrap;" in css[action_rule : action_rule + 240]
+    assert "align-items: center;" in css[action_rule : action_rule + 240]
+    assert "display: inline-flex;" in css[form_rule : form_rule + 180]
+
+
+def test_authenticated_dark_mode_remaps_legacy_data_tokens_and_states():
+    root = Path(__file__).parents[1]
+    css = (root / "app" / "static" / "app.css").read_text()
+
+    dark_rule = css[css.index("body.authenticated.theme-dark {") :]
+    for declaration in (
+        "--ink: #f2f4f7;",
+        "--ink-soft: #d0d5dd;",
+        "--muted: #b7c3d4;",
+        "--shell-muted: #b7c3d4;",
+        "--surface-strong: #1d2939;",
+        "--line-strong: #475467;",
+    ):
+        assert declaration in dark_rule
+    assert "body.authenticated.theme-dark .freshness.fresh strong" in dark_rule
+    assert "body.authenticated.theme-dark .freshness.stale strong" in dark_rule
+    assert "body.authenticated.theme-dark .format-guide summary small" in dark_rule
+
+
+def test_mobile_inventory_summary_prioritizes_status_and_egress_without_tiny_targets():
+    root = Path(__file__).parents[1]
+    css = (root / "app" / "static" / "app.css").read_text()
+
+    mobile_rule = css[css.index("@media (max-width: 700px) {", css.index("/* Compact authenticated workspaces")) :]
+    assert (
+        "body.authenticated .inventory-summary {\n    grid-template-columns: repeat(2, minmax(0, 1fr));" in mobile_rule
+    )
+    assert "body.authenticated .inventory-summary .inventory-count-group:nth-child(1)," in mobile_rule
+    assert "body.authenticated .inventory-summary .inventory-count-group:nth-child(4)" in mobile_rule
+    assert "grid-template-columns: repeat(auto-fit, minmax(76px, 1fr));" in mobile_rule
+    count_rule = mobile_rule[mobile_rule.index("body.authenticated .inventory-summary .inventory-count {") :]
+    assert "min-height: 44px;" in count_rule[:240]
+    assert "flex-direction: row;" in count_rule[:240]
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in mobile_rule
+    assert "grid-column: 1 / -1;" in mobile_rule
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in mobile_rule
+
+
+def test_mobile_authenticated_controls_keep_touch_targets_at_least_44px():
+    root = Path(__file__).parents[1]
+    css = (root / "app" / "static" / "app.css").read_text()
+    mobile_rule = css[css.index("@media (max-width: 700px) {", css.index("/* Compact authenticated workspaces")) :]
+
+    assert (
+        "body.authenticated .inventory-toolbar input,\n  body.authenticated .inventory-toolbar select {\n    min-height: 44px;"
+        in mobile_rule
+    )
+    assert "body.authenticated .page-link {\n    min-height: 44px;" in mobile_rule
+
+
+def test_mobile_inventory_compacts_protocol_and_eligibility_side_by_side():
+    root = Path(__file__).parents[1]
+    css = (root / "app" / "static" / "app.css").read_text()
+    mobile_rule = css[css.index("@media (max-width: 700px) {", css.index("/* Compact authenticated workspaces")) :]
+
+    assert (
+        "body.authenticated .inventory-summary .inventory-count-group:nth-child(2),\n  body.authenticated .inventory-summary .inventory-count-group:nth-child(3) {\n    grid-column: auto;"
+        in mobile_rule
+    )
+    assert (
+        "body.authenticated .inventory-summary .inventory-count-group:nth-child(2) .inventory-count-list,\n  body.authenticated .inventory-summary .inventory-count-group:nth-child(3) .inventory-count-list {\n    grid-template-columns: repeat(2, minmax(0, 1fr));"
+        in mobile_rule
+    )

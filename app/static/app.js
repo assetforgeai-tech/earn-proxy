@@ -253,4 +253,46 @@
     payoutAmount.addEventListener("input", updatePayoutQuote);
     updatePayoutQuote();
   }
+
+  const replaceDialog = document.querySelector("#replace-proxy-dialog");
+  const replaceForm = document.querySelector("#replace-proxy-form");
+  const replaceInput = document.querySelector("#replace-proxy-input");
+  const replaceEndpoint = replaceDialog?.querySelector("[data-replace-proxy-endpoint]");
+  const replaceCancel = replaceDialog?.querySelector("[data-replace-proxy-cancel]");
+  let replacePreviousFocus = null;
+
+  const closeReplaceDialog = () => {
+    if (!replaceDialog?.open) return;
+    replaceDialog.close();
+    replacePreviousFocus?.focus?.();
+    replacePreviousFocus = null;
+  };
+
+  const openReplaceDialog = (trigger) => {
+    if (!replaceDialog || !replaceForm || !replaceInput) return;
+    replacePreviousFocus = trigger;
+    replaceForm.action = trigger.dataset.replaceAction || replaceForm.action;
+    if (replaceEndpoint) replaceEndpoint.textContent = trigger.dataset.replaceEndpoint || "this endpoint";
+    replaceInput.value = "";
+    replaceDialog.showModal();
+    window.requestAnimationFrame(() => replaceInput.focus());
+  };
+
+  document.querySelectorAll("[data-replace-proxy-trigger]").forEach((trigger) => {
+    trigger.addEventListener("click", () => openReplaceDialog(trigger));
+  });
+  replaceCancel?.addEventListener("click", closeReplaceDialog);
+  replaceDialog?.addEventListener("cancel", () => {
+    const focusTarget = replacePreviousFocus;
+    replacePreviousFocus = null;
+    window.requestAnimationFrame(() => focusTarget?.focus?.());
+  });
+
+  const replaceErrorId = replaceDialog?.dataset.replaceErrorId;
+  if (replaceErrorId) {
+    const errorTrigger = document.querySelector(
+      `[data-replace-proxy-trigger][data-replace-action$="/${replaceErrorId}/replace"]`,
+    );
+    if (errorTrigger) openReplaceDialog(errorTrigger);
+  }
 })();
