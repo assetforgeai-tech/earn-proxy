@@ -11,6 +11,7 @@ ADMIN_PASSWORD = os.environ["EARN_PROXY_ADMIN_PASSWORD"]
 
 ADMIN_ROUTES = (
     ("Overview", "/admin"),
+    ("Proxies", "/admin/proxies"),
     ("Health checker", "/admin/checker"),
     ("Egress duplicates", "/admin/egress-duplicates"),
     ("Users", "/admin/users"),

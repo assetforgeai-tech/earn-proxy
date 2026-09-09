@@ -100,7 +100,9 @@ def test_non_allow_period_is_not_backfilled_when_proxy_later_becomes_allow(app):
         user_id = create_user(db, "one@example.com", "password", status="active")
         proxy_id = add_proxy(db, user_id, "proxy.example:9000:u:p")
         db.execute(
-            "UPDATE proxies SET status='online', eligibility='risk', online_since=?, last_success_at=?, accrual_cursor_at=?, probation_started_at=? WHERE id=?",
+            "UPDATE proxies SET status='online', eligibility='risk', exit_ip='198.51.100.10', "
+            "egress_attestation_source='https_quorum', online_since=?, last_success_at=?, "
+            "accrual_cursor_at=?, probation_started_at=? WHERE id=?",
             (
                 start.isoformat(),
                 (allow_time + timedelta(hours=1)).isoformat(),

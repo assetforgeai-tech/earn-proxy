@@ -386,6 +386,14 @@ def migrate_db(db) -> None:
             return
         legacy_columns = _columns(db, "proxies")
         _add_missing_columns(db, "proxies", PROXY_MIGRATION_COLUMNS)
+        if _table_exists(db, "earnings_ledger"):
+            # Duplicate rows must not retain a pending balance that could
+            # unlock if a later recheck promotes them to canonical.
+            db.execute(
+                "UPDATE earnings_ledger SET bucket='expired' "
+                "WHERE bucket='pending' AND proxy_id IN "
+                "(SELECT id FROM proxies WHERE duplicate_of IS NOT NULL)"
+            )
         now = "1970-01-01T00:00:00+00:00"
         # Force any identity without a trusted attestation through one strong
         # qualification pass. This remains idempotent for databases that saw

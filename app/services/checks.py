@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from app.earnapp_probe import classify_verdict
-from app.services.earnings import accrue_proxy_time, reset_probation
+from app.services.earnings import EARNING_ELIGIBILITIES, accrue_proxy_time, reset_probation
 from app.services.proxies import promote_duplicate_if_due, reconcile_exit_ip
 from app.services.settings import get_setting
 
@@ -352,7 +352,7 @@ def _apply_earnapp_result_locked(db, proxy_id: int, result: dict, *, now: dateti
         # is not an attested source; retain prior country metadata.
         verified_country_code = ""
     changed = previous is not None and previous_eligibility != eligibility
-    if changed and previous_eligibility == "allow":
+    if changed and previous_eligibility in EARNING_ELIGIBILITIES:
         # Capture the last eligible interval before invalidating its cycle.
         accrue_proxy_time(db, proxy_id, now=current)
     reset = bool(changed or egress_changed)
@@ -459,7 +459,9 @@ def _apply_health_result_locked(db, proxy_id: int, result: dict, *, now: datetim
             and previous_success
             and current > previous_success + timedelta(minutes=settings.health_stale_minutes)
         )
-        if (egress_changed or untrusted_egress_mismatch or stale_recovery) and row["eligibility"] == "allow":
+        if (egress_changed or untrusted_egress_mismatch or stale_recovery) and str(
+            row["eligibility"] or ""
+        ).strip().lower() in EARNING_ELIGIBILITIES:
             accrue_proxy_time(db, proxy_id, now=current)
         if egress_changed or untrusted_egress_mismatch or stale_recovery:
             reset_probation(db, proxy_id, current)
@@ -574,7 +576,7 @@ def _apply_health_result_locked(db, proxy_id: int, result: dict, *, now: datetim
         return
 
     if status == "blocked":
-        if row["eligibility"] == "allow":
+        if str(row["eligibility"] or "").strip().lower() in EARNING_ELIGIBILITIES:
             accrue_proxy_time(db, proxy_id, now=current)
         reset_probation(db, proxy_id, current)
         db.execute(
@@ -595,7 +597,11 @@ def _apply_health_result_locked(db, proxy_id: int, result: dict, *, now: datetim
     offline = failures >= 3
     next_retry = settings.health_retry_first_minutes if failures == 1 else settings.health_retry_second_minutes
     accumulated_online = int(row["accumulated_online_seconds"] or 0)
-    if offline and row["eligibility"] == "allow" and row["status"] in {"online", "suspect"}:
+    if (
+        offline
+        and str(row["eligibility"] or "").strip().lower() in EARNING_ELIGIBILITIES
+        and row["status"] in {"online", "suspect"}
+    ):
         # Accrue the final confirmed online interval before changing the row
         # to offline; the ledger query intentionally only reads online rows.
         accrue_proxy_time(db, proxy_id, now=current)

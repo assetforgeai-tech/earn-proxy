@@ -123,6 +123,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         endpoint = str(request.endpoint or "")
         route_shell = {
             "admin.dashboard": ("overview", "Overview"),
+            "admin.proxies": ("proxies", "Proxies"),
             "admin.checker": ("checker", "Health checker"),
             "admin.egress_duplicates": ("egress_duplicates", "Egress duplicates"),
             "admin.egress_duplicate_members": ("egress_duplicates", "Egress duplicates"),

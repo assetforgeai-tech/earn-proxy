@@ -821,6 +821,96 @@ details.panel > summary::-webkit-details-marker {
   background: rgba(245, 247, 242, 0.76);
 }
 
+.admin-proxy-overview {
+  display: grid;
+  grid-template-columns: 1.4fr repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0 0 16px;
+}
+
+.admin-proxy-overview article {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 15px 16px;
+  border: 1px solid var(--shell-line, var(--line));
+  border-radius: 14px;
+  background: var(--shell-surface, var(--surface-strong));
+}
+
+.admin-proxy-overview article span {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.admin-proxy-overview article strong {
+  color: var(--ink);
+  font: 700 1.55rem/1.1 "Palatino Linotype", Georgia, serif;
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-proxy-overview article small {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.admin-proxy-counts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(245, 247, 242, 0.76);
+}
+
+.admin-proxy-count-group {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.admin-proxy-toolbar {
+  grid-template-columns: minmax(240px, 1.6fr) repeat(4, minmax(130px, 1fr)) repeat(3, minmax(120px, 0.9fr)) auto auto;
+}
+
+.admin-proxy-table {
+  min-width: 1360px;
+  table-layout: fixed;
+}
+
+.admin-proxy-table th:nth-child(1) { width: 15%; }
+.admin-proxy-table th:nth-child(2) { width: 15%; }
+.admin-proxy-table th:nth-child(3) { width: 8%; }
+.admin-proxy-table th:nth-child(4) { width: 10%; }
+.admin-proxy-table th:nth-child(5) { width: 10%; }
+.admin-proxy-table th:nth-child(6) { width: 12%; }
+.admin-proxy-table th:nth-child(7) { width: 7%; }
+.admin-proxy-table th:nth-child(8) { width: 8%; }
+.admin-proxy-table th:nth-child(9) { width: 7%; }
+.admin-proxy-table th:nth-child(10) { width: 16%; }
+.admin-proxy-table th:nth-child(11) { width: 13%; }
+
+.admin-proxy-table tbody th[scope="row"] {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.admin-proxy-table .badge.archived {
+  margin-left: 5px;
+  vertical-align: middle;
+}
+
+.pagination-center {
+  display: grid;
+  justify-items: center;
+  gap: 5px;
+}
+
 .inventory-count-group {
   display: grid;
   gap: 7px;
@@ -1039,7 +1129,6 @@ select {
 .proxy-inventory-table th:nth-child(5) { width: 10%; }
 .proxy-inventory-table th:nth-child(6),
 .proxy-inventory-table th:nth-child(7) { width: 7%; }
-.proxy-inventory-table th:nth-child(8) { width: 17%; }
 .proxy-inventory-table th:nth-child(9) { width: 17%; }
 
 .proxy-inventory-table tbody th[scope="row"] {
@@ -1050,6 +1139,54 @@ select {
 .proxy-inventory-table .numeric-cell {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+.proxy-inventory-table .duration-cell {
+  white-space: normal;
+  line-height: 1.35;
+}
+
+.proxy-inventory-table .earn-cell {
+  white-space: normal;
+  line-height: 1.35;
+}
+
+.proxy-inventory-table .earn-cell strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.rate-label {
+  display: block;
+  margin-top: 3px;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+/* Keep the new earnings column readable without changing legacy mobile hooks. */
+body.authenticated .proxy-inventory-table {
+  min-width: 1300px;
+}
+
+body.authenticated .proxy-inventory-table th:nth-child(1) { width: 17%; }
+body.authenticated .proxy-inventory-table th:nth-child(2),
+body.authenticated .proxy-inventory-table th:nth-child(3) { width: 6%; }
+body.authenticated .proxy-inventory-table th:nth-child(4) { width: 12%; }
+body.authenticated .proxy-inventory-table th:nth-child(5) { width: 9%; }
+body.authenticated .proxy-inventory-table th:nth-child(6) { width: 11%; }
+body.authenticated .proxy-inventory-table th:nth-child(7),
+body.authenticated .proxy-inventory-table th:nth-child(8) { width: 7%; }
+body.authenticated .proxy-inventory-table th:nth-child(9) { width: 13%; }
+body.authenticated .proxy-inventory-table th:nth-child(10) { width: 12%; }
+
+.column-subtitle {
+  display: block;
+  color: var(--muted);
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: none;
 }
 
 .proxy-row-actions {
@@ -1205,6 +1342,9 @@ thead th {
 .badge.inconclusive,
 .badge.suspect,
 .badge.awaiting,
+.badge.archived,
+.badge.due,
+.badge.never,
 .badge.requested,
 .badge.stale,
 .badge.verifying {
@@ -1213,6 +1353,11 @@ thead th {
 }
 
 .badge.duplicate {
+  background: var(--red-soft);
+  color: #8f2c26;
+}
+
+.badge.excluded {
   background: var(--red-soft);
   color: #8f2c26;
 }
@@ -1340,6 +1485,15 @@ thead th {
     grid-template-columns: 1fr;
   }
 
+  .admin-proxy-overview,
+  .admin-proxy-counts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .admin-proxy-total {
+    grid-column: 1 / -1;
+  }
+
   .inventory-search {
     grid-column: 1 / -1;
   }
@@ -1441,6 +1595,15 @@ thead th {
 
   .inventory-summary {
     padding: 12px;
+  }
+
+  .admin-proxy-overview,
+  .admin-proxy-counts {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-proxy-total {
+    grid-column: auto;
   }
 
   .inventory-count-list {
@@ -1922,7 +2085,8 @@ body.authenticated.theme-dark .badge.blocked,
 body.authenticated.theme-dark .badge.deleted,
 body.authenticated.theme-dark .badge.revoked,
 body.authenticated.theme-dark .badge.failed,
-body.authenticated.theme-dark .badge.duplicate { background: #4b211e; color: #fda29b; }
+body.authenticated.theme-dark .badge.duplicate,
+body.authenticated.theme-dark .badge.excluded { background: #4b211e; color: #fda29b; }
 body.authenticated.theme-dark .badge.pending,
 body.authenticated.theme-dark .badge.inconclusive,
 body.authenticated.theme-dark .badge.suspect,
@@ -2335,8 +2499,6 @@ body.authenticated.theme-dark .compact-data-table tbody tr:hover {
 
   body.authenticated .proxy-inventory-table td[data-label="Protocol"],
   body.authenticated .proxy-inventory-table td[data-label="Status"],
-  body.authenticated .proxy-inventory-table td[data-label="Eligibility"],
-  body.authenticated .proxy-inventory-table td[data-label="Egress identity"],
   body.authenticated .proxy-inventory-table td[data-label="Online hours"],
   body.authenticated .proxy-inventory-table td[data-label="Offline hours"] {
     display: flex;
@@ -2346,7 +2508,7 @@ body.authenticated.theme-dark .compact-data-table tbody tr:hover {
 
   body.authenticated .proxy-inventory-table td[data-label="Protocol"]::before,
   body.authenticated .proxy-inventory-table td[data-label="Status"]::before,
-  body.authenticated .proxy-inventory-table td[data-label="Eligibility"]::before,
+  body.authenticated .proxy-inventory-table td[data-label="Earning status"]::before,
   body.authenticated .proxy-inventory-table td[data-label="Egress identity"]::before,
   body.authenticated .proxy-inventory-table td[data-label="Online hours"]::before,
   body.authenticated .proxy-inventory-table td[data-label="Offline hours"]::before {
@@ -2356,8 +2518,55 @@ body.authenticated.theme-dark .compact-data-table tbody tr:hover {
     font-size: 0.68rem;
   }
 
-  body.authenticated .proxy-inventory-table td[data-label="Egress identity"] {
-    overflow: hidden;
+  body.authenticated .proxy-inventory-table td[data-label="Earning status"],
+  body.authenticated .proxy-inventory-table td[data-label="Egress identity"],
+  body.authenticated .proxy-inventory-table td[data-label="Earn"] {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: minmax(6.5rem, 30%) minmax(0, 1fr);
+    align-items: start;
+    gap: 8px;
+    overflow: visible;
+  }
+
+  body.authenticated .proxy-inventory-table td[data-label="Earning status"] .badge,
+  body.authenticated .proxy-inventory-table td[data-label="Egress identity"] .badge {
+    min-width: 0;
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  body.authenticated .proxy-inventory-table td[data-label="Earning status"] .field-hint {
+    grid-column: 2;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  body.authenticated .proxy-inventory-table td[data-label="Earning status"] .earning-status-main,
+  body.authenticated .proxy-inventory-table td[data-label="Earn"] .earn-main {
+    grid-column: 2;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  body.authenticated .proxy-inventory-table td[data-label="Earning status"] .earning-status-main {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 6px;
+  }
+
+  body.authenticated .proxy-inventory-table td[data-label="Earning status"] .rate-label {
+    margin-top: 0;
+  }
+
+  body.authenticated .proxy-inventory-table td[data-label="Earning status"] .field-hint,
+  body.authenticated .proxy-inventory-table td[data-label="Earn"] .earn-main .field-hint {
+    grid-column: 2;
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   body.authenticated .proxy-inventory-table th[data-label]::before,

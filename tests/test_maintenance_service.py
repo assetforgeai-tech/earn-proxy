@@ -18,6 +18,7 @@ def test_maintenance_cycle_accrues_and_archives_without_health_runner(app):
         db.execute(
             """
             UPDATE proxies SET status='online', eligibility='allow', country_code='US',
+                exit_ip='198.51.100.50', egress_attestation_source='https_quorum',
                 online_since=?, last_success_at=?, accrual_cursor_at=?, probation_started_at=? WHERE id=?
             """,
             (

@@ -101,12 +101,14 @@ def test_promoted_duplicate_starts_earning_at_promotion_instead_of_backfilling(a
         duplicate = add_proxy(db, user_id, "duplicate-earn.example:9002:u:p")
         old = now - timedelta(days=10)
         db.execute(
-            "UPDATE proxies SET exit_ip='198.51.100.70', status='offline', offline_since=? WHERE id=?",
+            "UPDATE proxies SET exit_ip='198.51.100.70', egress_attestation_source='https_quorum', "
+            "status='offline', offline_since=? WHERE id=?",
             ((now - timedelta(hours=25)).isoformat(), canonical),
         )
         db.execute(
             "UPDATE proxies SET exit_ip='198.51.100.70', status='online', eligibility='allow', "
-            "country_code='US', duplicate_of=?, online_since=?, last_success_at=?, "
+            "egress_attestation_source='earnapp_tls', country_code='US', duplicate_of=?, "
+            "online_since=?, last_success_at=?, "
             "accrual_cursor_at=?, probation_started_at=? WHERE id=?",
             (
                 canonical,
@@ -126,3 +128,44 @@ def test_promoted_duplicate_starts_earning_at_promotion_instead_of_backfilling(a
     one_hour = (1_000_000 * 3600) // (720 * 3600)
     assert balance.available_micro_usd == 0
     assert balance.pending_micro_usd == one_hour
+
+
+def test_promoting_duplicate_expires_old_canonical_pending_earnings(app):
+    now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "promotion-expire@example.com", "password", status="active")
+        canonical = add_proxy(db, user_id, "canonical-expire.example:9001:u:p")
+        duplicate = add_proxy(db, user_id, "duplicate-expire.example:9002:u:p")
+        dead_since = now - timedelta(hours=25)
+        db.execute(
+            "UPDATE proxies SET exit_ip='198.51.100.71', egress_attestation_source='https_quorum', "
+            "status='offline', offline_since=? WHERE id=?",
+            (dead_since.isoformat(), canonical),
+        )
+        db.execute(
+            "UPDATE proxies SET exit_ip='198.51.100.71', egress_attestation_source='earnapp_tls', "
+            "status='online', eligibility='allow', duplicate_of=?, last_success_at=? WHERE id=?",
+            (canonical, now.isoformat(), duplicate),
+        )
+        db.execute(
+            "INSERT INTO earnings_ledger(user_id, proxy_id, started_at, ended_at, micro_usd, bucket, created_at) "
+            "VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+            (
+                user_id,
+                canonical,
+                (now - timedelta(hours=8)).isoformat(),
+                (now - timedelta(hours=7)).isoformat(),
+                1000,
+                (now - timedelta(hours=7)).isoformat(),
+            ),
+        )
+        db.commit()
+
+        assert promote_duplicate_if_due(db, canonical, now=now) == duplicate
+        ledger = db.execute(
+            "SELECT bucket FROM earnings_ledger WHERE proxy_id=? ORDER BY id",
+            (canonical,),
+        ).fetchall()
+
+    assert [row["bucket"] for row in ledger] == ["expired"]

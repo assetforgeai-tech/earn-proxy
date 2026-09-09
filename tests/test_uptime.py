@@ -3,8 +3,14 @@ from datetime import UTC, datetime, timedelta
 from app.db import get_db
 from app.services.checks import apply_health_result
 from app.services.proxies import add_proxy
-from app.services.uptime import uptime_hours
+from app.services.uptime import format_duration, uptime_hours
 from app.services.users import create_user
+
+
+def test_format_duration_uses_fixed_month_day_hour_units():
+    assert format_duration(0) == "0 hours"
+    assert format_duration(57 * 3600 + 30 * 60) == "2 days 9 hours 30 minutes"
+    assert format_duration(32 * 24 * 3600 + 4 * 3600) == "1 month 2 days 4 hours"
 
 
 def test_confirmed_transitions_accumulate_online_and_offline_hours(app):

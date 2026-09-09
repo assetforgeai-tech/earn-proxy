@@ -356,6 +356,7 @@ def promote_duplicate_if_due(db, canonical_id: int, *, now: datetime | None = No
     if candidate is None:
         return None
     promoted_id = int(candidate["id"])
+    expire_pending_cycle(db, canonical_id)
     db.execute("UPDATE proxies SET duplicate_of=? WHERE id=?", (promoted_id, canonical_id))
     db.execute("UPDATE proxies SET duplicate_of=NULL WHERE id=?", (promoted_id,))
     db.execute(
@@ -465,6 +466,11 @@ def _canonicalize_exit_group(
         else (lambda row: (row["created_at"], row["id"]))
     )
     canonical = min(candidates, key=key)["id"]
+    # A row losing canonical status must not keep a pending balance that could
+    # later unlock after it becomes a duplicate egress.
+    for row in rows:
+        if row["id"] != canonical:
+            expire_pending_cycle(db, int(row["id"]))
     db.execute("UPDATE proxies SET duplicate_of=NULL WHERE id=?", (canonical,))
     db.execute(
         "UPDATE proxies SET duplicate_of=? WHERE exit_ip=? AND id<>? AND archived_at IS NULL "

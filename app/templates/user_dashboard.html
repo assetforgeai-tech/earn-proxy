@@ -69,8 +69,10 @@
     </div>
   </div>
   <div class="policy-grid">
-    <article><strong>Pending</strong><span>Accrues from qualifying online time.</span></article>
-    <article><strong>Available</strong><span>Can be requested once it clears the probation period.</span></article>
+    <article><strong>Allow · $1.00/month US</strong><span>Non-US Allow earns $0.50/month while online.</span></article>
+    <article><strong>Risk · $0.50/month</strong><span>Usable proxy with a lower rate while online.</span></article>
+    <article><strong>Pending · $0.00/month</strong><span>Waiting for health, trusted egress, or EarnApp qualification.</span></article>
+    <article><strong>Available</strong><span>Can be requested once it clears the seven-day probation period.</span></article>
     <article><strong>Minimum payout</strong><span>$10.00 gross, processed manually within 48 hours.</span></article>
   </div>
 </section>
@@ -192,7 +194,7 @@
   <div class="panel-head">
     <div>
       <h2>Proxy status</h2>
-      <p class="muted">Health sweep target: {{ health_interval_minutes }} minutes · Duplicate egress does not earn or enter API distribution.</p>
+      <p class="muted">Health sweep target: {{ health_interval_minutes }} minutes · Allow US earns $1.00/month; Allow non-US and Risk earn $0.50/month while online. Pending means the proxy is waiting for health, egress, or EarnApp qualification. Duplicate egress does not earn or enter API distribution. Time uses 30-day months.</p>
     </div>
     <span class="muted">{{ inventory.filtered_count }} matching · {{ inventory.total_count }} total</span>
   </div>
@@ -211,7 +213,8 @@
       </div>
     </div>
     <div class="inventory-count-group">
-      <span class="inventory-count-label">Eligibility</span>
+      <span class="inventory-count-label">EarnApp classification</span>
+      <small class="field-hint">Allow/Risk is the provider result; earning still requires a canonical egress.</small>
       <div class="inventory-count-list">
         {% for value in ('allow', 'risk', 'pending') %}<a class="inventory-count {{ value }} {% if inventory.query.eligibility == value %}is-active{% endif %}" href="{{ inventory.filter_url(eligibility=value) }}"><span>{{ value|capitalize }}</span><strong>{{ inventory.eligibility_counts.get(value, 0) }}</strong></a>{% endfor %}
       </div>
@@ -286,10 +289,11 @@
             <th scope="col" aria-sort="{% if inventory.query.sort == 'endpoint' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.endpoint }}">Endpoint <span aria-hidden="true">↕</span></a></th>
             <th scope="col" aria-sort="{% if inventory.query.sort == 'protocol' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.protocol }}">Protocol <span aria-hidden="true">↕</span></a></th>
             <th scope="col" aria-sort="{% if inventory.query.sort == 'status' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.status }}">Status <span aria-hidden="true">↕</span></a></th>
-            <th scope="col" aria-sort="{% if inventory.query.sort == 'eligibility' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.eligibility }}">Eligibility <span aria-hidden="true">↕</span></a></th>
+            <th scope="col" aria-sort="{% if inventory.query.sort == 'eligibility' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.eligibility }}">Earning status <span aria-hidden="true">↕</span></a><small class="column-subtitle">Rate while online</small></th>
             <th scope="col">Egress identity</th>
-            <th scope="col" aria-sort="{% if inventory.query.sort == 'online' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.online }}">Online hours <span aria-hidden="true">↕</span></a></th>
-            <th scope="col" aria-sort="{% if inventory.query.sort == 'offline' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.offline }}">Offline hours <span aria-hidden="true">↕</span></a></th>
+            <th scope="col">Earn</th>
+            <th scope="col" aria-sort="{% if inventory.query.sort == 'online' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.online }}">Online hours <span aria-hidden="true">↕</span></a><small class="column-subtitle">30-day months</small></th>
+            <th scope="col" aria-sort="{% if inventory.query.sort == 'offline' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.offline }}">Offline hours <span aria-hidden="true">↕</span></a><small class="column-subtitle">30-day months</small></th>
             <th scope="col" aria-sort="{% if inventory.query.sort == 'checked' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.checked }}">Freshness <span aria-hidden="true">↕</span></a></th>
             <th scope="col">Actions</th>
           </tr>
@@ -301,10 +305,11 @@
               <th scope="row" data-label="Endpoint" class="mono breakable">{{ proxy.host }}:{{ proxy.port }}</th>
               <td data-label="Protocol">{{ proxy.detected_protocol|upper }}</td>
               <td data-label="Status"><span class="badge {{ proxy.status }}">{{ proxy.status|capitalize }}</span></td>
-              <td data-label="Eligibility"><span class="badge {{ proxy.eligibility }}">{{ proxy.eligibility|capitalize }}</span></td>
+              <td data-label="Earning status"><span class="earning-status-main"><span class="badge {{ item.earning.state }}">{{ item.earning.label }}</span><small class="rate-label">${{ '%.2f'|format(item.earning.rate_micro_usd / 1000000) }}/month</small></span>{% if item.earning.detail %}<small class="field-hint">{{ item.earning.detail }}</small>{% endif %}</td>
               <td data-label="Egress identity"><span class="badge {{ item.identity.state }}">{{ item.identity.label }}</span>{% if item.identity.state == 'duplicate' %}<small class="visually-hidden">Not distributed or earned.</small>{% elif item.identity.state == 'awaiting' %}<small class="visually-hidden">Waiting for trusted probe.</small>{% endif %}</td>
-              <td data-label="Online hours" class="numeric-cell">{{ '%.2f'|format(item.uptime.online) }}</td>
-              <td data-label="Offline hours" class="numeric-cell">{{ '%.2f'|format(item.uptime.offline) }}</td>
+              <td data-label="Earn" class="numeric-cell earn-cell"><span class="earn-main"><strong>${{ '%.6f'|format(item.earnings.total_micro_usd / 1000000) }}</strong><small class="field-hint">Pending ${{ '%.6f'|format(item.earnings.pending_micro_usd / 1000000) }} · Available ${{ '%.6f'|format(item.earnings.available_micro_usd / 1000000) }}</small></span></td>
+              <td data-label="Online hours" class="numeric-cell duration-cell" title="{{ '%.2f'|format(item.uptime.online) }} total hours">{{ item.uptime.online_label }}</td>
+              <td data-label="Offline hours" class="numeric-cell duration-cell" title="{{ '%.2f'|format(item.uptime.offline) }} total hours">{{ item.uptime.offline_label }}</td>
               <td data-label="Freshness">
                 <div class="freshness {{ item.freshness.state }}">
                   <strong>{{ item.freshness.label }}</strong>

@@ -34,6 +34,9 @@
         <a class="nav-item" data-nav="overview"{% if current_nav == 'overview' %} aria-current="page"{% endif %} href="{{ url_for('admin.dashboard') }}">
           <svg viewBox="0 0 24 24" fill="none"><path d="M4 13h6V4H4v9Zm0 7h6v-4H4v4Zm10 0h6v-9h-6v9Zm0-16v4h6V4h-6Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><span>Overview</span>
         </a>
+        <a class="nav-item" data-nav="proxies"{% if current_nav == 'proxies' %} aria-current="page"{% endif %} href="{{ url_for('admin.proxies') }}">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M4 6.5h16v11H4v-11Zm3-3h10M8 10h8m-8 3h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Proxies</span>
+        </a>
         <a class="nav-item" data-nav="checker"{% if current_nav == 'checker' %} aria-current="page"{% endif %} href="{{ url_for('admin.checker') }}">
           <svg viewBox="0 0 24 24" fill="none"><path d="M4 6h16M7 12h10M10 18h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Health checker</span>
         </a>

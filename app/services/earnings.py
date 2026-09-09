@@ -10,12 +10,33 @@ NON_US_MONTHLY_MICRO_USD = 500_000
 MONTH_HOURS = 720
 PROBATION_HOURS = 168
 DEFAULT_HEALTH_STALE_MINUTES = 120
+EARNING_ELIGIBILITIES = frozenset(("allow", "risk"))
 
 
 @dataclass(frozen=True)
 class Balances:
     pending_micro_usd: int
     available_micro_usd: int
+
+
+@dataclass(frozen=True)
+class ProxyEarnings:
+    pending_micro_usd: int = 0
+    available_micro_usd: int = 0
+
+    @property
+    def total_micro_usd(self) -> int:
+        return self.pending_micro_usd + self.available_micro_usd
+
+
+def monthly_rate_for(eligibility: str | None, country_code: str | None) -> int:
+    """Return the configured monthly rate in micro-USD for a payable class."""
+    state = str(eligibility or "").strip().lower()
+    if state == "allow":
+        return US_MONTHLY_MICRO_USD if str(country_code or "").strip().upper() == "US" else NON_US_MONTHLY_MICRO_USD
+    if state == "risk":
+        return NON_US_MONTHLY_MICRO_USD
+    return 0
 
 
 def _parse(value: str | None) -> datetime | None:
@@ -101,8 +122,11 @@ def _accrue_eligible_time_locked(
         f"""
         SELECT p.*, u.earn_paused, u.status AS user_status
         FROM proxies p JOIN users u ON u.id=p.user_id
-        WHERE p.archived_at IS NULL AND p.status IN ({placeholders}) AND p.eligibility='allow'
-          AND p.duplicate_of IS NULL{proxy_filter}
+        WHERE p.archived_at IS NULL AND p.status IN ({placeholders})
+          AND p.eligibility IN ('allow', 'risk')
+          AND p.duplicate_of IS NULL
+          AND p.exit_ip IS NOT NULL AND trim(p.exit_ip)<>''
+          AND p.egress_attestation_source IN ('https_quorum','earnapp_tls'){proxy_filter}
         """,
         parameters,
     ).fetchall()
@@ -124,7 +148,9 @@ def _accrue_eligible_time_locked(
                 (end.isoformat(), row["id"]),
             )
             continue
-        monthly_rate = US_MONTHLY_MICRO_USD if row["country_code"] == "US" else NON_US_MONTHLY_MICRO_USD
+        monthly_rate = monthly_rate_for(row["eligibility"], row["country_code"])
+        if monthly_rate <= 0:
+            continue
         seconds = max(0, int((end - cursor).total_seconds()))
         if not seconds:
             continue
@@ -215,3 +241,30 @@ def balances_for_user(db, user_id: int) -> Balances:
     ).fetchall()
     values = {row["bucket"]: int(row["amount"]) for row in rows}
     return Balances(values.get("pending", 0), values.get("available", 0))
+
+
+def earnings_for_proxies(db, proxy_ids: list[int]) -> dict[int, ProxyEarnings]:
+    """Aggregate current (pending + available) earnings for one rendered page."""
+    ids = [int(proxy_id) for proxy_id in proxy_ids]
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    rows = db.execute(
+        f"""
+        SELECT proxy_id, bucket, COALESCE(SUM(micro_usd), 0) AS amount
+        FROM earnings_ledger
+        WHERE proxy_id IN ({placeholders}) AND bucket IN ('pending', 'available')
+        GROUP BY proxy_id, bucket
+        """,
+        ids,
+    ).fetchall()
+    values: dict[int, dict[str, int]] = {}
+    for row in rows:
+        values.setdefault(int(row["proxy_id"]), {})[str(row["bucket"])] = int(row["amount"])
+    return {
+        proxy_id: ProxyEarnings(
+            pending_micro_usd=values.get(proxy_id, {}).get("pending", 0),
+            available_micro_usd=values.get(proxy_id, {}).get("available", 0),
+        )
+        for proxy_id in ids
+    }

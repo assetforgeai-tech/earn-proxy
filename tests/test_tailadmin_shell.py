@@ -4,6 +4,7 @@ from conftest import login, login_admin, register
 
 ADMIN_NAV_LABELS = (
     "Overview",
+    "Proxies",
     "Health checker",
     "Egress duplicates",
     "Users",
@@ -59,6 +60,7 @@ def test_admin_sidebar_is_the_only_workspace_navigation_and_uses_canonical_label
 
     for path in (
         "/admin",
+        "/admin/proxies",
         "/admin/checker",
         "/admin/egress-duplicates",
         "/admin/users",
@@ -78,12 +80,13 @@ def test_admin_overview_is_the_only_page_with_complete_quick_links(client):
     login_admin(client)
     overview = client.get("/admin").get_data(as_text=True)
 
-    assert overview.count('class="quick-link"') == 7
+    assert overview.count('class="quick-link"') == 8
     for label in ADMIN_NAV_LABELS[1:]:
         assert f"<strong>{label}</strong>" in overview
 
     for path in (
         "/admin/checker",
+        "/admin/proxies",
         "/admin/egress-duplicates",
         "/admin/users",
         "/admin/payouts",
@@ -272,4 +275,49 @@ def test_mobile_inventory_compacts_protocol_and_eligibility_side_by_side():
     assert (
         "body.authenticated .inventory-summary .inventory-count-group:nth-child(2) .inventory-count-list,\n  body.authenticated .inventory-summary .inventory-count-group:nth-child(3) .inventory-count-list {\n    grid-template-columns: repeat(2, minmax(0, 1fr));"
         in mobile_rule
+    )
+
+
+def test_mobile_proxy_earning_identity_cells_stack_without_overflow():
+    root = Path(__file__).parents[1]
+    css = (root / "app" / "static" / "app.css").read_text()
+    mobile_rule = css[css.index("@media (max-width: 700px) {", css.index("/* Compact authenticated workspaces")) :]
+
+    cells_rule = mobile_rule[
+        mobile_rule.index(
+            'body.authenticated .proxy-inventory-table td[data-label="Earning status"],',
+            mobile_rule.index('body.authenticated .proxy-inventory-table td[data-label="Earning status"]::before'),
+        ) :
+    ]
+    assert "grid-column: 1 / -1;" in cells_rule[:600]
+    assert "display: grid;" in cells_rule[:600]
+    assert '.proxy-inventory-table td[data-label="Earning status"] .field-hint' in mobile_rule
+    assert "overflow-wrap: anywhere;" in mobile_rule
+
+
+def test_mobile_proxy_earning_content_stays_in_the_value_column():
+    root = Path(__file__).parents[1]
+    template = (root / "app" / "templates" / "user_dashboard.html").read_text()
+    css = (root / "app" / "static" / "app.css").read_text()
+    mobile_rule = css[css.index("@media (max-width: 700px) {", css.index("/* Compact authenticated workspaces")) :]
+
+    assert "earning-status-main" in template
+    assert "earn-main" in template
+    assert (
+        'body.authenticated .proxy-inventory-table td[data-label="Earning status"] .earning-status-main,' in mobile_rule
+    )
+    assert 'body.authenticated .proxy-inventory-table td[data-label="Earn"] .earn-main' in mobile_rule
+    assert "grid-column: 2;" in mobile_rule
+
+
+def test_duration_header_subtitle_stays_outside_sort_link():
+    root = Path(__file__).parents[1]
+    template = (root / "app" / "templates" / "user_dashboard.html").read_text()
+    assert (
+        '<a class="table-sort" href="{{ inventory.sort_urls.online }}">Online hours '
+        '<span aria-hidden="true">↕</span></a><small class="column-subtitle">30-day months</small>' in template
+    )
+    assert (
+        '<a class="table-sort" href="{{ inventory.sort_urls.offline }}">Offline hours '
+        '<span aria-hidden="true">↕</span></a><small class="column-subtitle">30-day months</small>' in template
     )

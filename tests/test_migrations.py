@@ -428,3 +428,55 @@ def test_attestation_migration_invalidates_rows_with_untrusted_existing_source(a
     assert row["country_code"] == ""
     assert row["duplicate_of"] is None
     assert row["health_mode"] == "strong"
+
+
+def test_migration_expires_pending_ledger_for_existing_duplicate_egress(app):
+    from app.db import migrate_db
+    from app.services.proxies import add_proxy
+    from app.services.users import create_user
+
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "legacy-duplicate-ledger@example.com", "password", status="active")
+        canonical_id = add_proxy(db, user_id, "legacy-canonical.example:9000:u:c")
+        duplicate_id = add_proxy(db, user_id, "legacy-duplicate.example:9001:u:d")
+        db.execute(
+            "UPDATE proxies SET exit_ip='198.51.100.240', egress_attestation_source='https_quorum', "
+            "duplicate_of=? WHERE id=?",
+            (canonical_id, duplicate_id),
+        )
+        db.execute(
+            "INSERT INTO earnings_ledger(user_id, proxy_id, started_at, ended_at, micro_usd, bucket, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                user_id,
+                duplicate_id,
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T01:00:00+00:00",
+                1000,
+                "pending",
+                "2026-01-01T01:00:00+00:00",
+            ),
+        )
+        db.execute(
+            "INSERT INTO earnings_ledger(user_id, proxy_id, started_at, ended_at, micro_usd, bucket, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                user_id,
+                duplicate_id,
+                "2026-01-02T00:00:00+00:00",
+                "2026-01-02T01:00:00+00:00",
+                2000,
+                "available",
+                "2026-01-02T01:00:00+00:00",
+            ),
+        )
+        db.commit()
+
+        migrate_db(db)
+        rows = db.execute(
+            "SELECT bucket, micro_usd FROM earnings_ledger WHERE proxy_id=? ORDER BY id",
+            (duplicate_id,),
+        ).fetchall()
+
+    assert [(row["bucket"], row["micro_usd"]) for row in rows] == [("expired", 1000), ("available", 2000)]

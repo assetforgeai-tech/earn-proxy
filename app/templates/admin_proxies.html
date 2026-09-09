@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}Proxy inventory - Earn Proxy{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">GLOBAL INVENTORY</p>
+    <h1>Proxy inventory</h1>
+    <p class="muted">Every contributor endpoint in one credential-safe view. Use the duplicate workspace for egress investigations.</p>
+  </div>
+  <a class="button ghost" href="{{ inventory.duplicate_groups_url }}">Duplicate egress</a>
+</div>
+
+<section class="admin-proxy-overview" aria-label="Proxy inventory summary">
+  <article class="admin-proxy-total"><span>Total records</span><strong>{{ inventory.total_count }}</strong><small>{{ inventory.active_count }} active · {{ inventory.archived_count }} archived</small></article>
+  <article><span>Online</span><strong>{{ inventory.status_counts.get('online', 0) }}</strong><small>Current persisted state</small></article>
+  <article><span>Offline</span><strong>{{ inventory.status_counts.get('offline', 0) }}</strong><small>Confirmed failures</small></article>
+  <article><span>Allow</span><strong>{{ inventory.eligibility_counts.get('allow', 0) }}</strong><small>Eligible class</small></article>
+  <article><span>Risk</span><strong>{{ inventory.eligibility_counts.get('risk', 0) }}</strong><small>Review class</small></article>
+</section>
+
+<section class="panel section-target" aria-labelledby="proxy-inventory-title">
+  <div class="panel-head">
+    <div>
+      <h2 id="proxy-inventory-title">All proxies</h2>
+      <p class="muted">{{ inventory.total_count }} total proxies in this scope. Credentials are never displayed. Exit IP appears only when backed by a trusted attestation.</p>
+    </div>
+    <span class="badge {{ 'archived' if inventory.query.archived == 'archived' else 'active' }}">{{ inventory.total_count }} {{ 'archived' if inventory.query.archived == 'archived' else 'records' if inventory.query.archived == 'all' else 'active' }}</span>
+  </div>
+
+  <div class="admin-proxy-counts" aria-label="Quick proxy filters">
+    <div class="admin-proxy-count-group">
+      <span class="inventory-count-label">Status</span>
+      <div class="inventory-count-list">
+        <a class="inventory-count {% if not inventory.query.status %}is-active{% endif %}" href="{{ inventory.filter_url(status='') }}"><span>All</span><strong>{{ inventory.active_count if inventory.query.archived == 'active' else inventory.total_count }}</strong></a>
+        {% for value in ('online', 'pending', 'offline', 'blocked', 'suspect') %}<a class="inventory-count {{ value }} {% if inventory.query.status == value %}is-active{% endif %}" href="{{ inventory.filter_url(status=value) }}"><span>{{ value|capitalize }}</span><strong>{{ inventory.status_counts.get(value, 0) }}</strong></a>{% endfor %}
+      </div>
+    </div>
+    <div class="admin-proxy-count-group">
+      <span class="inventory-count-label">Protocol</span>
+      <div class="inventory-count-list">
+        {% for value, label in (('socks5', 'SOCKS5'), ('http', 'HTTP'), ('unknown', 'Unknown')) %}<a class="inventory-count {% if inventory.query.protocol == value %}is-active{% endif %}" href="{{ inventory.filter_url(protocol=value) }}"><span>{{ label }}</span><strong>{{ inventory.protocol_counts.get(value, 0) }}</strong></a>{% endfor %}
+      </div>
+    </div>
+    <div class="admin-proxy-count-group">
+      <span class="inventory-count-label">Eligibility</span>
+      <div class="inventory-count-list">
+        {% for value in ('allow', 'risk', 'pending') %}<a class="inventory-count {{ value }} {% if inventory.query.eligibility == value %}is-active{% endif %}" href="{{ inventory.filter_url(eligibility=value) }}"><span>{{ value|capitalize }}</span><strong>{{ inventory.eligibility_counts.get(value, 0) }}</strong></a>{% endfor %}
+      </div>
+    </div>
+    <div class="admin-proxy-count-group">
+      <span class="inventory-count-label">Egress identity</span>
+      <div class="inventory-count-list">
+        {% for value, label in (('canonical', 'Canonical'), ('duplicate', 'Duplicate'), ('awaiting', 'Awaiting')) %}<a class="inventory-count {{ value }} {% if inventory.query.identity == value %}is-active{% endif %}" href="{{ inventory.filter_url(identity=value) }}"><span>{{ label }}</span><strong>{{ inventory.identity_counts.get(value, 0) }}</strong></a>{% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <form class="inventory-toolbar admin-proxy-toolbar" method="get" action="{{ url_for('admin.proxies') }}" role="search">
+    <div class="field-group inventory-search">
+      <label for="admin-proxy-search">Search host, port, owner, or trusted exit IP</label>
+      <input id="admin-proxy-search" name="q" type="search" value="{{ inventory.query.search }}" placeholder="proxy.example.com or owner@example.com" autocomplete="off">
+    </div>
+    <div class="field-group"><label for="admin-proxy-owner">Owner email</label><input id="admin-proxy-owner" name="owner" type="search" value="{{ inventory.query.owner }}" placeholder="Any owner" autocomplete="off"></div>
+    <div class="field-group"><label for="admin-proxy-endpoint">Endpoint</label><input id="admin-proxy-endpoint" name="endpoint" type="search" value="{{ inventory.query.endpoint }}" placeholder="Host or port" autocomplete="off"></div>
+    <div class="field-group">
+      <label for="admin-proxy-status">Health status</label>
+      <select id="admin-proxy-status" name="status"><option value="">All health states</option>{% for value in ('pending', 'online', 'offline', 'blocked', 'suspect') %}<option value="{{ value }}"{% if inventory.query.status == value %} selected{% endif %}>{{ value|capitalize }}</option>{% endfor %}</select>
+    </div>
+    <div class="field-group">
+      <label for="admin-proxy-protocol">Protocol</label>
+      <select id="admin-proxy-protocol" name="protocol"><option value="">All protocols</option><option value="socks5"{% if inventory.query.protocol == 'socks5' %} selected{% endif %}>SOCKS5</option><option value="http"{% if inventory.query.protocol == 'http' %} selected{% endif %}>HTTP</option><option value="unknown"{% if inventory.query.protocol == 'unknown' %} selected{% endif %}>Unknown</option></select>
+    </div>
+    <div class="field-group">
+      <label for="admin-proxy-eligibility">Eligibility</label>
+      <select id="admin-proxy-eligibility" name="eligibility"><option value="">All classes</option><option value="allow"{% if inventory.query.eligibility == 'allow' %} selected{% endif %}>Allow</option><option value="risk"{% if inventory.query.eligibility == 'risk' %} selected{% endif %}>Risk</option><option value="pending"{% if inventory.query.eligibility == 'pending' %} selected{% endif %}>Pending</option></select>
+    </div>
+    <div class="field-group">
+      <label for="admin-proxy-identity">Egress identity</label>
+      <select id="admin-proxy-identity" name="identity"><option value="">All identity states</option><option value="canonical"{% if inventory.query.identity == 'canonical' %} selected{% endif %}>Canonical</option><option value="duplicate"{% if inventory.query.identity == 'duplicate' %} selected{% endif %}>Duplicate</option><option value="awaiting"{% if inventory.query.identity == 'awaiting' %} selected{% endif %}>Awaiting probe</option></select>
+    </div>
+    <div class="field-group">
+      <label for="admin-proxy-country">Country</label>
+      <select id="admin-proxy-country" name="country"><option value="">All countries</option>{% for country in inventory.countries %}<option value="{{ country.code }}"{% if inventory.query.country == country.code %} selected{% endif %}>{{ country.code }} ({{ country.count }})</option>{% endfor %}</select>
+    </div>
+    <div class="field-group">
+      <label for="admin-proxy-freshness">Freshness</label>
+      <select id="admin-proxy-freshness" name="freshness"><option value="">Any freshness</option><option value="fresh"{% if inventory.query.freshness == 'fresh' %} selected{% endif %}>Fresh</option><option value="due"{% if inventory.query.freshness == 'due' %} selected{% endif %}>Check due</option><option value="stale"{% if inventory.query.freshness == 'stale' %} selected{% endif %}>Stale</option><option value="never"{% if inventory.query.freshness == 'never' %} selected{% endif %}>Never checked</option></select>
+    </div>
+    <div class="field-group">
+      <label for="admin-proxy-archived">Record scope</label>
+      <select id="admin-proxy-archived" name="archived"><option value="active"{% if inventory.query.archived == 'active' %} selected{% endif %}>Active only</option><option value="archived"{% if inventory.query.archived == 'archived' %} selected{% endif %}>Archived only</option><option value="all"{% if inventory.query.archived == 'all' %} selected{% endif %}>All records</option></select>
+    </div>
+    <div class="field-group"><label for="admin-proxy-per-page">Rows per page</label><select id="admin-proxy-per-page" name="per_page">{% for size in (25, 50, 100) %}<option value="{{ size }}"{% if inventory.query.per_page == size %} selected{% endif %}>{{ size }}</option>{% endfor %}</select></div>
+    <input type="hidden" name="sort" value="{{ inventory.query.sort }}"><input type="hidden" name="direction" value="{{ inventory.query.direction }}">
+    <button class="button primary" type="submit">Apply filters</button>
+    <a class="button ghost" href="{{ inventory.reset_url }}">Clear filters</a>
+  </form>
+
+  <div class="inventory-results-meta" aria-live="polite">
+    <strong>{% if inventory.filtered_count %}Showing {{ inventory.start_index }}–{{ inventory.end_index }} of {{ inventory.filtered_count }} proxies{% else %}No matching proxies{% endif %}</strong>
+    <span>Sort by {{ inventory.query.sort }} · {{ inventory.query.direction|upper }} · credentials hidden</span>
+  </div>
+
+  {% if inventory.views %}
+  <div class="table-wrap">
+    <table class="responsive-table compact-data-table admin-proxy-table">
+      <caption>Global proxy inventory. Upstream credentials are never rendered.</caption>
+      <thead>
+        <tr>
+          <th scope="col" aria-sort="{% if inventory.query.sort == 'endpoint' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.endpoint }}">Endpoint <span aria-hidden="true">↕</span></a></th>
+          <th scope="col" aria-sort="{% if inventory.query.sort == 'owner' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.owner }}">Owner <span aria-hidden="true">↕</span></a></th>
+          <th scope="col" aria-sort="{% if inventory.query.sort == 'protocol' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.protocol }}">Protocol <span aria-hidden="true">↕</span></a></th>
+          <th scope="col" aria-sort="{% if inventory.query.sort == 'status' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.status }}">Health <span aria-hidden="true">↕</span></a></th>
+          <th scope="col" aria-sort="{% if inventory.query.sort == 'eligibility' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.eligibility }}">Eligibility <span aria-hidden="true">↕</span></a></th>
+          <th scope="col">Egress</th>
+          <th scope="col" aria-sort="{% if inventory.query.sort == 'country' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.country }}">Country <span aria-hidden="true">↕</span></a></th>
+          <th scope="col" aria-sort="{% if inventory.query.sort == 'latency' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.latency }}">Latency <span aria-hidden="true">↕</span></a></th>
+          <th scope="col" aria-sort="{% if inventory.query.sort == 'failures' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.failures }}">Failures <span aria-hidden="true">↕</span></a></th>
+          <th scope="col" aria-sort="{% if inventory.query.sort == 'checked' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.checked }}">Freshness <span aria-hidden="true">↕</span></a></th>
+          <th scope="col" aria-sort="{% if inventory.query.sort == 'created' %}{{ 'ascending' if inventory.query.direction == 'asc' else 'descending' }}{% else %}none{% endif %}"><a class="table-sort" href="{{ inventory.sort_urls.created }}">Added <span aria-hidden="true">↕</span></a></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in inventory.views %}
+          {% set proxy = item.row %}
+          <tr>
+            <th scope="row" data-label="Endpoint" class="mono breakable">{{ proxy.host }}:{{ proxy.port }}{% if proxy.archived_at %}<span class="badge archived">Archived</span>{% endif %}</th>
+            <td data-label="Owner" class="breakable"><a href="{{ url_for('admin.proxies', owner=proxy.owner_email) }}">{{ proxy.owner_email }}</a></td>
+            <td data-label="Protocol">{{ (proxy.detected_protocol or 'unknown')|upper }}</td>
+            <td data-label="Health"><span class="badge {{ proxy.status|lower }}">{{ (proxy.status or 'unknown')|capitalize }}</span>{% if proxy.failure_kind %}<small class="field-hint">{{ proxy.failure_kind }}</small>{% endif %}</td>
+            <td data-label="Eligibility"><span class="badge {{ proxy.eligibility|lower }}">{{ (proxy.eligibility or 'pending')|capitalize }}</span></td>
+            <td data-label="Egress"><span class="badge {{ item.identity.state }}">{{ item.identity.label }}</span>{% if item.identity.state in ('canonical', 'duplicate') %}<small class="mono field-hint">{{ proxy.exit_ip }}</small>{% endif %}</td>
+            <td data-label="Country">{{ proxy.country_code or '—' }}</td>
+            <td data-label="Latency" class="numeric-cell">{% if proxy.last_latency_ms is not none %}{{ proxy.last_latency_ms }} ms{% else %}—{% endif %}</td>
+            <td data-label="Failures" class="numeric-cell">{{ proxy.consecutive_failures or 0 }}</td>
+            <td data-label="Freshness"><div class="freshness {{ item.freshness.state }}"><strong>{{ item.freshness.label }}</strong><span>Checked: {% if item.last_checked.iso %}<time datetime="{{ item.last_checked.iso }}">{{ item.last_checked.label }}</time>{% else %}{{ item.last_checked.label }}{% endif %}</span>{% if item.next_check.iso %}<span>Next: <time datetime="{{ item.next_check.iso }}">{{ item.next_check.label }}</time></span>{% elif proxy.next_check_at %}<span>Next: Invalid schedule</span>{% endif %}</div></td>
+            <td data-label="Added"><time datetime="{{ proxy.created_at }}">{{ proxy.created_at|timestamp_label }}</time></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <nav class="pagination" aria-label="Proxy inventory pages">
+    <a class="button small ghost{% if inventory.query.page <= 1 %} is-disabled{% endif %}" href="{{ inventory.previous_url }}"{% if inventory.query.page <= 1 %} aria-disabled="true" tabindex="-1"{% endif %}>Previous</a>
+    <div class="pagination-center"><span class="muted">Page {{ inventory.query.page }} of {{ inventory.total_pages }}</span><div class="pagination-pages">{% for link in inventory.page_links %}{% if link.ellipsis %}<span class="pagination-ellipsis" aria-hidden="true">…</span>{% else %}<a class="page-link{% if link.current %} is-current{% endif %}" href="{{ link.url }}"{% if link.current %} aria-current="page"{% endif %}>{{ link.number }}</a>{% endif %}{% endfor %}</div></div>
+    <a class="button small ghost{% if inventory.query.page >= inventory.total_pages %} is-disabled{% endif %}" href="{{ inventory.next_url }}"{% if inventory.query.page >= inventory.total_pages %} aria-disabled="true" tabindex="-1"{% endif %}>Next</a>
+  </nav>
+  {% else %}
+    <div class="empty">No proxy matches these filters. <a href="{{ inventory.reset_url }}">Clear filters</a> or choose another record scope.</div>
+  {% endif %}
+</section>
+{% endblock %}

@@ -439,6 +439,7 @@ def test_offline_transition_records_final_online_earning_interval(app):
         db.execute(
             """
             UPDATE proxies SET status='online', eligibility='allow', country_code='US',
+                exit_ip='198.51.100.40', egress_attestation_source='https_quorum',
                 online_since=?, last_success_at=?, accrual_cursor_at=?, probation_started_at=? WHERE id=?
             """,
             (
@@ -606,7 +607,9 @@ def test_egress_change_expires_pending_balance_from_previous_cycle(app):
         user_id = create_user(db, "egress-cycle@example.com", "password", status="active")
         proxy_id = add_proxy(db, user_id, "proxy.example:9000:u:p")
         db.execute(
-            "UPDATE proxies SET status='online', eligibility='allow', exit_ip='198.51.100.1', online_since=?, last_success_at=?, accrual_cursor_at=?, probation_started_at=? WHERE id=?",
+            "UPDATE proxies SET status='online', eligibility='allow', exit_ip='198.51.100.1', "
+            "egress_attestation_source='https_quorum', online_since=?, last_success_at=?, "
+            "accrual_cursor_at=?, probation_started_at=? WHERE id=?",
             (
                 (now - timedelta(hours=24)).isoformat(),
                 now.isoformat(),

@@ -9,7 +9,7 @@ from flask import Blueprint, current_app, g, redirect, render_template, request,
 from app.auth import login_required
 from app.db import get_db
 from app.services.checks import checker_settings
-from app.services.earnings import balances_for_user
+from app.services.earnings import balances_for_user, earnings_for_proxies, monthly_rate_for
 from app.services.uptime import uptime_hours
 
 bp = Blueprint("dashboard", __name__)
@@ -23,7 +23,15 @@ INVENTORY_SORT_COLUMNS = {
     "endpoint": ("LOWER(p.host)", "p.port", "p.id"),
     "status": ("p.status", "LOWER(p.host)", "p.port", "p.id"),
     "protocol": ("p.detected_protocol", "LOWER(p.host)", "p.port", "p.id"),
-    "eligibility": ("p.eligibility", "LOWER(p.host)", "p.port", "p.id"),
+    # Explicit ranking keeps the contributor's most useful rows first instead
+    # of relying on lexical order (where pending would precede risk).
+    "eligibility": (
+        "CASE p.eligibility WHEN 'allow' THEN 0 WHEN 'risk' THEN 1 WHEN 'pending' THEN 2 ELSE 3 END",
+        "p.duplicate_of IS NOT NULL",
+        "LOWER(p.host)",
+        "p.port",
+        "p.id",
+    ),
     "online": ("COALESCE(p.accumulated_online_seconds, 0)", "p.id"),
     "offline": ("COALESCE(p.accumulated_offline_seconds, 0)", "p.id"),
     "created": ("p.created_at", "p.id"),
@@ -68,8 +76,8 @@ def _inventory_query(args) -> InventoryQuery:
     protocol = str(args.get("protocol") or "").strip().lower()
     eligibility = str(args.get("eligibility") or "").strip().lower()
     identity = str(args.get("identity") or "").strip().lower()
-    sort = str(args.get("sort") or "created").strip().lower()
-    direction = str(args.get("direction") or "desc").strip().lower()
+    sort = str(args.get("sort") or "eligibility").strip().lower()
+    direction = str(args.get("direction") or "asc").strip().lower()
     return InventoryQuery(
         page=page,
         per_page=per_page,
@@ -78,8 +86,8 @@ def _inventory_query(args) -> InventoryQuery:
         protocol=protocol if protocol in INVENTORY_PROTOCOLS else "",
         eligibility=eligibility if eligibility in INVENTORY_ELIGIBILITIES else "",
         identity=identity if identity in INVENTORY_IDENTITIES else "",
-        sort=sort if sort in INVENTORY_SORT_COLUMNS else "created",
-        direction=direction if direction in {"asc", "desc"} else "desc",
+        sort=sort if sort in INVENTORY_SORT_COLUMNS else "eligibility",
+        direction=direction if direction in {"asc", "desc"} else "asc",
     )
 
 
@@ -312,6 +320,39 @@ def _identity_view(proxy) -> dict[str, str]:
     return {"state": "awaiting", "label": "Awaiting probe"}
 
 
+def _earning_view(proxy, identity: dict[str, str]) -> dict[str, object]:
+    """Show payable state, distinct from the raw EarnApp classification."""
+    # The distributor is fail-closed on any duplicate pointer, even if an
+    # older row has lost the trusted egress metadata that originally created it.
+    if proxy["duplicate_of"] is not None or identity["state"] == "duplicate":
+        return {
+            "state": "excluded",
+            "label": "Not earning",
+            "detail": "Duplicate egress blocks earnings and distribution",
+            "rate_micro_usd": 0,
+        }
+    if identity["state"] == "awaiting":
+        return {
+            "state": "pending",
+            "label": "Pending",
+            "detail": "Pending means the proxy is waiting for health, egress, or EarnApp qualification.",
+            "rate_micro_usd": 0,
+        }
+    eligibility = str(proxy["eligibility"] or "pending").strip().lower()
+    if eligibility not in {"allow", "risk", "pending"}:
+        eligibility = "pending"
+    return {
+        "state": eligibility,
+        "label": eligibility.capitalize(),
+        "detail": (
+            "Pending means the proxy is waiting for health, egress, or EarnApp qualification."
+            if eligibility == "pending"
+            else ""
+        ),
+        "rate_micro_usd": monthly_rate_for(eligibility, proxy["country_code"]),
+    }
+
+
 @bp.get("/")
 def index():
     if g.user is None:
@@ -360,6 +401,7 @@ def _render_dashboard(section: str):
     proxies = inventory.get("rows", [])
     settings = checker_settings(db)
     now = datetime.now(UTC)
+    proxy_earnings = earnings_for_proxies(db, [int(proxy["id"]) for proxy in proxies])
     proxy_views = [
         {
             "row": proxy,
@@ -369,9 +411,12 @@ def _render_dashboard(section: str):
                 now=now,
                 stale_minutes=settings.health_stale_minutes,
             ),
-            "identity": _identity_view(proxy),
+            "identity": identity,
+            "earning": _earning_view(proxy, identity),
+            "earnings": proxy_earnings.get(int(proxy["id"])),
         }
         for proxy in proxies
+        for identity in (_identity_view(proxy),)
     ]
     wallet = db.execute("SELECT * FROM wallets WHERE user_id=?", (g.user["id"],)).fetchone()
     payouts = db.execute(

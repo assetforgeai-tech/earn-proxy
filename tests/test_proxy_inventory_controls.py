@@ -161,3 +161,48 @@ def test_proxy_inventory_keeps_untrusted_duplicate_pointer_in_awaiting_state(app
 
     assert "untrusted-b.example:9001" not in duplicate_rows
     assert "untrusted-b.example:9001" in awaiting_rows
+
+
+def test_duplicate_egress_is_not_presented_as_earning_allow(app, client):
+    user_id = _activate_user(app, client, "inventory-effective-earning@example.com")
+    with app.app_context():
+        db = get_db()
+        canonical = add_proxy(db, user_id, "effective-canonical.example:9000:u-a:p-a")
+        duplicate = add_proxy(db, user_id, "effective-duplicate.example:9001:u-b:p-b")
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', exit_ip='198.51.100.77', "
+            "egress_attestation_source='https_quorum' WHERE id=?",
+            (canonical,),
+        )
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', exit_ip='198.51.100.77', "
+            "egress_attestation_source='earnapp_tls', duplicate_of=? WHERE id=?",
+            (canonical, duplicate),
+        )
+        db.commit()
+
+    page = client.get("/dashboard/proxies?identity=duplicate").get_data(as_text=True)
+    row_start = page.index("effective-duplicate.example:9001")
+    row = page[row_start : page.index("</tr>", row_start)]
+    assert 'class="badge excluded">Not earning</span>' in row
+    assert "Duplicate egress blocks earnings and distribution" in row
+    assert ">Allow<" not in row
+
+
+def test_stale_duplicate_pointer_is_fail_closed_in_earning_view(app, client):
+    user_id = _activate_user(app, client, "inventory-stale-duplicate@example.com")
+    with app.app_context():
+        db = get_db()
+        canonical = add_proxy(db, user_id, "stale-canonical.example:9000:u-a:p-a")
+        duplicate = add_proxy(db, user_id, "stale-duplicate.example:9001:u-b:p-b")
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', duplicate_of=? WHERE id=?",
+            (canonical, duplicate),
+        )
+        db.commit()
+
+    page = client.get("/dashboard/proxies").get_data(as_text=True)
+    row_start = page.index("stale-duplicate.example:9001")
+    row = page[row_start : page.index("</tr>", row_start)]
+    assert 'class="badge excluded">Not earning</span>' in row
+    assert ">Allow<" not in row

@@ -3,7 +3,9 @@ from __future__ import annotations
 import ipaddress
 import math
 import sqlite3
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
+from urllib.parse import urlencode
 
 from flask import Blueprint, abort, current_app, g, jsonify, redirect, render_template, request, url_for
 
@@ -33,6 +35,418 @@ from app.services.users import create_user
 bp = Blueprint("admin", __name__, url_prefix="/admin")
 
 EGRESS_DUPLICATE_PAGE_SIZES = (25, 50, 100)
+ADMIN_PROXY_PAGE_SIZES = (25, 50, 100)
+ADMIN_PROXY_STATUSES = ("pending", "online", "offline", "blocked", "suspect")
+ADMIN_PROXY_PROTOCOLS = ("http", "socks5", "unknown")
+ADMIN_PROXY_ELIGIBILITIES = ("allow", "risk", "pending")
+ADMIN_PROXY_IDENTITIES = ("canonical", "duplicate", "awaiting")
+ADMIN_PROXY_FRESHNESS = ("fresh", "due", "stale", "never")
+ADMIN_PROXY_ARCHIVED = ("active", "archived", "all")
+ADMIN_PROXY_SORT_COLUMNS = {
+    "created": ("COALESCE(julianday(p.created_at), -1)", "p.id"),
+    "endpoint": ("LOWER(p.host)", "p.port", "p.id"),
+    "owner": ("LOWER(u.email)", "LOWER(p.host)", "p.port", "p.id"),
+    "status": ("p.status", "LOWER(p.host)", "p.port", "p.id"),
+    "protocol": ("p.detected_protocol", "LOWER(p.host)", "p.port", "p.id"),
+    "eligibility": ("p.eligibility", "LOWER(p.host)", "p.port", "p.id"),
+    "country": ("p.country_code", "LOWER(p.host)", "p.port", "p.id"),
+    "latency": ("COALESCE(p.last_latency_ms, -1)", "p.id"),
+    "failures": ("COALESCE(p.consecutive_failures, 0)", "p.id"),
+    "checked": ("COALESCE(julianday(p.last_checked_at), -1)", "p.id"),
+    "next_check": ("COALESCE(julianday(p.next_check_at), -1)", "p.id"),
+}
+ADMIN_PROXY_SELECT_COLUMNS = (
+    "p.host",
+    "p.port",
+    "p.archived_at",
+    "p.detected_protocol",
+    "p.status",
+    "p.failure_kind",
+    "p.eligibility",
+    "p.egress_attestation_source",
+    "p.exit_ip",
+    "p.duplicate_of",
+    "p.country_code",
+    "p.last_latency_ms",
+    "p.consecutive_failures",
+    "p.last_checked_at",
+    "p.last_success_at",
+    "p.next_check_at",
+    "p.created_at",
+)
+
+
+@dataclass(frozen=True)
+class AdminProxyQuery:
+    page: int
+    per_page: int
+    search: str
+    owner: str
+    endpoint: str
+    status: str
+    protocol: str
+    eligibility: str
+    identity: str
+    country: str
+    freshness: str
+    archived: str
+    sort: str
+    direction: str
+
+    @property
+    def offset(self) -> int:
+        return (self.page - 1) * self.per_page
+
+
+def _bounded_int(value: object, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(str(value or ""))
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def _admin_proxy_query(args) -> AdminProxyQuery:
+    try:
+        requested_size = int(str(args.get("per_page") or "25"))
+    except (TypeError, ValueError):
+        requested_size = 25
+
+    def allowed(name: str, choices: tuple[str, ...], default: str = "") -> str:
+        value = str(args.get(name) or default).strip().lower()
+        return value if value in choices else default
+
+    sort = str(args.get("sort") or "created").strip().lower()
+    direction = str(args.get("direction") or "desc").strip().lower()
+    country = str(args.get("country") or "").strip().upper()[:2]
+    return AdminProxyQuery(
+        page=_bounded_int(args.get("page"), default=1, minimum=1, maximum=10_000_000),
+        per_page=requested_size if requested_size in ADMIN_PROXY_PAGE_SIZES else 25,
+        search=str(args.get("q") or "").strip()[:100],
+        owner=str(args.get("owner") or "").strip()[:100],
+        endpoint=str(args.get("endpoint") or "").strip()[:100],
+        status=allowed("status", ADMIN_PROXY_STATUSES),
+        protocol=allowed("protocol", ADMIN_PROXY_PROTOCOLS),
+        eligibility=allowed("eligibility", ADMIN_PROXY_ELIGIBILITIES),
+        identity=allowed("identity", ADMIN_PROXY_IDENTITIES),
+        country=country if len(country) == 2 and country.isalpha() else "",
+        freshness=allowed("freshness", ADMIN_PROXY_FRESHNESS),
+        archived=allowed("archived", ADMIN_PROXY_ARCHIVED, "active"),
+        sort=sort if sort in ADMIN_PROXY_SORT_COLUMNS else "created",
+        direction=direction if direction in {"asc", "desc"} else "desc",
+    )
+
+
+def _like_pattern(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped.lower()}%"
+
+
+def _parse_admin_timestamp(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or ""))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _admin_proxy_conditions(
+    query: AdminProxyQuery, *, stale_cutoff: str, now_iso: str
+) -> tuple[list[str], list[object]]:
+    conditions: list[str] = []
+    parameters: list[object] = []
+    if query.archived == "archived":
+        conditions.append("p.archived_at IS NOT NULL")
+    elif query.archived == "active":
+        conditions.append("p.archived_at IS NULL")
+    if query.search:
+        pattern = _like_pattern(query.search)
+        conditions.append(
+            "(LOWER(p.host) LIKE ? ESCAPE '\\' OR CAST(p.port AS TEXT) LIKE ? ESCAPE '\\' "
+            "OR LOWER(u.email) LIKE ? ESCAPE '\\' OR "
+            "(p.egress_attestation_source IN ('https_quorum','earnapp_tls') "
+            "AND LOWER(COALESCE(p.exit_ip,'')) LIKE ? ESCAPE '\\'))"
+        )
+        parameters.extend((pattern, pattern, pattern, pattern))
+    if query.owner:
+        conditions.append("LOWER(u.email) LIKE ? ESCAPE '\\'")
+        parameters.append(_like_pattern(query.owner))
+    if query.endpoint:
+        pattern = _like_pattern(query.endpoint)
+        conditions.append("(LOWER(p.host) LIKE ? ESCAPE '\\' OR CAST(p.port AS TEXT) LIKE ? ESCAPE '\\')")
+        parameters.extend((pattern, pattern))
+    if query.status:
+        conditions.append("p.status=?")
+        parameters.append(query.status)
+    if query.protocol:
+        if query.protocol == "unknown":
+            conditions.append("COALESCE(NULLIF(p.detected_protocol,''),'unknown') IN ('unknown','auto')")
+        else:
+            conditions.append("p.detected_protocol=?")
+            parameters.append(query.protocol)
+    if query.eligibility:
+        conditions.append("p.eligibility=?")
+        parameters.append(query.eligibility)
+    trusted = "p.egress_attestation_source IN ('https_quorum','earnapp_tls')"
+    if query.identity == "canonical":
+        conditions.append(f"{trusted} AND p.exit_ip IS NOT NULL AND trim(p.exit_ip)<>'' AND p.duplicate_of IS NULL")
+    elif query.identity == "duplicate":
+        conditions.append(f"{trusted} AND p.exit_ip IS NOT NULL AND trim(p.exit_ip)<>'' AND p.duplicate_of IS NOT NULL")
+    elif query.identity == "awaiting":
+        conditions.append(f"NOT ({trusted} AND p.exit_ip IS NOT NULL AND trim(p.exit_ip)<>'')")
+    if query.country:
+        conditions.append("UPPER(p.country_code)=?")
+        parameters.append(query.country)
+    if query.freshness:
+        freshness_sql, freshness_parameters = _admin_proxy_freshness_condition(
+            query.freshness, stale_cutoff=stale_cutoff, now_iso=now_iso
+        )
+        conditions.append(freshness_sql)
+        parameters.extend(freshness_parameters)
+    return conditions or ["1=1"], parameters
+
+
+def _admin_proxy_freshness_condition(state: str, *, stale_cutoff: str, now_iso: str) -> tuple[str, tuple[str, ...]]:
+    """Use SQLite date functions so naive and timezone-aware stored values agree."""
+    checked = "NULLIF(trim(COALESCE(p.last_checked_at,'')), '')"
+    success = "NULLIF(trim(COALESCE(p.last_success_at,'')), '')"
+    next_check = "NULLIF(trim(COALESCE(p.next_check_at,'')), '')"
+    if state == "fresh":
+        return (
+            f"({checked} IS NOT NULL AND julianday({checked}) IS NOT NULL AND {success} IS NOT NULL "
+            f"AND julianday({success}) IS NOT NULL AND julianday({success})>=julianday(?) AND "
+            f"({next_check} IS NULL OR (julianday({next_check}) IS NOT NULL AND "
+            f"julianday({next_check})>=julianday(?))) )",
+            (stale_cutoff, now_iso),
+        )
+    if state == "due":
+        return (
+            f"({checked} IS NOT NULL AND julianday({checked}) IS NOT NULL AND {success} IS NOT NULL "
+            f"AND julianday({success}) IS NOT NULL AND julianday({success})>=julianday(?) AND "
+            f"{next_check} IS NOT NULL AND (julianday({next_check}) IS NULL OR "
+            f"julianday({next_check})<julianday(?)))",
+            (stale_cutoff, now_iso),
+        )
+    if state == "stale":
+        return (
+            f"({checked} IS NOT NULL AND (julianday({checked}) IS NULL OR {success} IS NULL OR "
+            f"julianday({success}) IS NULL OR julianday({success})<julianday(?)))",
+            (stale_cutoff,),
+        )
+    return (f"({checked} IS NULL)", ())
+
+
+def _admin_proxy_url_args(query: AdminProxyQuery, **overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "q": query.search,
+        "owner": query.owner,
+        "endpoint": query.endpoint,
+        "status": query.status,
+        "protocol": query.protocol,
+        "eligibility": query.eligibility,
+        "identity": query.identity,
+        "country": query.country,
+        "freshness": query.freshness,
+        "archived": query.archived,
+        "sort": query.sort,
+        "direction": query.direction,
+        "per_page": query.per_page,
+        "page": query.page,
+    }
+    values.update(overrides)
+    return {key: value for key, value in values.items() if value not in ("", None)}
+
+
+def _admin_proxy_url(query: AdminProxyQuery, **overrides: object) -> str:
+    """Build inventory links without colliding with Flask's `endpoint` argument."""
+    values = _admin_proxy_url_args(query, **overrides)
+    path = url_for("admin.proxies")
+    query_string = urlencode(values)
+    return f"{path}?{query_string}" if query_string else path
+
+
+def _admin_proxy_page(db, args) -> dict[str, object]:
+    query = _admin_proxy_query(args)
+    now = datetime.now(UTC)
+    stale_at = now - timedelta(minutes=checker_settings(db).health_stale_minutes)
+    stale_cutoff = stale_at.isoformat()
+    now_iso = now.isoformat()
+    conditions, parameters = _admin_proxy_conditions(query, stale_cutoff=stale_cutoff, now_iso=now_iso)
+    where = " AND ".join(conditions)
+
+    active_count = int(
+        db.execute("SELECT COUNT(*) AS count FROM proxies WHERE archived_at IS NULL").fetchone()["count"]
+    )
+    archived_count = int(
+        db.execute("SELECT COUNT(*) AS count FROM proxies WHERE archived_at IS NOT NULL").fetchone()["count"]
+    )
+    scope_condition = {
+        "active": "p.archived_at IS NULL",
+        "archived": "p.archived_at IS NOT NULL",
+        "all": "1=1",
+    }[query.archived]
+    total_count = int(
+        db.execute("SELECT COUNT(*) AS count FROM proxies p WHERE " + scope_condition).fetchone()["count"]
+    )
+    filtered_count = int(
+        db.execute(
+            "SELECT COUNT(*) AS count FROM proxies p JOIN users u ON u.id=p.user_id WHERE " + where,
+            parameters,
+        ).fetchone()["count"]
+    )
+    total_pages = max(1, math.ceil(filtered_count / query.per_page))
+    query = replace(query, page=min(query.page, total_pages))
+    order_direction = "ASC" if query.direction == "asc" else "DESC"
+    order = ", ".join(f"{column} {order_direction}" for column in ADMIN_PROXY_SORT_COLUMNS[query.sort])
+    rows = db.execute(
+        "SELECT "
+        + ", ".join(ADMIN_PROXY_SELECT_COLUMNS)
+        + ", u.email AS owner_email FROM proxies p JOIN users u ON u.id=p.user_id WHERE "
+        + where
+        + f" ORDER BY {order} LIMIT ? OFFSET ?",
+        [*parameters, query.per_page, query.offset],
+    ).fetchall()
+
+    def grouped_count(expression: str) -> dict[str, int]:
+        grouped = db.execute(
+            f"SELECT {expression} AS value, COUNT(*) AS count FROM proxies p "
+            "WHERE " + scope_condition + " GROUP BY value"
+        ).fetchall()
+        return {str(row["value"]): int(row["count"]) for row in grouped}
+
+    status_counts = grouped_count("COALESCE(NULLIF(p.status,''),'unknown')")
+    protocol_counts_raw = grouped_count("COALESCE(NULLIF(p.detected_protocol,''),'unknown')")
+    protocol_counts = {
+        "http": protocol_counts_raw.get("http", 0),
+        "socks5": protocol_counts_raw.get("socks5", 0),
+        "unknown": sum(count for value, count in protocol_counts_raw.items() if value not in {"http", "socks5"}),
+    }
+    eligibility_counts = grouped_count("COALESCE(NULLIF(p.eligibility,''),'pending')")
+    trusted = "p.egress_attestation_source IN ('https_quorum','earnapp_tls') AND p.exit_ip IS NOT NULL AND trim(p.exit_ip)<>''"
+
+    def scalar_count(extra: str, values: tuple[object, ...] = ()) -> int:
+        return int(
+            db.execute(
+                "SELECT COUNT(*) AS count FROM proxies p WHERE " + scope_condition + " AND " + extra,
+                values,
+            ).fetchone()["count"]
+        )
+
+    identity_counts = {
+        "canonical": scalar_count(f"{trusted} AND p.duplicate_of IS NULL"),
+        "duplicate": scalar_count(f"{trusted} AND p.duplicate_of IS NOT NULL"),
+        "awaiting": scalar_count(f"NOT ({trusted})"),
+    }
+    freshness_counts = {
+        "fresh": scalar_count(
+            *_admin_proxy_freshness_condition("fresh", stale_cutoff=stale_cutoff, now_iso=now_iso),
+        ),
+        "due": scalar_count(
+            *_admin_proxy_freshness_condition("due", stale_cutoff=stale_cutoff, now_iso=now_iso),
+        ),
+        "stale": scalar_count(
+            *_admin_proxy_freshness_condition("stale", stale_cutoff=stale_cutoff, now_iso=now_iso),
+        ),
+        "never": scalar_count(*_admin_proxy_freshness_condition("never", stale_cutoff=stale_cutoff, now_iso=now_iso)),
+    }
+    countries = db.execute(
+        "SELECT UPPER(p.country_code) AS code, COUNT(*) AS count FROM proxies p "
+        "WHERE "
+        + scope_condition
+        + " AND length(trim(country_code))=2 GROUP BY UPPER(country_code) ORDER BY count DESC, code LIMIT 250"
+    ).fetchall()
+
+    def route_url(**overrides: object) -> str:
+        return _admin_proxy_url(query, **overrides)
+
+    def filter_url(**overrides: object) -> str:
+        return route_url(page=1, **overrides)
+
+    sort_urls = {
+        key: route_url(
+            page=1,
+            sort=key,
+            direction="desc" if query.sort == key and query.direction == "asc" else "asc",
+        )
+        for key in ADMIN_PROXY_SORT_COLUMNS
+    }
+    page_links: list[dict[str, object]] = []
+    visible_pages = {1, total_pages, query.page, query.page - 1, query.page + 1}
+    previous_number = 0
+    for page_number in sorted(number for number in visible_pages if 1 <= number <= total_pages):
+        if previous_number and page_number > previous_number + 1:
+            page_links.append({"ellipsis": True})
+        page_links.append(
+            {"number": page_number, "current": page_number == query.page, "url": route_url(page=page_number)}
+        )
+        previous_number = page_number
+
+    def freshness_view(row) -> dict[str, str]:
+        raw_checked_at = str(row["last_checked_at"] or "").strip()
+        raw_next_check_at = str(row["next_check_at"] or "").strip()
+        checked_at = _parse_admin_timestamp(row["last_checked_at"])
+        success_at = _parse_admin_timestamp(row["last_success_at"])
+        next_check_at = _parse_admin_timestamp(row["next_check_at"])
+        if not raw_checked_at:
+            return {"state": "never", "label": "Never checked"}
+        if checked_at is None or success_at is None or success_at < stale_at:
+            return {"state": "stale", "label": "Stale"}
+        if raw_next_check_at and (next_check_at is None or next_check_at < now):
+            return {"state": "due", "label": "Check due"}
+        return {"state": "fresh", "label": "Fresh"}
+
+    def timestamp_view(value: object, *, empty_label: str) -> dict[str, str]:
+        parsed = _parse_admin_timestamp(value)
+        if parsed is None:
+            return {"iso": "", "label": empty_label}
+        return {"iso": parsed.isoformat(), "label": parsed.strftime("%b %d, %Y %H:%M UTC")}
+
+    def identity_view(row) -> dict[str, str]:
+        is_trusted = str(row["egress_attestation_source"] or "") in {"https_quorum", "earnapp_tls"} and bool(
+            str(row["exit_ip"] or "").strip()
+        )
+        if is_trusted and row["duplicate_of"] is not None:
+            return {"state": "duplicate", "label": "Duplicate"}
+        if is_trusted:
+            return {"state": "canonical", "label": "Canonical"}
+        return {"state": "awaiting", "label": "Awaiting probe"}
+
+    views = [
+        {
+            "row": row,
+            "freshness": freshness_view(row),
+            "identity": identity_view(row),
+            "last_checked": timestamp_view(row["last_checked_at"], empty_label="Never"),
+            "next_check": timestamp_view(row["next_check_at"], empty_label="Not scheduled"),
+        }
+        for row in rows
+    ]
+    return {
+        "query": query,
+        "views": views,
+        "total_count": total_count,
+        "active_count": active_count,
+        "archived_count": archived_count,
+        "filtered_count": filtered_count,
+        "total_pages": total_pages,
+        "start_index": query.offset + 1 if filtered_count else 0,
+        "end_index": min(query.offset + len(rows), filtered_count),
+        "status_counts": status_counts,
+        "protocol_counts": protocol_counts,
+        "eligibility_counts": eligibility_counts,
+        "identity_counts": identity_counts,
+        "freshness_counts": freshness_counts,
+        "countries": countries,
+        "filter_url": filter_url,
+        "sort_urls": sort_urls,
+        "page_links": page_links,
+        "previous_url": route_url(page=max(1, query.page - 1)),
+        "next_url": route_url(page=min(total_pages, query.page + 1)),
+        "reset_url": url_for("admin.proxies"),
+        "duplicate_groups_url": url_for("admin.egress_duplicates"),
+    }
 
 
 def _egress_duplicate_query(args) -> tuple[int, int, str]:
@@ -168,6 +582,20 @@ def dashboard():
         stats=operational_stats(get_db()),
         admin_section="overview",
     )
+
+
+@bp.get("/proxies")
+@admin_required
+def proxies():
+    response = current_app.make_response(
+        render_template(
+            "admin_proxies.html",
+            inventory=_admin_proxy_page(get_db(), request.args),
+            admin_section="proxies",
+        )
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @bp.get("/checker")

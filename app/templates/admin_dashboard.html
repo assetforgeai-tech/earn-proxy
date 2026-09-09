@@ -52,6 +52,7 @@
     <div><p class="eyebrow">WORKSPACES</p><h2 id="admin-quick-links-title">Choose an area to manage</h2></div>
   </div>
   <div class="quick-link-grid">
+    <a class="quick-link" href="{{ url_for('admin.proxies') }}"><strong>Proxies</strong><span>Search and review the full credential-safe inventory.</span></a>
     <a class="quick-link" href="{{ url_for('admin.checker') }}"><strong>Health checker</strong><span>Cadence, concurrency, retries, and API classes.</span></a>
     <a class="quick-link" href="{{ url_for('admin.egress_duplicates') }}"><strong>Egress duplicates</strong><span>Review globally duplicated trusted exit identities.</span></a>
     <a class="quick-link" href="{{ url_for('admin.users') }}"><strong>Users</strong><span>Approve, pause, block, or remove accounts.</span></a>

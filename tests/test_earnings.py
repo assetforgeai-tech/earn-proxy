@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from app.db import get_db
 from app.services.checks import apply_health_result
 from app.services.earnings import accrue_eligible_time, balances_for_user
-from app.services.proxies import add_proxy, replace_proxy
+from app.services.proxies import add_proxy, reconcile_exit_ip, replace_proxy
 from app.services.users import create_user
 
 
@@ -16,7 +16,9 @@ def test_earnings_accrue_immediately_but_unlock_after_168_hours(app):
         user_id = create_user(db, "one@example.com", "password", status="active")
         proxy_id = add_proxy(db, user_id, "proxy.example:9000:u:p")
         db.execute(
-            "UPDATE proxies SET status='online', eligibility='allow', country_code='US', online_since=?, last_success_at=?, accrual_cursor_at=?, probation_started_at=? WHERE id=?",
+            "UPDATE proxies SET status='online', eligibility='allow', country_code='US', exit_ip='198.51.100.1', "
+            "egress_attestation_source='https_quorum', online_since=?, last_success_at=?, "
+            "accrual_cursor_at=?, probation_started_at=? WHERE id=?",
             (
                 start.isoformat(),
                 (start + timedelta(hours=169)).isoformat(),
@@ -46,7 +48,9 @@ def test_pause_earn_stops_new_accrual(app):
         proxy_id = add_proxy(db, user_id, "proxy.example:9000:u:p")
         db.execute("UPDATE users SET earn_paused=1 WHERE id=?", (user_id,))
         db.execute(
-            "UPDATE proxies SET status='online', eligibility='allow', country_code='US', online_since=?, last_success_at=?, accrual_cursor_at=?, probation_started_at=? WHERE id=?",
+            "UPDATE proxies SET status='online', eligibility='allow', country_code='US', exit_ip='198.51.100.2', "
+            "egress_attestation_source='https_quorum', online_since=?, last_success_at=?, "
+            "accrual_cursor_at=?, probation_started_at=? WHERE id=?",
             (
                 start.isoformat(),
                 (start + timedelta(hours=24)).isoformat(),
@@ -70,7 +74,9 @@ def test_long_gap_splits_probation_before_unlocking_available_balance(app):
         user_id = create_user(db, "long-gap@example.com", "password", status="active")
         proxy_id = add_proxy(db, user_id, "proxy.example:9000:u:p")
         db.execute(
-            "UPDATE proxies SET status='online', eligibility='allow', country_code='US', online_since=?, last_success_at=?, accrual_cursor_at=?, probation_started_at=? WHERE id=?",
+            "UPDATE proxies SET status='online', eligibility='allow', country_code='US', exit_ip='198.51.100.3', "
+            "egress_attestation_source='https_quorum', online_since=?, last_success_at=?, "
+            "accrual_cursor_at=?, probation_started_at=? WHERE id=?",
             (
                 start.isoformat(),
                 (start + timedelta(hours=240)).isoformat(),
@@ -99,7 +105,9 @@ def test_replacing_proxy_expires_old_pending_cycle_without_touching_available(ap
         user_id = create_user(db, "replace-cycle@example.com", "password", status="active")
         proxy_id = add_proxy(db, user_id, "old.example:9000:u:p")
         db.execute(
-            "UPDATE proxies SET status='online', eligibility='allow', country_code='US', online_since=?, last_success_at=?, accrual_cursor_at=?, probation_started_at=? WHERE id=?",
+            "UPDATE proxies SET status='online', eligibility='allow', country_code='US', exit_ip='198.51.100.4', "
+            "egress_attestation_source='https_quorum', online_since=?, last_success_at=?, "
+            "accrual_cursor_at=?, probation_started_at=? WHERE id=?",
             (
                 start.isoformat(),
                 (start + timedelta(hours=24)).isoformat(),
@@ -133,7 +141,8 @@ def test_concurrent_accrual_does_not_create_overlapping_ledger_intervals(app, mo
         user_id = create_user(db, "accrual-race@example.com", "password", status="active")
         proxy_id = add_proxy(db, user_id, "race.example:9000:u:p")
         db.execute(
-            "UPDATE proxies SET status='online', eligibility='allow', country_code='US', "
+            "UPDATE proxies SET status='online', eligibility='allow', country_code='US', exit_ip='198.51.100.5', "
+            "egress_attestation_source='https_quorum', "
             "online_since=?, last_success_at=?, accrual_cursor_at=?, probation_started_at=? WHERE id=?",
             (
                 start.isoformat(),
@@ -191,6 +200,7 @@ def test_stale_health_does_not_accrue_or_backfill_an_unobserved_gap(app):
         proxy_id = add_proxy(db, user_id, "stale.example:9000:u:p")
         db.execute(
             "UPDATE proxies SET status='online', eligibility='allow', country_code='US', exit_ip=?, "
+            "egress_attestation_source='https_quorum', "
             "online_since=?, last_success_at=?, accrual_cursor_at=?, probation_started_at=? WHERE id=?",
             (
                 "198.51.100.60",
@@ -228,7 +238,8 @@ def test_online_row_without_successful_health_observation_does_not_accrue(app):
         user_id = create_user(db, "unverified-earnings@example.com", "password", status="active")
         proxy_id = add_proxy(db, user_id, "unverified.example:9000:u:p")
         db.execute(
-            "UPDATE proxies SET status='online', eligibility='allow', country_code='US', "
+            "UPDATE proxies SET status='online', eligibility='allow', country_code='US', exit_ip='198.51.100.6', "
+            "egress_attestation_source='https_quorum', "
             "online_since=?, accrual_cursor_at=?, probation_started_at=? WHERE id=?",
             (start.isoformat(), start.isoformat(), start.isoformat(), proxy_id),
         )
@@ -268,3 +279,130 @@ def test_online_pending_row_without_verified_egress_does_not_accrue(app):
 
     assert balance.pending_micro_usd == 0
     assert balance.available_micro_usd == 0
+
+
+def test_duplicate_egress_allow_row_never_accrues(app):
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "duplicate-egress-earnings@example.com", "password", status="active")
+        canonical = add_proxy(db, user_id, "canonical-earnings.example:9000:u:c")
+        duplicate = add_proxy(db, user_id, "duplicate-earnings.example:9001:u:d")
+        db.execute(
+            "UPDATE proxies SET status='offline', eligibility='allow', country_code='US', exit_ip='198.51.100.70', "
+            "egress_attestation_source='https_quorum', online_since=?, last_success_at=?, "
+            "accrual_cursor_at=?, probation_started_at=? WHERE id=?",
+            (
+                start.isoformat(),
+                (start + timedelta(hours=24)).isoformat(),
+                start.isoformat(),
+                start.isoformat(),
+                canonical,
+            ),
+        )
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', country_code='US', exit_ip='198.51.100.70', "
+            "egress_attestation_source='earnapp_tls', duplicate_of=?, online_since=?, last_success_at=?, "
+            "accrual_cursor_at=?, probation_started_at=? WHERE id=?",
+            (
+                canonical,
+                start.isoformat(),
+                (start + timedelta(hours=24)).isoformat(),
+                start.isoformat(),
+                start.isoformat(),
+                duplicate,
+            ),
+        )
+        db.commit()
+
+        accrue_eligible_time(db, now=start + timedelta(hours=24))
+        ledger = db.execute("SELECT COUNT(*) AS count FROM earnings_ledger WHERE proxy_id=?", (duplicate,)).fetchone()
+        balance = balances_for_user(db, user_id)
+
+    assert ledger["count"] == 0
+    assert balance.pending_micro_usd == 0
+    assert balance.available_micro_usd == 0
+
+
+def test_allow_online_row_without_trusted_egress_does_not_accrue(app):
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "untrusted-allow-earnings@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "untrusted-allow.example:9000:u:p")
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', country_code='US', online_since=?, "
+            "last_success_at=?, accrual_cursor_at=?, probation_started_at=?, exit_ip=NULL, "
+            "egress_attestation_source='' WHERE id=?",
+            (
+                start.isoformat(),
+                (start + timedelta(hours=24)).isoformat(),
+                start.isoformat(),
+                start.isoformat(),
+                proxy_id,
+            ),
+        )
+        db.commit()
+
+        accrue_eligible_time(db, now=start + timedelta(hours=24))
+        balance = balances_for_user(db, user_id)
+
+    assert balance.pending_micro_usd == 0
+    assert balance.available_micro_usd == 0
+
+
+def test_rehomed_duplicate_expires_pending_earnings(app):
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "rehomed-duplicate@example.com", "password", status="active")
+        current_canonical = add_proxy(db, user_id, "current-canonical.example:9000:u:c")
+        rehomed = add_proxy(db, user_id, "rehomed.example:9001:u:r")
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', country_code='US', exit_ip=?, "
+            "egress_attestation_source='https_quorum', online_since=?, last_success_at=?, "
+            "accrual_cursor_at=?, probation_started_at=? WHERE id=?",
+            (
+                "198.51.100.120",
+                start.isoformat(),
+                (start + timedelta(hours=2)).isoformat(),
+                start.isoformat(),
+                start.isoformat(),
+                current_canonical,
+            ),
+        )
+        db.execute(
+            "INSERT INTO earnings_ledger(user_id, proxy_id, started_at, ended_at, micro_usd, bucket, created_at) "
+            "VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+            (
+                user_id,
+                current_canonical,
+                start.isoformat(),
+                (start + timedelta(hours=1)).isoformat(),
+                1000,
+                (start + timedelta(hours=1)).isoformat(),
+            ),
+        )
+        db.execute(
+            "UPDATE proxies SET created_at=?, updated_at=? WHERE id=?",
+            ((start - timedelta(hours=1)).isoformat(), (start - timedelta(hours=1)).isoformat(), rehomed),
+        )
+        db.commit()
+
+        reconcile_exit_ip(db, rehomed, "198.51.100.120")
+        row = db.execute(
+            "SELECT duplicate_of FROM proxies WHERE id=?",
+            (current_canonical,),
+        ).fetchone()
+        pending = db.execute(
+            "SELECT COUNT(*) AS count FROM earnings_ledger WHERE proxy_id=? AND bucket='pending'",
+            (current_canonical,),
+        ).fetchone()
+        expired = db.execute(
+            "SELECT COUNT(*) AS count FROM earnings_ledger WHERE proxy_id=? AND bucket='expired'",
+            (current_canonical,),
+        ).fetchone()
+
+    assert row["duplicate_of"] == rehomed
+    assert pending["count"] == 0
+    assert expired["count"] == 1

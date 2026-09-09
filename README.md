@@ -8,6 +8,7 @@ Earn Proxy is a compact, self-hosted Flask service for manually approved contrib
 - Rejects duplicate credentials globally and reconciles duplicate exit IPs across all accounts.
 - Checks online/offline health on a rolling 60-minute target with a default concurrency of 5 (hard cap 20).
 - Classifies EarnApp-compatible proxies as `Allow`; other usable proxies are `Risk`.
+- Pays canonical online `Allow` proxies at $1.00/month for US egress or $0.50/month elsewhere; canonical online `Risk` proxies earn $0.50/month. `Pending` and duplicate-egress rows earn $0.
 - Exposes both `Allow` and `Risk` through the internal API by default; each class has an admin toggle.
 - Keeps `Pause earn` independent from distribution, while blocked users are excluded from both.
 - Accrues fixed hourly earnings into a seven-day probation cycle before funds become available.
@@ -82,6 +83,12 @@ CSV uploads may contain one raw proxy per row, a header named `raw_proxy` (alias
 Imports are limited to 512 KB and 5,000 lines by default. Configure `EARN_PROXY_MAX_IMPORT_BYTES` and `EARN_PROXY_MAX_IMPORT_LINES` to change those bounds. Blank lines are ignored. Valid entries are encrypted and queued with `pending` status. Credential duplicates are skipped globally, including duplicates owned by another account and duplicates repeated within the same batch; import feedback only exposes safe `host:port` labels. Public egress identity is reconciled globally after a trusted `https_quorum` or `earnapp_tls` probe. One canonical row per exit IP may earn or enter API distribution; duplicate rows remain visible to their contributor but expose neither the exit IP nor another account's identity.
 
 The contributor proxy workspace uses server-side inventory controls. `GET /dashboard/proxies` accepts `q` (host/port search), `status`, `protocol`, `eligibility`, `identity` (`canonical`, `duplicate`, or `awaiting`), `sort`, `direction`, `per_page` (`10`, `25`, `50`, or `100`), and `page`. Counts and filters are scoped to the signed-in contributor; only the selected page is rendered, so large inventories do not load every row into the browser.
+
+The proxy-row `Pending` status means health, trusted egress, or EarnApp qualification is not complete, so its current rate is $0. This is separate from the account's pending balance, which already accrued from a qualifying proxy and becomes available after seven continuous online days.
+
+## Admin proxy inventory
+
+Administrators review the global pool at `/admin/proxies`. The read-only view defaults to active records and provides credential-safe counts, owner and endpoint search, health/protocol/eligibility/egress/country/freshness filters, archived scope, sorting, and server-side pagination (`25`, `50`, or `100` rows). Upstream usernames and passwords are neither selected by the inventory query nor rendered. Trusted exit IPs are visible only to administrators; duplicate investigations remain in `/admin/egress-duplicates`.
 
 The existing single-entry `POST /proxies` route remains available. Bulk clients can use `POST /proxies/import` with JSON:
 
