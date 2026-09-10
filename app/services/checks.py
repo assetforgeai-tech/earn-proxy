@@ -29,6 +29,11 @@ def _normalized_exit_ip(value: object) -> str:
         return ""
 
 
+def _as_utc(value: str | datetime) -> datetime:
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value)
+    return parsed.astimezone(UTC) if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 @contextmanager
 def _serialized_result_write(db):
     """Keep result validation and state mutation in one SQLite write lock."""
@@ -410,7 +415,7 @@ def apply_health_result(db, proxy_id: int, result: dict, *, now: datetime | None
 
 
 def _apply_health_result_locked(db, proxy_id: int, result: dict, *, now: datetime | None = None) -> None:
-    current = now or datetime.now(UTC)
+    current = _as_utc(now or datetime.now(UTC))
     status = str(result.get("status") or "inconclusive")
     row = db.execute("SELECT * FROM proxies WHERE id=?", (proxy_id,)).fetchone()
     if row is None or row["archived_at"] is not None:
@@ -438,12 +443,12 @@ def _apply_health_result_locked(db, proxy_id: int, result: dict, *, now: datetim
         # untrusted. Legacy injected hooks that omit the field retain their
         # historical behavior; production checker results always include it.
         egress_trusted = result.get("egress_trusted", True) is True
-        recovered_from_offline = row["status"] == "offline"
+        recovered_from_offline = row["status"] in {"offline", "blocked"}
         accumulated_offline = int(row["accumulated_offline_seconds"] or 0)
-        if row["status"] == "offline" and row["offline_since"]:
+        if recovered_from_offline and row["offline_since"]:
             accumulated_offline += max(
                 0,
-                int((current - datetime.fromisoformat(row["offline_since"])).total_seconds()),
+                int((current - _as_utc(row["offline_since"])).total_seconds()),
             )
         previous_exit_ip = _normalized_exit_ip(row["exit_ip"])
         observed_exit_ip = _normalized_exit_ip(result.get("exit_ip"))
@@ -453,7 +458,10 @@ def _apply_health_result_locked(db, proxy_id: int, result: dict, *, now: datetim
             not egress_trusted and previous_exit_ip and observed_exit_ip and observed_exit_ip != previous_exit_ip
         )
         missing_trusted_egress = not previous_exit_ip and not trusted_exit_ip
-        previous_success = datetime.fromisoformat(row["last_success_at"]) if row["last_success_at"] else None
+        previous_success = _as_utc(row["last_success_at"]) if row["last_success_at"] else None
+        unobserved_recovery = bool(
+            row["status"] in {"online", "suspect"} and row["online_since"] and not previous_success
+        )
         stale_recovery = bool(
             row["status"] in {"online", "suspect"}
             and previous_success
@@ -465,7 +473,11 @@ def _apply_health_result_locked(db, proxy_id: int, result: dict, *, now: datetim
             accrue_proxy_time(db, proxy_id, now=current)
         if egress_changed or untrusted_egress_mismatch or stale_recovery:
             reset_probation(db, proxy_id, current)
-        online_since = current.isoformat() if stale_recovery else (row["online_since"] or current.isoformat())
+        online_since = (
+            current.isoformat()
+            if stale_recovery or unobserved_recovery
+            else (row["online_since"] or current.isoformat())
+        )
         accumulated_online = int(row["accumulated_online_seconds"] or 0)
         if stale_recovery and row["online_since"] and previous_success:
             observed_until = min(
@@ -474,9 +486,15 @@ def _apply_health_result_locked(db, proxy_id: int, result: dict, *, now: datetim
             )
             accumulated_online += max(
                 0,
-                int((observed_until - datetime.fromisoformat(row["online_since"])).total_seconds()),
+                int((observed_until - _as_utc(row["online_since"])).total_seconds()),
             )
-        continuity_reset = recovered_from_offline or egress_changed or untrusted_egress_mismatch or stale_recovery
+        continuity_reset = (
+            recovered_from_offline
+            or egress_changed
+            or untrusted_egress_mismatch
+            or stale_recovery
+            or unobserved_recovery
+        )
         requires_strong = (
             not egress_trusted and (not previous_exit_ip or untrusted_egress_mismatch)
         ) or missing_trusted_egress
@@ -509,8 +527,8 @@ def _apply_health_result_locked(db, proxy_id: int, result: dict, *, now: datetim
                 if (egress_changed or untrusted_egress_mismatch or missing_trusted_egress)
                 else row["earnapp_next_check_at"],
                 current.isoformat() if continuity_reset else row["probation_started_at"],
-                int(egress_changed or untrusted_egress_mismatch or stale_recovery),
-                int(egress_changed or untrusted_egress_mismatch or stale_recovery),
+                int(egress_changed or untrusted_egress_mismatch or stale_recovery or unobserved_recovery),
+                int(egress_changed or untrusted_egress_mismatch or stale_recovery or unobserved_recovery),
                 current.isoformat() if continuity_reset else row["accrual_cursor_at"],
                 current.isoformat(),
                 (current + timedelta(minutes=settings.health_interval_minutes)).isoformat(),
@@ -579,9 +597,21 @@ def _apply_health_result_locked(db, proxy_id: int, result: dict, *, now: datetim
         if str(row["eligibility"] or "").strip().lower() in EARNING_ELIGIBILITIES:
             accrue_proxy_time(db, proxy_id, now=current)
         reset_probation(db, proxy_id, current)
+        accumulated_online = int(row["accumulated_online_seconds"] or 0)
+        if row["status"] in {"online", "suspect"} and row["online_since"] and row["last_success_at"]:
+            observed_until = min(
+                current,
+                _as_utc(row["last_success_at"]) + timedelta(minutes=settings.health_stale_minutes),
+            )
+            accumulated_online += max(0, int((observed_until - _as_utc(row["online_since"])).total_seconds()))
         db.execute(
-            "UPDATE proxies SET status='blocked', eligibility='risk', consecutive_failures=0, health_mode='strong', last_checked_at=?, next_check_at=?, check_claimed_until=NULL, check_claim_token=NULL, earnapp_claimed_until=NULL, earnapp_claim_token=NULL, earnapp_next_check_at=?, failure_kind=?, last_error=?, updated_at=? WHERE id=?",
+            "UPDATE proxies SET status='blocked', eligibility='risk', consecutive_failures=0, health_mode='strong', "
+            "online_since=NULL, offline_since=?, accumulated_online_seconds=?, last_checked_at=?, next_check_at=?, "
+            "check_claimed_until=NULL, check_claim_token=NULL, earnapp_claimed_until=NULL, "
+            "earnapp_claim_token=NULL, earnapp_next_check_at=?, failure_kind=?, last_error=?, updated_at=? WHERE id=?",
             (
+                row["offline_since"] or current.isoformat(),
+                accumulated_online,
                 current.isoformat(),
                 (current + timedelta(minutes=settings.health_interval_minutes)).isoformat(),
                 current.isoformat(),
@@ -605,11 +635,16 @@ def _apply_health_result_locked(db, proxy_id: int, result: dict, *, now: datetim
         # Accrue the final confirmed online interval before changing the row
         # to offline; the ledger query intentionally only reads online rows.
         accrue_proxy_time(db, proxy_id, now=current)
-    if offline and row["status"] in {"online", "suspect"} and row["online_since"]:
-        accumulated_online += max(
-            0,
-            int((current - datetime.fromisoformat(row["online_since"])).total_seconds()),
+    if offline and row["status"] in {"online", "suspect"} and row["online_since"] and row["last_success_at"]:
+        observed_until = min(
+            current,
+            _as_utc(row["last_success_at"]) + timedelta(minutes=settings.health_stale_minutes),
         )
+        accumulated_online += max(0, int((observed_until - _as_utc(row["online_since"])).total_seconds()))
+    remains_blocked = row["status"] == "blocked"
+    next_status = (
+        "offline" if offline else ("blocked" if remains_blocked else ("suspect" if failures >= 2 else row["status"]))
+    )
     db.execute(
         """
         UPDATE proxies SET status=?, health_mode='strong', consecutive_failures=?, offline_since=?, online_since=?,
@@ -619,10 +654,10 @@ def _apply_health_result_locked(db, proxy_id: int, result: dict, *, now: datetim
             last_latency_ms=?, failure_kind=?, last_error=?, updated_at=? WHERE id=?
         """,
         (
-            "offline" if offline else ("suspect" if failures >= 2 else row["status"]),
+            next_status,
             failures,
-            (row["offline_since"] or current.isoformat()) if offline else row["offline_since"],
-            None if offline else row["online_since"],
+            (row["offline_since"] or current.isoformat()) if offline or remains_blocked else row["offline_since"],
+            None if offline or remains_blocked else row["online_since"],
             accumulated_online,
             (row["continuous_dead_since"] or current.isoformat()) if offline else row["continuous_dead_since"],
             current.isoformat(),

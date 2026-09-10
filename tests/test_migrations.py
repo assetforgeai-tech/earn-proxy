@@ -43,6 +43,7 @@ def test_existing_legacy_proxy_database_is_migrated_without_plaintext_credential
         "password_encrypted",
         "credential_fingerprint",
         "credential_generation",
+        "credential_started_at",
         "check_claim_token",
         "earnapp_claim_token",
         "next_check_at",
@@ -59,6 +60,7 @@ def test_existing_legacy_proxy_database_is_migrated_without_plaintext_credential
     assert row["username"] == ""
     assert row["password"] == ""
     assert row["credential_fingerprint"]
+    assert row["credential_started_at"] == row["created_at"]
     # A legacy `online` label is not proof of a successful health observation;
     # distribution must remain fail-closed until the new checker confirms it.
     assert row["last_success_at"] is None

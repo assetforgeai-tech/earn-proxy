@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS proxies (
     password_encrypted TEXT NOT NULL,
     credential_fingerprint TEXT NOT NULL UNIQUE,
     credential_generation INTEGER NOT NULL DEFAULT 1,
+    credential_started_at TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'pending',
     eligibility TEXT NOT NULL DEFAULT 'pending',
     earnapp_verdict TEXT NOT NULL DEFAULT '',
@@ -214,6 +215,7 @@ PROXY_MIGRATION_COLUMNS = {
     "password_encrypted": "TEXT NOT NULL DEFAULT ''",
     "credential_fingerprint": "TEXT NOT NULL DEFAULT ''",
     "credential_generation": "INTEGER NOT NULL DEFAULT 1",
+    "credential_started_at": "TEXT NOT NULL DEFAULT ''",
     "eligibility": "TEXT NOT NULL DEFAULT 'pending'",
     "earnapp_verdict": "TEXT NOT NULL DEFAULT ''",
     "earnapp_reason": "TEXT NOT NULL DEFAULT ''",
@@ -395,6 +397,11 @@ def migrate_db(db) -> None:
                 "(SELECT id FROM proxies WHERE duplicate_of IS NOT NULL)"
             )
         now = "1970-01-01T00:00:00+00:00"
+        db.execute(
+            "UPDATE proxies SET credential_started_at=COALESCE(NULLIF(credential_started_at,''), NULLIF(created_at,''), ?)"
+            " WHERE credential_started_at='' OR credential_started_at IS NULL",
+            (now,),
+        )
         # Force any identity without a trusted attestation through one strong
         # qualification pass. This remains idempotent for databases that saw
         # an intermediate schema with the column present but blank values.

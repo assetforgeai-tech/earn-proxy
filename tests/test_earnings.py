@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 from app.db import get_db
 from app.services.checks import apply_health_result
-from app.services.earnings import accrue_eligible_time, balances_for_user
+from app.services.earnings import accrue_eligible_time, balances_for_user, earning_online_seconds_for_proxies
 from app.services.proxies import add_proxy, reconcile_exit_ip, replace_proxy
 from app.services.users import create_user
 
@@ -254,6 +254,115 @@ def test_online_row_without_successful_health_observation_does_not_accrue(app):
     assert balance.pending_micro_usd == 0
     assert balance.available_micro_usd == 0
     assert cursor == start.isoformat()
+
+
+def test_earning_online_seconds_excludes_pre_eligibility_operational_time(app):
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    eligible_at = start + timedelta(hours=3)
+    now = start + timedelta(hours=5)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "earning-hours-projection@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "earning-hours-projection.example:9000:u:p")
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', country_code='US', exit_ip='198.51.100.61', "
+            "egress_attestation_source='https_quorum', accumulated_online_seconds=5*3600, online_since=?, "
+            "last_success_at=?, accrual_cursor_at=?, probation_started_at=? WHERE id=?",
+            (start.isoformat(), now.isoformat(), eligible_at.isoformat(), eligible_at.isoformat(), proxy_id),
+        )
+        db.execute(
+            "INSERT INTO earnings_ledger(user_id, proxy_id, started_at, ended_at, micro_usd, bucket, created_at) "
+            "VALUES (?, ?, ?, ?, 0, 'pending', ?)",
+            (user_id, proxy_id, eligible_at.isoformat(), (start + timedelta(hours=4)).isoformat(), now.isoformat()),
+        )
+        db.commit()
+        row = db.execute("SELECT * FROM proxies WHERE id=?", (proxy_id,)).fetchone()
+        values = earning_online_seconds_for_proxies(db, [row], now=now, health_stale_minutes=120)
+
+    assert values[proxy_id] == 2 * 60 * 60
+
+
+def test_earning_online_seconds_is_zero_for_currently_non_earning_rows(app):
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    now = start + timedelta(hours=5)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "non-earning-hours-projection@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "non-earning-hours-projection.example:9000:u:p")
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='pending', exit_ip='198.51.100.62', "
+            "egress_attestation_source='https_quorum', online_since=?, last_success_at=?, accrual_cursor_at=? WHERE id=?",
+            (start.isoformat(), now.isoformat(), start.isoformat(), proxy_id),
+        )
+        db.execute(
+            "INSERT INTO earnings_ledger(user_id, proxy_id, started_at, ended_at, micro_usd, bucket, created_at) "
+            "VALUES (?, ?, ?, ?, 0, 'available', ?)",
+            (user_id, proxy_id, start.isoformat(), (start + timedelta(hours=2)).isoformat(), now.isoformat()),
+        )
+        db.commit()
+        row = db.execute("SELECT * FROM proxies WHERE id=?", (proxy_id,)).fetchone()
+        values = earning_online_seconds_for_proxies(db, [row], now=now, health_stale_minutes=120)
+
+    assert values[proxy_id] == 0
+
+
+def test_earning_online_seconds_excludes_previous_replaced_credential(app):
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    replaced_at = start + timedelta(hours=5)
+    now = replaced_at + timedelta(hours=2)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "replaced-hours-projection@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "old-hours-projection.example:9000:u:p")
+        db.execute(
+            "INSERT INTO earnings_ledger(user_id, proxy_id, started_at, ended_at, micro_usd, bucket, created_at) "
+            "VALUES (?, ?, ?, ?, 0, 'available', ?)",
+            (user_id, proxy_id, start.isoformat(), replaced_at.isoformat(), replaced_at.isoformat()),
+        )
+        db.commit()
+
+        replace_proxy(db, proxy_id, user_id, "new-hours-projection.example:9001:u:new", now=replaced_at)
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', country_code='US', "
+            "exit_ip='198.51.100.63', egress_attestation_source='https_quorum', "
+            "online_since=?, last_success_at=?, accrual_cursor_at=?, probation_started_at=? WHERE id=?",
+            (replaced_at.isoformat(), now.isoformat(), replaced_at.isoformat(), replaced_at.isoformat(), proxy_id),
+        )
+        db.commit()
+        accrue_eligible_time(db, now=now)
+        row = db.execute("SELECT * FROM proxies WHERE id=?", (proxy_id,)).fetchone()
+        values = earning_online_seconds_for_proxies(db, [row], now=now, health_stale_minutes=120)
+
+    assert values[proxy_id] == 2 * 60 * 60
+
+
+def test_earning_online_seconds_drops_ledger_interval_started_before_replace(app):
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    replaced_at = start + timedelta(hours=5)
+    now = replaced_at + timedelta(hours=2)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "crossing-replace-hours@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "crossing-old.example:9000:u:p")
+        db.execute(
+            "INSERT INTO earnings_ledger(user_id, proxy_id, started_at, ended_at, micro_usd, bucket, created_at) "
+            "VALUES (?, ?, ?, ?, 0, 'available', ?)",
+            (user_id, proxy_id, start.isoformat(), (start + timedelta(hours=10)).isoformat(), now.isoformat()),
+        )
+        db.commit()
+
+        replace_proxy(db, proxy_id, user_id, "crossing-new.example:9001:u:new", now=replaced_at)
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', country_code='US', "
+            "exit_ip='198.51.100.64', egress_attestation_source='https_quorum', "
+            "online_since=?, last_success_at=?, accrual_cursor_at=?, probation_started_at=? WHERE id=?",
+            (replaced_at.isoformat(), now.isoformat(), replaced_at.isoformat(), replaced_at.isoformat(), proxy_id),
+        )
+        db.commit()
+        row = db.execute("SELECT * FROM proxies WHERE id=?", (proxy_id,)).fetchone()
+        values = earning_online_seconds_for_proxies(db, [row], now=now, health_stale_minutes=120)
+
+    assert values[proxy_id] == 2 * 60 * 60
 
 
 def test_online_pending_row_without_verified_egress_does_not_accrue(app):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from conftest import login, login_admin, register
 
 from app.db import get_db
@@ -206,3 +208,154 @@ def test_stale_duplicate_pointer_is_fail_closed_in_earning_view(app, client):
     row = page[row_start : page.index("</tr>", row_start)]
     assert 'class="badge excluded">Not earning</span>' in row
     assert ">Allow<" not in row
+
+
+def test_not_earning_proxy_does_not_show_online_hours(app, client):
+    user_id = _activate_user(app, client, "inventory-no-earning-hours@example.com")
+    with app.app_context():
+        db = get_db()
+        canonical = add_proxy(db, user_id, "hours-canonical.example:9000:u-a:p-a")
+        duplicate = add_proxy(db, user_id, "hours-duplicate.example:9001:u-b:p-b")
+        old = datetime.now(UTC) - timedelta(hours=3)
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', exit_ip='198.51.100.88', "
+            "egress_attestation_source='https_quorum', accumulated_online_seconds=3600, "
+            "online_since=?, last_success_at=? WHERE id=?",
+            (old.isoformat(), old.isoformat(), canonical),
+        )
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', exit_ip='198.51.100.88', "
+            "egress_attestation_source='earnapp_tls', duplicate_of=?, accumulated_online_seconds=3600, "
+            "accumulated_offline_seconds=1800, "
+            "online_since=?, last_success_at=? WHERE id=?",
+            (canonical, old.isoformat(), old.isoformat(), duplicate),
+        )
+        db.commit()
+
+    page = client.get("/dashboard/proxies?identity=duplicate").get_data(as_text=True)
+    row_start = page.index("hours-duplicate.example:9001")
+    row = page[row_start : page.index("</tr>", row_start)]
+
+    assert 'class="badge excluded">Not earning</span>' in row
+    assert 'title="0.00 total hours"' in row
+    assert 'title="0.50 total hours"' in row
+    assert "30 minutes" in row
+    assert "1 hour" not in row
+
+
+def test_only_canonical_allow_and_risk_rows_show_online_hours(app, client):
+    user_id = _activate_user(app, client, "inventory-earning-hours@example.com")
+    now = datetime.now(UTC)
+    with app.app_context():
+        db = get_db()
+        allow = add_proxy(db, user_id, "hours-allow.example:9000:u-a:p-a")
+        risk = add_proxy(db, user_id, "hours-risk.example:9001:u-r:p-r")
+        pending = add_proxy(db, user_id, "hours-pending.example:9002:u-p:p-p")
+        awaiting = add_proxy(db, user_id, "hours-awaiting.example:9003:u-w:p-w")
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', exit_ip='198.51.100.91', "
+            "egress_attestation_source='https_quorum', online_since=?, last_success_at=?, "
+            "accrual_cursor_at=?, probation_started_at=? WHERE id=?",
+            (
+                (now - timedelta(hours=2)).isoformat(),
+                now.isoformat(),
+                (now - timedelta(hours=2)).isoformat(),
+                (now - timedelta(hours=2)).isoformat(),
+                allow,
+            ),
+        )
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='risk', exit_ip='198.51.100.92', "
+            "egress_attestation_source='earnapp_tls', online_since=?, last_success_at=?, "
+            "accrual_cursor_at=?, probation_started_at=? WHERE id=?",
+            (
+                (now - timedelta(hours=1)).isoformat(),
+                now.isoformat(),
+                (now - timedelta(hours=1)).isoformat(),
+                (now - timedelta(hours=1)).isoformat(),
+                risk,
+            ),
+        )
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='pending', exit_ip='198.51.100.93', "
+            "egress_attestation_source='https_quorum', accumulated_online_seconds=10800, "
+            "online_since=?, last_success_at=? WHERE id=?",
+            (now.isoformat(), now.isoformat(), pending),
+        )
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', accumulated_online_seconds=14400, "
+            "online_since=?, last_success_at=? WHERE id=?",
+            (now.isoformat(), now.isoformat(), awaiting),
+        )
+        db.commit()
+
+    page = client.get("/dashboard/proxies?sort=endpoint&direction=asc").get_data(as_text=True)
+
+    def proxy_row(endpoint: str) -> str:
+        start = page.index(endpoint)
+        return page[start : page.index("</tr>", start)]
+
+    assert 'title="2.00 total hours"' in proxy_row("hours-allow.example:9000")
+    assert 'title="1.00 total hours"' in proxy_row("hours-risk.example:9001")
+    assert 'title="0.00 total hours"' in proxy_row("hours-pending.example:9002")
+    assert 'title="0.00 total hours"' in proxy_row("hours-awaiting.example:9003")
+
+
+def test_online_sort_uses_displayed_earning_time(app, client):
+    user_id = _activate_user(app, client, "inventory-sort-earning-hours@example.com")
+    now = datetime.now(UTC)
+    with app.app_context():
+        db = get_db()
+        low = add_proxy(db, user_id, "sort-low.example:9000:u:l")
+        high = add_proxy(db, user_id, "sort-high.example:9001:u:h")
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', exit_ip='198.51.100.101', "
+            "egress_attestation_source='https_quorum', accumulated_online_seconds=100*3600, "
+            "online_since=?, last_success_at=?, accrual_cursor_at=?, probation_started_at=? WHERE id=?",
+            (
+                (now - timedelta(hours=1)).isoformat(),
+                now.isoformat(),
+                (now - timedelta(hours=1)).isoformat(),
+                (now - timedelta(hours=1)).isoformat(),
+                low,
+            ),
+        )
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', exit_ip='198.51.100.102', "
+            "egress_attestation_source='https_quorum', accumulated_online_seconds=0, "
+            "online_since=?, last_success_at=?, accrual_cursor_at=?, probation_started_at=? WHERE id=?",
+            (
+                (now - timedelta(hours=2)).isoformat(),
+                now.isoformat(),
+                (now - timedelta(hours=2)).isoformat(),
+                (now - timedelta(hours=2)).isoformat(),
+                high,
+            ),
+        )
+        db.commit()
+
+    page = client.get("/dashboard/proxies?sort=online&direction=desc").get_data(as_text=True)
+
+    assert page.index("sort-high.example:9001") < page.index("sort-low.example:9000")
+
+
+def test_offline_sort_includes_current_offline_interval(app, client):
+    user_id = _activate_user(app, client, "inventory-sort-offline-hours@example.com")
+    now = datetime.now(UTC)
+    with app.app_context():
+        db = get_db()
+        stored = add_proxy(db, user_id, "sort-stored-offline.example:9000:u:s")
+        active = add_proxy(db, user_id, "sort-active-offline.example:9001:u:a")
+        db.execute(
+            "UPDATE proxies SET status='online', accumulated_offline_seconds=? WHERE id=?",
+            (3 * 3600, stored),
+        )
+        db.execute(
+            "UPDATE proxies SET status='offline', accumulated_offline_seconds=0, offline_since=? WHERE id=?",
+            ((now - timedelta(hours=5)).isoformat(), active),
+        )
+        db.commit()
+
+    page = client.get("/dashboard/proxies?sort=offline&direction=desc").get_data(as_text=True)
+
+    assert page.index("sort-active-offline.example:9001") < page.index("sort-stored-offline.example:9000")

@@ -170,9 +170,9 @@ def bulk_add_proxies(
                 """
                 INSERT INTO proxies(
                     user_id, host, port, protocol_hint, username_encrypted, password_encrypted,
-                    credential_fingerprint, next_check_at, probation_started_at, accrual_cursor_at,
+                    credential_fingerprint, credential_started_at, next_check_at, probation_started_at, accrual_cursor_at,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -182,6 +182,7 @@ def bulk_add_proxies(
                     encrypt_secret(parsed.username),
                     encrypt_secret(parsed.password),
                     fingerprint,
+                    now,
                     now,
                     now,
                     now,
@@ -232,11 +233,11 @@ def add_proxy(db, user_id: int, raw_proxy: str, *, max_active_proxies: int | Non
         now = datetime.now(UTC).isoformat()
         cursor = db.execute(
             """
-            INSERT INTO proxies(
-                user_id, host, port, protocol_hint, username_encrypted, password_encrypted,
-                credential_fingerprint, next_check_at, probation_started_at, accrual_cursor_at,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO proxies(
+                    user_id, host, port, protocol_hint, username_encrypted, password_encrypted,
+                    credential_fingerprint, credential_started_at, next_check_at, probation_started_at, accrual_cursor_at,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -246,6 +247,7 @@ def add_proxy(db, user_id: int, raw_proxy: str, *, max_active_proxies: int | Non
                 encrypt_secret(parsed.username),
                 encrypt_secret(parsed.password),
                 credential_fingerprint(parsed),
+                now,
                 now,
                 now,
                 now,
@@ -288,6 +290,7 @@ def replace_proxy(db, proxy_id: int, user_id: int, raw_proxy: str, *, now: datet
         """
         UPDATE proxies SET host=?, port=?, protocol_hint=?, username_encrypted=?, password_encrypted=?,
             credential_fingerprint=?, credential_generation=credential_generation+1,
+            credential_started_at=?,
             detected_protocol='unknown', status='pending', eligibility='pending',
             earnapp_verdict='', earnapp_reason='', earnapp_checked_at=NULL, earnapp_next_check_at=NULL,
             earnapp_claimed_until=NULL, earnapp_claim_token=NULL, egress_verified_at=NULL,
@@ -296,7 +299,8 @@ def replace_proxy(db, proxy_id: int, user_id: int, raw_proxy: str, *, now: datet
             offline_since=NULL, last_checked_at=NULL, last_success_at=NULL, next_check_at=?,
             check_claimed_until=NULL, check_claim_token=NULL, health_mode='strong', next_probe_index=0,
             last_probe_endpoint='', last_latency_ms=NULL, failure_kind='',
-            accrual_cursor_at=?, probation_started_at=?, last_error='', updated_at=?
+            accrual_cursor_at=?, probation_started_at=?, accumulated_online_seconds=0,
+            accumulated_offline_seconds=0, continuous_dead_since=NULL, last_error='', updated_at=?
         WHERE id=? AND user_id=? AND archived_at IS NULL
         """,
         (
@@ -306,6 +310,7 @@ def replace_proxy(db, proxy_id: int, user_id: int, raw_proxy: str, *, now: datet
             encrypt_secret(parsed.username),
             encrypt_secret(parsed.password),
             fingerprint,
+            current.isoformat(),
             current.isoformat(),
             current.isoformat(),
             current.isoformat(),

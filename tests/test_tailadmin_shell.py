@@ -315,7 +315,8 @@ def test_duration_header_subtitle_stays_outside_sort_link():
     template = (root / "app" / "templates" / "user_dashboard.html").read_text()
     assert (
         '<a class="table-sort" href="{{ inventory.sort_urls.online }}">Online hours '
-        '<span aria-hidden="true">↕</span></a><small class="column-subtitle">30-day months</small>' in template
+        '<span aria-hidden="true">↕</span></a><small class="column-subtitle">Earning time · 30-day months</small>'
+        in template
     )
     assert (
         '<a class="table-sort" href="{{ inventory.sort_urls.offline }}">Offline hours '

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 
 @dataclass(frozen=True)
@@ -41,13 +41,33 @@ def format_duration(seconds: int) -> str:
     return " ".join(parts) or "less than 1 minute"
 
 
-def uptime_hours(row, *, now: datetime | None = None) -> UptimeHours:
-    current = now or datetime.now(UTC)
-    online = int(row["accumulated_online_seconds"] or 0)
-    offline = int(row["accumulated_offline_seconds"] or 0)
-    if row["status"] == "online" and row["online_since"]:
-        online += max(0, int((current - _as_utc(row["online_since"])).total_seconds()))
-    elif row["status"] == "offline" and row["offline_since"]:
+def uptime_hours(
+    row,
+    *,
+    now: datetime | None = None,
+    earning_enabled: bool = True,
+    health_stale_minutes: int | None = None,
+    earning_online_seconds: int | None = None,
+) -> UptimeHours:
+    current = _as_utc(now or datetime.now(UTC))
+    online = (
+        max(0, int(earning_online_seconds))
+        if earning_enabled and earning_online_seconds is not None
+        else (max(0, int(row["accumulated_online_seconds"] or 0)) if earning_enabled else 0)
+    )
+    offline = max(0, int(row["accumulated_offline_seconds"] or 0))
+    if earning_online_seconds is None and row["status"] in {"online", "suspect"} and row["online_since"]:
+        observed_until = current
+        if health_stale_minutes is not None and not row["last_success_at"]:
+            observed_until = _as_utc(row["online_since"])
+        elif health_stale_minutes is not None:
+            observed_until = min(
+                current,
+                _as_utc(row["last_success_at"]) + timedelta(minutes=max(0, int(health_stale_minutes))),
+            )
+        if earning_enabled:
+            online += max(0, int((observed_until - _as_utc(row["online_since"])).total_seconds()))
+    elif row["status"] in {"offline", "blocked"} and row["offline_since"]:
         offline += max(0, int((current - _as_utc(row["offline_since"])).total_seconds()))
     return UptimeHours(
         round(online / 3600, 2),
@@ -57,6 +77,6 @@ def uptime_hours(row, *, now: datetime | None = None) -> UptimeHours:
     )
 
 
-def _as_utc(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value)
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+def _as_utc(value: str | datetime) -> datetime:
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value)
+    return parsed.astimezone(UTC) if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)

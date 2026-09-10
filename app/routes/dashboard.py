@@ -9,7 +9,12 @@ from flask import Blueprint, current_app, g, redirect, render_template, request,
 from app.auth import login_required
 from app.db import get_db
 from app.services.checks import checker_settings
-from app.services.earnings import balances_for_user, earnings_for_proxies, monthly_rate_for
+from app.services.earnings import (
+    balances_for_user,
+    earning_online_seconds_for_proxies,
+    earnings_for_proxies,
+    monthly_rate_for,
+)
 from app.services.uptime import uptime_hours
 
 bp = Blueprint("dashboard", __name__)
@@ -141,7 +146,14 @@ def _inventory_url_args(query: InventoryQuery, **overrides: object) -> dict[str,
     return {key: value for key, value in values.items() if value not in ("", None)}
 
 
-def _inventory_page(db, user_id: int, query: InventoryQuery) -> dict[str, object]:
+def _inventory_page(
+    db,
+    user_id: int,
+    query: InventoryQuery,
+    *,
+    now: datetime,
+    health_stale_minutes: int,
+) -> dict[str, object]:
     base_conditions = ["p.user_id=?", "p.archived_at IS NULL"]
     base_parameters: list[object] = [user_id]
     filtered_conditions, filtered_parameters = _inventory_conditions(user_id, query)
@@ -187,12 +199,40 @@ def _inventory_page(db, user_id: int, query: InventoryQuery) -> dict[str, object
         )
         filtered_conditions, filtered_parameters = _inventory_conditions(user_id, query)
 
-    order_direction = "ASC" if query.direction == "asc" else "DESC"
-    order = ", ".join(f"{column} {order_direction}" for column in INVENTORY_SORT_COLUMNS[query.sort])
-    rows = db.execute(
-        "SELECT p.* FROM proxies p WHERE " + " AND ".join(filtered_conditions) + f" ORDER BY {order} LIMIT ? OFFSET ?",
-        [*filtered_parameters, query.per_page, query.offset],
-    ).fetchall()
+    if query.sort in {"online", "offline"}:
+        candidates = db.execute(
+            "SELECT p.* FROM proxies p WHERE " + " AND ".join(filtered_conditions),
+            filtered_parameters,
+        ).fetchall()
+        if query.sort == "online":
+            durations = earning_online_seconds_for_proxies(
+                db,
+                candidates,
+                now=now,
+                health_stale_minutes=health_stale_minutes,
+            )
+
+            def duration(row):
+                return durations.get(int(row["id"]), 0)
+        else:
+
+            def duration(row):
+                return uptime_hours(row, now=now, earning_enabled=False).offline
+
+        candidates.sort(
+            key=lambda row: (duration(row), int(row["id"])),
+            reverse=query.direction == "desc",
+        )
+        rows = candidates[query.offset : query.offset + query.per_page]
+    else:
+        order_direction = "ASC" if query.direction == "asc" else "DESC"
+        order = ", ".join(f"{column} {order_direction}" for column in INVENTORY_SORT_COLUMNS[query.sort])
+        rows = db.execute(
+            "SELECT p.* FROM proxies p WHERE "
+            + " AND ".join(filtered_conditions)
+            + f" ORDER BY {order} LIMIT ? OFFSET ?",
+            [*filtered_parameters, query.per_page, query.offset],
+        ).fetchall()
 
     page_links: list[dict[str, object]] = []
     visible_pages = {1, total_pages, query.page, query.page - 1, query.page + 1}
@@ -390,8 +430,16 @@ def _render_dashboard(section: str):
     db = get_db()
     if g.user["role"] == "admin":
         return redirect(url_for("admin.dashboard"))
+    settings = checker_settings(db)
+    now = datetime.now(UTC)
     if section == "proxies":
-        inventory = _inventory_page(db, int(g.user["id"]), _inventory_query(request.args))
+        inventory = _inventory_page(
+            db,
+            int(g.user["id"]),
+            _inventory_query(request.args),
+            now=now,
+            health_stale_minutes=settings.health_stale_minutes,
+        )
     else:
         total = db.execute(
             "SELECT COUNT(*) AS count FROM proxies WHERE user_id=? AND archived_at IS NULL",
@@ -399,24 +447,36 @@ def _render_dashboard(section: str):
         ).fetchone()["count"]
         inventory = {"total_count": int(total)}
     proxies = inventory.get("rows", [])
-    settings = checker_settings(db)
-    now = datetime.now(UTC)
-    proxy_earnings = earnings_for_proxies(db, [int(proxy["id"]) for proxy in proxies])
+    proxy_ids = [int(proxy["id"]) for proxy in proxies]
+    proxy_earnings = earnings_for_proxies(db, proxy_ids)
+    earning_online_seconds = earning_online_seconds_for_proxies(
+        db,
+        proxies,
+        now=now,
+        health_stale_minutes=settings.health_stale_minutes,
+    )
     proxy_views = [
         {
             "row": proxy,
-            "uptime": uptime_hours(proxy, now=now),
+            "uptime": uptime_hours(
+                proxy,
+                now=now,
+                earning_enabled=earning["state"] in {"allow", "risk"},
+                health_stale_minutes=settings.health_stale_minutes,
+                earning_online_seconds=earning_online_seconds.get(int(proxy["id"]), 0),
+            ),
             "freshness": _freshness_view(
                 proxy,
                 now=now,
                 stale_minutes=settings.health_stale_minutes,
             ),
             "identity": identity,
-            "earning": _earning_view(proxy, identity),
+            "earning": earning,
             "earnings": proxy_earnings.get(int(proxy["id"])),
         }
         for proxy in proxies
         for identity in (_identity_view(proxy),)
+        for earning in (_earning_view(proxy, identity),)
     ]
     wallet = db.execute("SELECT * FROM wallets WHERE user_id=?", (g.user["id"],)).fetchone()
     payouts = db.execute(

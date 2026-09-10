@@ -50,6 +50,107 @@ def _parse(value: str | None) -> datetime | None:
         return None
 
 
+def _as_utc(value: datetime) -> datetime:
+    return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def earning_online_seconds_for_proxies(
+    db,
+    proxies,
+    *,
+    now: datetime | None = None,
+    health_stale_minutes: int = DEFAULT_HEALTH_STALE_MINUTES,
+) -> dict[int, int]:
+    """Project confirmed earning time without reusing operational uptime counters."""
+    rows = list(proxies)
+    ids = [int(row["id"]) for row in rows]
+    if not ids:
+        return {}
+    current = _as_utc(now or datetime.now(UTC))
+    stale = timedelta(minutes=max(0, int(health_stale_minutes)))
+    totals = {proxy_id: 0 for proxy_id in ids}
+    ledger_intervals: dict[int, list[tuple[datetime, datetime]]] = {proxy_id: [] for proxy_id in ids}
+    placeholders = ",".join("?" for _ in ids)
+    credential_starts = {
+        int(row["id"]): (_as_utc(value) if (value := _parse(row["credential_started_at"])) is not None else None)
+        for row in rows
+    }
+    ledger_rows = db.execute(
+        f"SELECT proxy_id, started_at, ended_at FROM earnings_ledger "
+        f"WHERE proxy_id IN ({placeholders}) AND bucket IN ('pending', 'available')",
+        ids,
+    ).fetchall()
+    for ledger in ledger_rows:
+        proxy_id = int(ledger["proxy_id"])
+        started = _parse(ledger["started_at"])
+        ended = _parse(ledger["ended_at"])
+        if started is None or ended is None:
+            continue
+        started = _as_utc(started)
+        ended = _as_utc(ended)
+        credential_start = credential_starts.get(proxy_id)
+        if credential_start is not None and started < credential_start:
+            continue
+        bounded_start = started
+        bounded_start = min(current, bounded_start)
+        bounded_end = min(current, ended)
+        if bounded_end <= bounded_start:
+            continue
+        if proxy_id not in totals:
+            continue
+        ledger_intervals[proxy_id].append((bounded_start, bounded_end))
+
+    latest_ledger_end: dict[int, datetime] = {}
+    for proxy_id, intervals in ledger_intervals.items():
+        merged: list[list[datetime]] = []
+        for started, ended in sorted(intervals):
+            if merged and started <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], ended)
+            else:
+                merged.append([started, ended])
+        totals[proxy_id] = sum(int((ended - started).total_seconds()) for started, ended in merged)
+        if merged:
+            latest_ledger_end[proxy_id] = merged[-1][1]
+
+    for row in rows:
+        proxy_id = int(row["id"])
+        if str(row["eligibility"] or "").strip().lower() not in EARNING_ELIGIBILITIES:
+            totals[proxy_id] = 0
+            continue
+        if row["duplicate_of"] is not None:
+            totals[proxy_id] = 0
+            continue
+        source = str(row["egress_attestation_source"] or "").strip().lower()
+        if source not in {"https_quorum", "earnapp_tls"} or not str(row["exit_ip"] or "").strip():
+            totals[proxy_id] = 0
+            continue
+        if row["status"] not in {"online", "suspect"}:
+            continue
+        cursor = _parse(row["accrual_cursor_at"])
+        last_success = _parse(row["last_success_at"])
+        online_since = _parse(row["online_since"])
+        if cursor is None or last_success is None or online_since is None:
+            continue
+        cursor = _as_utc(cursor)
+        last_success = _as_utc(last_success)
+        online_since = _as_utc(online_since)
+        current_end = min(current, last_success + stale)
+        ledger_end = latest_ledger_end.get(proxy_id)
+        probation = _parse(row["probation_started_at"])
+        if probation is not None:
+            probation = _as_utc(probation)
+        starts = [online_since, cursor]
+        if probation is not None:
+            starts.append(probation)
+        current_start = max(
+            *starts,
+            ledger_end or cursor,
+        )
+        if current_end > current_start:
+            totals[proxy_id] += int((current_end - current_start).total_seconds())
+    return totals
+
+
 def _health_stale_minutes(db) -> int:
     try:
         value = int(get_setting(db, "health_stale_minutes", str(DEFAULT_HEALTH_STALE_MINUTES)))

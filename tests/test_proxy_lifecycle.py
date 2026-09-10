@@ -56,6 +56,31 @@ def test_replace_resets_fast_health_observation_state(app):
     assert row["failure_kind"] == ""
 
 
+def test_replace_resets_operational_uptime_counters(app):
+    now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "replace-uptime@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "old-uptime.example:9000:u:p")
+        db.execute(
+            "UPDATE proxies SET accumulated_online_seconds=?, accumulated_offline_seconds=?, "
+            "continuous_dead_since=? WHERE id=?",
+            (12 * 3600, 3 * 3600, (now - timedelta(hours=3)).isoformat(), proxy_id),
+        )
+        db.commit()
+
+        replace_proxy(db, proxy_id, user_id, "new-uptime.example:9001:u:new", now=now)
+        row = db.execute(
+            "SELECT accumulated_online_seconds, accumulated_offline_seconds, continuous_dead_since "
+            "FROM proxies WHERE id=?",
+            (proxy_id,),
+        ).fetchone()
+
+    assert row["accumulated_online_seconds"] == 0
+    assert row["accumulated_offline_seconds"] == 0
+    assert row["continuous_dead_since"] is None
+
+
 def test_archive_keeps_history_but_removes_operational_record(app):
     with app.app_context():
         db = get_db()

@@ -430,6 +430,180 @@ def test_three_confirmed_failures_mark_proxy_offline(app):
     assert row["offline_since"] is not None
 
 
+def test_offline_transition_caps_online_counter_at_last_success_stale_boundary(app):
+    start = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "stale-counter@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "stale-counter.example:9000:u:p")
+        apply_health_result(
+            db,
+            proxy_id,
+            {"status": "live", "protocol": "socks5", "exit_ip": "198.51.100.41"},
+            now=start,
+        )
+        for offset in (1, 2, 5):
+            apply_health_result(db, proxy_id, {"status": "dead"}, now=start + timedelta(hours=offset))
+        row = db.execute(
+            "SELECT status, accumulated_online_seconds FROM proxies WHERE id=?",
+            (proxy_id,),
+        ).fetchone()
+
+    assert row["status"] == "offline"
+    assert row["accumulated_online_seconds"] == 2 * 60 * 60
+
+
+def test_blocked_transition_closes_online_interval_before_recovery(app):
+    start = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "blocked-counter@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "blocked-counter.example:9000:u:p")
+        apply_health_result(
+            db,
+            proxy_id,
+            {"status": "live", "protocol": "socks5", "exit_ip": "198.51.100.42"},
+            now=start,
+        )
+        apply_health_result(
+            db, proxy_id, {"status": "blocked", "error": "captive portal"}, now=start + timedelta(hours=3)
+        )
+        blocked = db.execute(
+            "SELECT status, online_since, offline_since, accumulated_online_seconds FROM proxies WHERE id=?",
+            (proxy_id,),
+        ).fetchone()
+        apply_health_result(
+            db,
+            proxy_id,
+            {"status": "live", "protocol": "socks5", "exit_ip": "198.51.100.42"},
+            now=start + timedelta(hours=4),
+        )
+        recovered = db.execute(
+            "SELECT online_since, accumulated_offline_seconds, probation_started_at, accrual_cursor_at "
+            "FROM proxies WHERE id=?",
+            (proxy_id,),
+        ).fetchone()
+
+    assert blocked["status"] == "blocked"
+    assert blocked["online_since"] is None
+    assert blocked["offline_since"] == (start + timedelta(hours=3)).isoformat()
+    assert blocked["accumulated_online_seconds"] == 2 * 60 * 60
+    assert recovered["online_since"] == (start + timedelta(hours=4)).isoformat()
+    assert recovered["accumulated_offline_seconds"] == 60 * 60
+    assert recovered["probation_started_at"] == (start + timedelta(hours=4)).isoformat()
+    assert recovered["accrual_cursor_at"] == (start + timedelta(hours=4)).isoformat()
+
+
+def test_offline_transition_does_not_count_unobserved_online_interval(app):
+    start = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "unobserved-offline-counter@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "unobserved-offline-counter.example:9000:u:p")
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', online_since=?, last_success_at=NULL WHERE id=?",
+            (start.isoformat(), proxy_id),
+        )
+        db.commit()
+        for offset in (1, 2, 3):
+            apply_health_result(db, proxy_id, {"status": "dead"}, now=start + timedelta(hours=offset))
+        row = db.execute(
+            "SELECT status, accumulated_online_seconds FROM proxies WHERE id=?",
+            (proxy_id,),
+        ).fetchone()
+
+    assert row["status"] == "offline"
+    assert row["accumulated_online_seconds"] == 0
+
+
+def test_blocked_transition_does_not_count_unobserved_online_interval(app):
+    start = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "unobserved-blocked-counter@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "unobserved-blocked-counter.example:9000:u:p")
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', online_since=?, last_success_at=NULL WHERE id=?",
+            (start.isoformat(), proxy_id),
+        )
+        db.commit()
+        apply_health_result(
+            db, proxy_id, {"status": "blocked", "error": "captive portal"}, now=start + timedelta(hours=3)
+        )
+        row = db.execute(
+            "SELECT status, accumulated_online_seconds FROM proxies WHERE id=?",
+            (proxy_id,),
+        ).fetchone()
+
+    assert row["status"] == "blocked"
+    assert row["accumulated_online_seconds"] == 0
+
+
+def test_first_success_restarts_an_unobserved_online_interval(app):
+    start = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "unobserved-recovery-counter@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "unobserved-recovery-counter.example:9000:u:p")
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', online_since=?, last_success_at=NULL WHERE id=?",
+            (start.isoformat(), proxy_id),
+        )
+        db.commit()
+        recovered_at = start + timedelta(hours=5)
+        apply_health_result(
+            db,
+            proxy_id,
+            {"status": "live", "protocol": "socks5", "exit_ip": "198.51.100.43"},
+            now=recovered_at,
+        )
+        row = db.execute(
+            "SELECT online_since, accumulated_online_seconds FROM proxies WHERE id=?",
+            (proxy_id,),
+        ).fetchone()
+
+    assert row["online_since"] == recovered_at.isoformat()
+    assert row["accumulated_online_seconds"] == 0
+
+
+def test_blocked_proxy_keeps_offline_interval_through_followup_failures(app):
+    start = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "blocked-followup-failures@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "blocked-followup-failures.example:9000:u:p")
+        apply_health_result(db, proxy_id, {"status": "blocked", "error": "captive portal"}, now=start)
+        apply_health_result(db, proxy_id, {"status": "dead", "failure_kind": "proxy"}, now=start + timedelta(hours=1))
+        apply_health_result(db, proxy_id, {"status": "dead", "failure_kind": "proxy"}, now=start + timedelta(hours=2))
+        still_blocked = db.execute(
+            "SELECT status, offline_since FROM proxies WHERE id=?",
+            (proxy_id,),
+        ).fetchone()
+        apply_health_result(db, proxy_id, {"status": "dead", "failure_kind": "proxy"}, now=start + timedelta(hours=3))
+        before_recovery = db.execute(
+            "SELECT status, offline_since, continuous_dead_since FROM proxies WHERE id=?",
+            (proxy_id,),
+        ).fetchone()
+        apply_health_result(
+            db,
+            proxy_id,
+            {"status": "live", "protocol": "socks5", "exit_ip": "198.51.100.44"},
+            now=start + timedelta(hours=4),
+        )
+        recovered = db.execute(
+            "SELECT status, accumulated_offline_seconds FROM proxies WHERE id=?",
+            (proxy_id,),
+        ).fetchone()
+
+    assert still_blocked["status"] == "blocked"
+    assert still_blocked["offline_since"] == start.isoformat()
+    assert before_recovery["status"] == "offline"
+    assert before_recovery["offline_since"] == start.isoformat()
+    assert before_recovery["continuous_dead_since"] == (start + timedelta(hours=3)).isoformat()
+    assert recovered["status"] == "online"
+    assert recovered["accumulated_offline_seconds"] == 4 * 60 * 60
+
+
 def test_offline_transition_records_final_online_earning_interval(app):
     start = datetime(2026, 1, 1, tzinfo=UTC)
     with app.app_context():
