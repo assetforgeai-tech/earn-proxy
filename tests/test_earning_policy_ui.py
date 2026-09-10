@@ -88,6 +88,14 @@ def test_proxy_earnings_aggregate_returns_pending_and_available_totals(app):
     assert earnings.total_micro_usd == 500_000
 
 
+def test_admin_ui_uses_high_quality_label_without_earnapp_branding(client):
+    login_admin(client)
+    page = client.get("/admin").get_data(as_text=True)
+
+    assert "High quality" in page
+    assert "earnapp" not in page.lower()
+
+
 def test_user_proxy_table_shows_rate_pending_explanation_and_allow_first(app, client):
     user_id = _activate_user(app, client, "earning-policy-ui@example.com")
     with app.app_context():
@@ -113,8 +121,12 @@ def test_user_proxy_table_shows_rate_pending_explanation_and_allow_first(app, cl
     assert "$0.50/month" in page
     assert "$0.00/month" in page
     assert "$0.125000" in page
-    assert "Pending means the proxy is waiting for health, egress, or EarnApp qualification." in page
+    assert "High quality" in page
+    assert "earnapp" not in page.lower()
     assert "sort=eligibility" in page
     assert "direction=asc" in page
     assert page.index("allow-policy.example:9002") < page.index("risk-policy.example:9001")
     assert page.index("risk-policy.example:9001") < page.index("pending-policy.example:9000")
+
+    for path in ("/dashboard", "/dashboard/earnings", "/dashboard/wallet"):
+        assert "earnapp" not in client.get(path).get_data(as_text=True).lower()

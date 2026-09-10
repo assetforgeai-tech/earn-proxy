@@ -375,7 +375,7 @@ def _earning_view(proxy, identity: dict[str, str]) -> dict[str, object]:
         return {
             "state": "pending",
             "label": "Pending",
-            "detail": "Pending means the proxy is waiting for health, egress, or EarnApp qualification.",
+            "detail": "Pending means the proxy is waiting for health, egress, or quality assessment.",
             "rate_micro_usd": 0,
         }
     eligibility = str(proxy["eligibility"] or "pending").strip().lower()
@@ -385,7 +385,7 @@ def _earning_view(proxy, identity: dict[str, str]) -> dict[str, object]:
         "state": eligibility,
         "label": eligibility.capitalize(),
         "detail": (
-            "Pending means the proxy is waiting for health, egress, or EarnApp qualification."
+            "Pending means the proxy is waiting for health, egress, or quality assessment."
             if eligibility == "pending"
             else ""
         ),

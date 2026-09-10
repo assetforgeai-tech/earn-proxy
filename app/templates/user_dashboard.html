@@ -71,7 +71,7 @@
   <div class="policy-grid">
     <article><strong>Allow · $1.00/month US</strong><span>Non-US Allow earns $0.50/month while online.</span></article>
     <article><strong>Risk · $0.50/month</strong><span>Usable proxy with a lower rate while online.</span></article>
-    <article><strong>Pending · $0.00/month</strong><span>Waiting for health, trusted egress, or EarnApp qualification.</span></article>
+    <article><strong>Pending · $0.00/month</strong><span>Waiting for health, trusted egress, or quality assessment.</span></article>
     <article><strong>Available</strong><span>Can be requested once it clears the seven-day probation period.</span></article>
     <article><strong>Minimum payout</strong><span>$10.00 gross, processed manually within 48 hours.</span></article>
   </div>
@@ -194,7 +194,7 @@
   <div class="panel-head">
     <div>
       <h2>Proxy status</h2>
-      <p class="muted">Health sweep target: {{ health_interval_minutes }} minutes · Allow US earns $1.00/month; Allow non-US and Risk earn $0.50/month while online. Pending means the proxy is waiting for health, egress, or EarnApp qualification. Duplicate egress does not earn or enter API distribution. Time uses 30-day months.</p>
+      <p class="muted">Health sweep target: {{ health_interval_minutes }} minutes · Allow US earns $1.00/month; Allow non-US and Risk earn $0.50/month while online. Pending means the proxy is waiting for health, egress, or quality assessment. Duplicate egress does not earn or enter API distribution. Time uses 30-day months.</p>
     </div>
     <span class="muted">{{ inventory.filtered_count }} matching · {{ inventory.total_count }} total</span>
   </div>
@@ -213,8 +213,8 @@
       </div>
     </div>
     <div class="inventory-count-group">
-      <span class="inventory-count-label">EarnApp classification</span>
-      <small class="field-hint">Allow/Risk is the provider result; earning still requires a canonical egress.</small>
+      <span class="inventory-count-label">High quality</span>
+      <small class="field-hint">Allow/Risk is the private quality result; earning still requires a canonical egress.</small>
       <div class="inventory-count-list">
         {% for value in ('allow', 'risk', 'pending') %}<a class="inventory-count {{ value }} {% if inventory.query.eligibility == value %}is-active{% endif %}" href="{{ inventory.filter_url(eligibility=value) }}"><span>{{ value|capitalize }}</span><strong>{{ inventory.eligibility_counts.get(value, 0) }}</strong></a>{% endfor %}
       </div>
