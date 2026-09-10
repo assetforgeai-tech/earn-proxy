@@ -49,7 +49,7 @@
 **Files:**
 - No additional application files unless verification finds a direct regression.
 
-- [ ] Run `pytest -q`.
-- [ ] Run `ruff check app tests` and `python -m compileall app`.
-- [ ] Review diff and confirm no CashPilot files changed.
-- [ ] Commit, push, deploy with `deploy/release.sh`, and smoke-test the production dashboard.
+- [x] Run `pytest -q`.
+- [x] Run `ruff check app tests` and `python -m compileall app`.
+- [x] Review diff and confirm no CashPilot files changed.
+- [x] Commit, push, deploy with `deploy/release.sh`, and smoke-test the production dashboard.
