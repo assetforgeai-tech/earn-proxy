@@ -250,7 +250,11 @@ def _inventory_page(
         last_added = page_number
 
     def filter_url(**overrides: object) -> str:
-        return url_for("dashboard.proxies", **_inventory_url_args(query, page=1, **overrides))
+        toggled = dict(overrides)
+        for key, value in overrides.items():
+            if value and getattr(query, key, None) == value:
+                toggled[key] = ""
+        return url_for("dashboard.proxies", **_inventory_url_args(query, page=1, **toggled))
 
     sort_urls = {}
     for key in INVENTORY_SORT_COLUMNS:

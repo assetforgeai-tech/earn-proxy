@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
+from html import unescape
+from urllib.parse import parse_qs, urlparse
 
 from conftest import login, login_admin, register
 
@@ -151,6 +154,39 @@ def test_admin_proxy_inventory_supports_composable_filters_and_freshness(app, cl
     assert 'name="endpoint"' in page
     assert 'name="freshness"' in page
     assert "Clear filters" in page
+
+
+def test_admin_proxy_inventory_active_quick_filters_toggle_off_individually(app, client):
+    _seed_admin_inventory(app)
+    login_admin(client)
+
+    page = client.get(
+        "/admin/proxies?q=example&status=online&protocol=socks5&eligibility=allow&identity=duplicate&"
+        "country=US&freshness=due&per_page=25"
+    ).get_data(as_text=True)
+    active_links = {
+        label: parse_qs(urlparse(unescape(href)).query)
+        for href, label in re.findall(
+            r'<a class="inventory-count[^\"]*is-active[^\"]*" href="([^\"]+)"><span>([^<]+)</span>',
+            page,
+        )
+    }
+
+    expected_filters = {
+        "Online": "status",
+        "SOCKS5": "protocol",
+        "Allow": "eligibility",
+        "Duplicate": "identity",
+    }
+    for label, removed_filter in expected_filters.items():
+        assert removed_filter not in active_links[label]
+        assert active_links[label]["q"] == ["example"]
+        assert active_links[label]["country"] == ["US"]
+        assert active_links[label]["freshness"] == ["due"]
+        assert active_links[label]["page"] == ["1"]
+        assert all(
+            name in active_links[label] for name in {"status", "protocol", "eligibility", "identity"} - {removed_filter}
+        )
 
 
 def test_admin_proxy_inventory_searches_owner_exit_ip_and_has_archived_scope(app, client):

@@ -26,6 +26,11 @@ class ProxyImportLimitExceeded(ValueError):
 MAX_BULK_IMPORT_ISSUES = 100
 
 
+def _as_utc(value: str | datetime) -> datetime:
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value)
+    return parsed.astimezone(UTC) if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 @dataclass(frozen=True)
 class BulkImportIssue:
     line: int
@@ -347,11 +352,11 @@ def archive_proxy(db, proxy_id: int, user_id: int, *, now: datetime | None = Non
 
 
 def promote_duplicate_if_due(db, canonical_id: int, *, now: datetime | None = None) -> int | None:
-    current = now or datetime.now(UTC)
+    current = _as_utc(now or datetime.now(UTC))
     canonical = db.execute("SELECT * FROM proxies WHERE id=?", (canonical_id,)).fetchone()
     if canonical is None or canonical["status"] not in {"offline", "archived"} or not canonical["offline_since"]:
         return None
-    offline_since = datetime.fromisoformat(canonical["offline_since"])
+    offline_since = _as_utc(canonical["offline_since"])
     if canonical["status"] != "archived" and current - offline_since < timedelta(hours=24):
         return None
     candidate = db.execute(
@@ -455,11 +460,11 @@ def _canonicalize_exit_group(
         ).fetchall()
     if not rows:
         return
-    cutoff = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
+    cutoff = datetime.now(UTC) - timedelta(hours=24)
     candidates = [
         row
         for row in rows
-        if not (row["status"] == "offline" and row["offline_since"] and row["offline_since"] <= cutoff)
+        if not (row["status"] == "offline" and row["offline_since"] and _as_utc(row["offline_since"]) <= cutoff)
     ]
     candidates = candidates or list(rows)
     # Before every member has a verified timestamp, creation order prevents

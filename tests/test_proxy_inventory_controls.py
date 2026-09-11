@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
+from html import unescape
+from urllib.parse import parse_qs, urlparse
 
 from conftest import login, login_admin, register
 
@@ -68,6 +71,36 @@ def test_proxy_inventory_search_and_quick_filters_are_composable(app, client):
     assert 'name="protocol"' in page
     assert 'name="eligibility"' in page
     assert "Clear filters" in page
+
+
+def test_proxy_inventory_active_quick_filters_toggle_off_individually(app, client):
+    user_id = _activate_user(app, client, "inventory-filter-toggle@example.com")
+    _seed_inventory(app, user_id)
+
+    page = client.get(
+        "/dashboard/proxies?q=node&status=online&protocol=socks5&eligibility=allow&identity=awaiting&per_page=10"
+    ).get_data(as_text=True)
+    active_links = {
+        label: parse_qs(urlparse(unescape(href)).query)
+        for href, label in re.findall(
+            r'<a class="inventory-count[^\"]*is-active[^\"]*" href="([^\"]+)"><span>([^<]+)</span>',
+            page,
+        )
+    }
+
+    expected_filters = {
+        "Online": "status",
+        "SOCKS5": "protocol",
+        "Allow": "eligibility",
+        "Awaiting probe": "identity",
+    }
+    for label, removed_filter in expected_filters.items():
+        assert removed_filter not in active_links[label]
+        assert active_links[label]["q"] == ["node"]
+        assert active_links[label]["page"] == ["1"]
+        assert all(
+            name in active_links[label] for name in {"status", "protocol", "eligibility", "identity"} - {removed_filter}
+        )
 
 
 def test_proxy_inventory_normalizes_invalid_controls_without_server_error(app, client):

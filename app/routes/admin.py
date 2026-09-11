@@ -362,7 +362,11 @@ def _admin_proxy_page(db, args) -> dict[str, object]:
         return _admin_proxy_url(query, **overrides)
 
     def filter_url(**overrides: object) -> str:
-        return route_url(page=1, **overrides)
+        toggled = dict(overrides)
+        for key, value in overrides.items():
+            if value and getattr(query, key, None) == value:
+                toggled[key] = ""
+        return route_url(page=1, **toggled)
 
     sort_urls = {
         key: route_url(
