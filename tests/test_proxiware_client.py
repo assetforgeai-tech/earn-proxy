@@ -95,6 +95,8 @@ def test_api_key_file_accepts_raw_or_assignment_and_rejects_unsafe_values(tmp_pa
     raw.write_text("  key-value-123  \n", encoding="utf-8")
     assignment = tmp_path / "assignment.env"
     assignment.write_text("PROXIWARE_API_KEY=key-value-456\n", encoding="utf-8")
+    hyphen_assignment = tmp_path / "hyphen-assignment.env"
+    hyphen_assignment.write_text("PROXIWARE-API-KEY=key-value-789\n", encoding="utf-8")
     multiline = tmp_path / "multiline.key"
     multiline.write_text("first\nsecond\n", encoding="utf-8")
     oversized = tmp_path / "oversized.key"
@@ -102,6 +104,7 @@ def test_api_key_file_accepts_raw_or_assignment_and_rejects_unsafe_values(tmp_pa
 
     assert load_api_key_file(raw) == "key-value-123"
     assert load_api_key_file(assignment) == "key-value-456"
+    assert load_api_key_file(hyphen_assignment) == "key-value-789"
     with pytest.raises(ValueError):
         load_api_key_file(multiline)
     with pytest.raises(ValueError):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -179,7 +180,7 @@ def load_api_key_file(path: str | Path) -> str:
     value = raw.strip()
     if len(value) > 512 or not value or "\n" in value or "\r" in value:
         raise ValueError("Proxiware API key file must contain one short line")
-    if value.startswith("PROXIWARE_API_KEY="):
+    if re.match(r"^PROXIWARE(?:_|-)API(?:_|-)KEY=", value, flags=re.IGNORECASE):
         value = value.split("=", 1)[1].strip()
     if not value or "\n" in value or "\r" in value or len(value) > 512:
         raise ValueError("Proxiware API key file must contain one API key")
