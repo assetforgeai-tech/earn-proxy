@@ -77,6 +77,8 @@ def test_release_installer_manages_proxiware_workers_and_restores_previous_servi
         "earn-proxy-proxiware",
         "earn-proxy-proxiware-qualification",
         "earn-proxy-proxiware-swap",
+        "earn-proxy-proxiware-chrome",
+        "earn-proxy-proxiware-browser",
     ):
         assert service in installer
     assert 'systemctl enable "${services[@]}"' in installer
@@ -89,6 +91,39 @@ def test_release_installer_manages_proxiware_workers_and_restores_previous_servi
     assert 'systemctl restart "${previous_services[@]}"' in installer
 
 
+def test_browser_worker_is_isolated_and_mutation_is_disabled_by_default():
+    unit = (ROOT / "deploy" / "earn-proxy-proxiware-browser.service").read_text()
+    chrome_unit = (ROOT / "deploy" / "earn-proxy-proxiware-chrome.service").read_text()
+    env = (ROOT / ".env.example").read_text()
+
+    assert "User=earnproxy-browser" in unit
+    assert "NoNewPrivileges=true" in unit
+    assert "ProtectSystem=strict" in unit
+    assert "PrivateDevices=true" in unit
+    assert "earn-proxy-proxiware-chrome.service" in unit
+    assert "User=earnproxy-chrome" in chrome_unit
+    assert "Group=earnproxy-chrome" in chrome_unit
+    assert "EnvironmentFile=/etc/earn-proxy.env" not in chrome_unit
+    assert "EnvironmentFile=-/etc/earn-proxy-browser.env" in chrome_unit
+    assert "Environment=EARN_PROXY_PROXIWARE_CHROME_ENABLED=0" in chrome_unit
+    assert "Environment=EARN_PROXY_PROXIWARE_CDP_URL=http://127.0.0.1:9222" in chrome_unit
+    assert chrome_unit.index("Environment=EARN_PROXY_PROXIWARE_CHROME_ENABLED=0") < chrome_unit.index(
+        "EnvironmentFile=-/etc/earn-proxy-browser.env"
+    )
+    assert "NoNewPrivileges=true" in chrome_unit
+    assert "ProtectSystem=strict" in chrome_unit
+    assert "PrivateDevices=true" in chrome_unit
+    assert "app.proxiware_chrome_service" in chrome_unit
+    assert "EARN_PROXY_PROXIWARE_CDP_URL=http://127.0.0.1:9222" in env
+    assert "EARN_PROXY_PROXIWARE_CHROME_BINARY=/usr/bin/google-chrome" in env
+    assert "EARN_PROXY_PROXIWARE_CHROME_PROFILE_DIR=/run/earn-proxy-browser/profile" in env
+    assert "RuntimeDirectory=earn-proxy-browser" in chrome_unit
+    assert "UMask=0077" in chrome_unit
+    assert "RuntimeDirectory=earn-proxy-browser" in chrome_unit
+    assert "ReadWritePaths=/run/earn-proxy-browser" in chrome_unit
+    assert "EARN_PROXY_PROXIWARE_BROWSER_ALLOW_MUTATION=0" in env
+
+
 def test_release_preflight_rejects_a_venv_created_for_another_release(tmp_path, monkeypatch):
     from deploy.release_preflight import validate_runtime_prefix
 
@@ -98,3 +133,75 @@ def test_release_preflight_rejects_a_venv_created_for_another_release(tmp_path, 
     errors = validate_runtime_prefix(release_dir)
 
     assert errors == [f"virtualenv prefix is not {release_dir / '.venv'}"]
+
+
+def test_release_preflight_requires_browser_runtime_dependency():
+    preflight = (ROOT / "deploy" / "release_preflight.py").read_text()
+
+    assert '"playwright"' in preflight
+
+
+def test_release_preflight_rejects_browser_without_isolated_chrome():
+    from deploy.release_preflight import validate_browser_runtime
+
+    errors = validate_browser_runtime(
+        {
+            "EARN_PROXY_PROXIWARE_BROWSER_ENABLED": "1",
+            "EARN_PROXY_PROXIWARE_CHROME_ENABLED": "0",
+        }
+    )
+
+    assert errors == ["enabled Proxiware browser requires isolated Chrome"]
+
+
+def test_release_installer_does_not_persist_browser_profile():
+    installer = (ROOT / "deploy" / "release.sh").read_text()
+
+    assert "--home-dir /nonexistent --no-create-home" in installer
+    assert "install -d -o earnproxy-browser -g earnproxy -m 0750 /var/lib/earn-proxy-browser" not in installer
+    assert "useradd --system --gid earnproxy-chrome" in installer
+
+
+def test_release_preflight_loads_optional_browser_environment():
+    installer = (ROOT / "deploy" / "release.sh").read_text()
+
+    assert "EnvironmentFile=-/etc/earn-proxy-browser.env" in installer
+
+
+def test_release_preflight_validates_enabled_chrome_runtime(tmp_path, monkeypatch):
+    from deploy.release_preflight import validate_browser_runtime
+
+    binary = tmp_path / "chrome"
+    binary.write_text("")
+    monkeypatch.setattr("deploy.release_preflight.os.access", lambda _path, _mode: True)
+    env = {
+        "EARN_PROXY_PROXIWARE_BROWSER_ENABLED": "1",
+        "EARN_PROXY_PROXIWARE_CHROME_ENABLED": "1",
+        "EARN_PROXY_PROXIWARE_CHROME_BINARY": str(binary),
+        "EARN_PROXY_PROXIWARE_CDP_URL": "http://127.0.0.1:9222",
+        "EARN_PROXY_PROXIWARE_CHROME_PROFILE_ROOT": "/run/earn-proxy-browser",
+        "EARN_PROXY_PROXIWARE_CHROME_PROFILE_DIR": "/run/earn-proxy-browser/profile",
+    }
+
+    assert validate_browser_runtime(env) == []
+
+
+def test_release_preflight_rejects_public_cdp_and_persistent_profile(tmp_path, monkeypatch):
+    from deploy.release_preflight import validate_browser_runtime
+
+    binary = tmp_path / "chrome"
+    binary.write_text("")
+    monkeypatch.setattr("deploy.release_preflight.os.access", lambda _path, _mode: True)
+    env = {
+        "EARN_PROXY_PROXIWARE_BROWSER_ENABLED": "1",
+        "EARN_PROXY_PROXIWARE_CHROME_ENABLED": "1",
+        "EARN_PROXY_PROXIWARE_CHROME_BINARY": str(binary),
+        "EARN_PROXY_PROXIWARE_CDP_URL": "http://0.0.0.0:9222",
+        "EARN_PROXY_PROXIWARE_CHROME_PROFILE_ROOT": "/var/lib/earn-proxy-browser",
+        "EARN_PROXY_PROXIWARE_CHROME_PROFILE_DIR": "/var/lib/earn-proxy-browser/profile",
+    }
+
+    errors = validate_browser_runtime(env)
+
+    assert "Proxiware CDP endpoint must be loopback HTTP with an explicit port" in errors
+    assert "Proxiware Chrome profile root must be under /run" in errors

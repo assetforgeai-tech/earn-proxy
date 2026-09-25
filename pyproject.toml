@@ -15,6 +15,7 @@ dependencies = [
   "gunicorn>=23,<24; platform_system != 'Windows'",
   "requests[socks]>=2.32,<3",
   "urllib3>=2.2,<3",
+  "playwright>=1.50,<2",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +32,8 @@ earn-proxy-payout-verifier = "app.payout_verifier_service:main"
 earn-proxy-proxiware-sync = "app.proxiware_sync_service:main"
 earn-proxy-proxiware-swap = "app.proxiware_swap_service:main"
 earn-proxy-proxiware-qualification = "app.services.proxiware_qualification_service:main"
+earn-proxy-proxiware-browser = "app.proxiware_browser_service:main"
+earn-proxy-proxiware-chrome = "app.proxiware_chrome_service:main"
 
 [tool.setuptools.packages.find]
 include = ["app*"]

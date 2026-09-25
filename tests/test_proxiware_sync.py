@@ -18,6 +18,13 @@ from app.services.proxiware import (
     request_sync_cancel,
     sync_proxiware_inventory,
 )
+from app.services.proxiware_swap import (
+    claim_next_swap,
+    mark_provider_applied,
+    queue_eligible_swaps,
+    revalidate_swap_job,
+)
+from app.services.settings import set_setting
 
 
 class FakeClient:
@@ -93,6 +100,66 @@ def test_first_sync_persists_subscription_assignment_and_run(app):
     assert assignment["country"] == "US"
     assert run["status"] == "success"
     assert run["added_count"] == 2
+
+
+def test_official_sync_runs_read_only_swap_reconciliation_after_inventory_commit(app, monkeypatch):
+    mutation_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    reconciled = []
+    monkeypatch.setattr(
+        "app.services.proxiware.reconcile_provider_applied_swaps",
+        lambda db, **kwargs: reconciled.append((db.in_transaction, kwargs)) or {"pending": 1},
+        raising=False,
+    )
+
+    class ReplacementClient(FakeClient):
+        def list_subscription_proxies(self, subscription_id):
+            return [
+                {
+                    "id": 101,
+                    "host": "replacement.example",
+                    "port": 41001,
+                    "username": "replacement-user",
+                    "password": "replacement-password",
+                    "protocol": "socks5",
+                }
+            ]
+
+    with app.app_context():
+        db = get_db()
+        sync_proxiware_inventory(db, _client(), now=mutation_at)
+        reconciled.clear()
+        db.execute(
+            "UPDATE provider_assignments SET qualification='risk', provider_eligible=1, live_status='live', "
+            "dashboard_assignment_id='dashboard-old', dashboard_eligible=1, dashboard_connections=1, "
+            "dashboard_observed_at=?, dashboard_source='provider_dashboard' WHERE external_id='100'",
+            (mutation_at.isoformat(),),
+        )
+        db.commit()
+        set_setting(db, "proxiware_auto_swap", "1")
+        assert queue_eligible_swaps(db, now=mutation_at) == 1
+        job = claim_next_swap(db, now=mutation_at)
+        revalidate_swap_job(db, job["id"], now=mutation_at, claim_token=job["claim_token"], enter_mutation=True)
+        mark_provider_applied(
+            db,
+            job["id"],
+            old_assignment_external_id="100",
+            new_assignment_external_id="101",
+            applied_at=mutation_at,
+            claim_token=job["claim_token"],
+        )
+
+        sync_proxiware_inventory(
+            db,
+            ReplacementClient(_client().subscriptions, {}),
+            now=mutation_at + timedelta(minutes=1),
+        )
+        replacement = db.execute(
+            "SELECT last_seen_at,username_encrypted FROM provider_assignments WHERE external_id='101'"
+        ).fetchone()
+
+    assert reconciled == [(False, {"now": mutation_at + timedelta(minutes=1)})]
+    assert replacement["last_seen_at"] == (mutation_at + timedelta(minutes=1)).isoformat()
+    assert replacement["username_encrypted"]
 
 
 def test_sync_accepts_provider_string_payload_after_client_normalization(app):

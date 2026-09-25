@@ -9,7 +9,7 @@ import secrets
 import signal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
-from threading import Event
+from threading import Event, Thread
 from typing import Any, Callable
 
 from app import create_app
@@ -64,6 +64,7 @@ class ProxiwareQualificationRunner:
         interval_seconds: int = DEFAULT_INTERVAL_SECONDS,
         claim_seconds: int = DEFAULT_CLAIM_SECONDS,
         check_interval_seconds: int | None = None,
+        heartbeat_interval_seconds: float | None = None,
     ) -> None:
         self.app = app or create_app()
         self.probe = probe or _default_probe
@@ -72,6 +73,10 @@ class ProxiwareQualificationRunner:
         self.interval_seconds = max(5, int(interval_seconds))
         self.claim_seconds = max(60, int(claim_seconds))
         self.check_interval_seconds = max(60, int(check_interval_seconds or interval_seconds))
+        default_heartbeat = min(60.0, max(1.0, self.interval_seconds / 4))
+        self.heartbeat_interval_seconds = max(
+            0.05, float(heartbeat_interval_seconds if heartbeat_interval_seconds is not None else default_heartbeat)
+        )
         self._stop = Event()
 
     @property
@@ -87,11 +92,28 @@ class ProxiwareQualificationRunner:
         remaining = max(0.0, float(seconds))
         while remaining > 0 and not self.stopped:
             with self.app.app_context():
-                record_worker_heartbeat(get_db(), "qualification_worker", "sleeping")
+                record_worker_heartbeat(
+                    get_db(),
+                    "qualification_worker",
+                    "sleeping",
+                    next_wake_at=_utc_now() + timedelta(seconds=remaining),
+                )
             step = min(60.0, remaining)
             if self._stop.wait(step):
                 break
             remaining -= step
+
+    def _active_heartbeat(self, stop: Event) -> None:
+        """Keep the worker observable while provider probes are in flight."""
+
+        while not stop.wait(self.heartbeat_interval_seconds):
+            if self.stopped:
+                return
+            try:
+                with self.app.app_context():
+                    record_worker_heartbeat(get_db(), "qualification_worker", "running")
+            except Exception:  # noqa: BLE001 - heartbeat must not kill probe workers
+                logger.warning("qualification heartbeat update failed")
 
     def _settings(self, db) -> tuple[int, int]:
         concurrency = self.concurrency
@@ -118,11 +140,12 @@ class ProxiwareQualificationRunner:
                 "SELECT id FROM provider_assignments "
                 "WHERE provider='proxiware' AND missing_at IS NULL "
                 "AND status IN ('active','current') "
+                "AND (replacement_ready_at IS NULL OR replacement_ready_at<=?) "
                 "AND (qualification_next_check_at IS NULL OR qualification_next_check_at<=? "
                 "OR qualification_claimed_until IS NOT NULL AND qualification_claimed_until<=?) "
                 "AND (qualification_claimed_until IS NULL OR qualification_claimed_until<=?) "
                 "ORDER BY COALESCE(qualification_next_check_at, created_at), id LIMIT ?",
-                (timestamp, timestamp, timestamp, max(1, int(limit))),
+                (timestamp, timestamp, timestamp, timestamp, max(1, int(limit))),
             ).fetchall()
             if rows:
                 db.executemany(
@@ -148,7 +171,18 @@ class ProxiwareQualificationRunner:
                     claim_token=token,
                     check_interval_seconds=interval_seconds,
                 )
-                return {"status": "checked", "assignment_id": assignment_id, "qualification": result.qualification}
+                outcome_status = (
+                    "error"
+                    if result.live_status == "inconclusive"
+                    or result.reason in {"probe_error", "credential_error", "eligibility_error"}
+                    else "checked"
+                )
+                return {
+                    "status": outcome_status,
+                    "assignment_id": assignment_id,
+                    "qualification": result.qualification,
+                    "reason": result.reason,
+                }
             except LookupError:
                 return {"status": "stale_claim", "assignment_id": assignment_id}
             except Exception:  # noqa: BLE001 - isolate one provider row
@@ -165,6 +199,18 @@ class ProxiwareQualificationRunner:
                 logger.exception("provider qualification failed assignment=%s", assignment_id)
                 return {"status": "error", "assignment_id": assignment_id}
 
+    def _release_claim(self, assignment_id: int, token: str) -> bool:
+        with self.app.app_context():
+            db = get_db()
+            cursor = db.execute(
+                "UPDATE provider_assignments SET qualification_claimed_until=NULL, "
+                "qualification_claim_token=NULL, updated_at=? "
+                "WHERE id=? AND qualification_claim_token=?",
+                (_utc_now().isoformat(), int(assignment_id), str(token)),
+            )
+            db.commit()
+            return cursor.rowcount == 1
+
     def run_once(self) -> dict[str, Any]:
         if self.stopped:
             return {"status": "stopped", "checked": 0}
@@ -180,21 +226,69 @@ class ProxiwareQualificationRunner:
             with self.app.app_context():
                 record_worker_heartbeat(get_db(), "qualification_worker", "idle")
             return {"status": "idle", "checked": 0}
-        checked = 0
-        with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="proxiware-qual") as pool:
-            futures = [
-                pool.submit(self._process_one, assignment_id, token, interval) for assignment_id, token in claims
-            ]
-            for future in as_completed(futures):
-                if self.stopped:
-                    for pending in futures:
-                        pending.cancel()
-                    break
-                outcome = future.result()
-                checked += int(outcome.get("status") == "checked")
+        checked = failed = stale_claim = canceled = 0
+        heartbeat_stop = Event()
+        heartbeat_thread = Thread(target=self._active_heartbeat, args=(heartbeat_stop,), daemon=True)
+        heartbeat_thread.start()
+        try:
+            with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="proxiware-qual") as pool:
+                futures = [
+                    pool.submit(self._process_one, assignment_id, token, interval) for assignment_id, token in claims
+                ]
+                for future in as_completed(futures):
+                    if future.cancelled():
+                        canceled += 1
+                        continue
+                    try:
+                        outcome = future.result()
+                    except Exception:  # noqa: BLE001 - isolate a worker future
+                        failed += 1
+                        logger.exception("qualification future failed")
+                        continue
+                    status = str(outcome.get("status") or "error")
+                    if status == "checked":
+                        checked += 1
+                    elif status == "stale_claim":
+                        stale_claim += 1
+                    elif status == "canceled":
+                        canceled += 1
+                    else:
+                        failed += 1
+                    if self.stopped:
+                        for pending in futures:
+                            if not pending.done():
+                                index = futures.index(pending)
+                                if pending.cancel():
+                                    self._release_claim(*claims[index])
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=max(1.0, self.heartbeat_interval_seconds * 2))
+
+        if self.stopped:
+            status = "stopped"
+        elif checked:
+            status = "ok"
+        else:
+            status = "degraded"
         with self.app.app_context():
-            record_worker_heartbeat(get_db(), "qualification_worker", "ok", last_success=True)
-        return {"status": "ok", "checked": checked, "claimed": len(claims), "concurrency": concurrency}
+            next_wake = datetime.now(UTC) + timedelta(seconds=interval)
+            record_worker_heartbeat(
+                get_db(),
+                "qualification_worker",
+                status,
+                last_success=bool(checked),
+                error_code="batch_failed" if status == "degraded" else "",
+                next_wake_at=next_wake,
+            )
+        return {
+            "status": status,
+            "checked": checked,
+            "failed": failed,
+            "stale_claim": stale_claim,
+            "canceled": canceled,
+            "claimed": len(claims),
+            "concurrency": concurrency,
+        }
 
     def run_forever(self, *, max_cycles: int | None = None) -> int:
         cycles = 0

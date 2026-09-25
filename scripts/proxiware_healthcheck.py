@@ -13,11 +13,12 @@ class WorkerHealth:
     reason: str
     status: str = ""
     heartbeat_at: str = ""
+    age_seconds: float | None = None
 
 
 def check_worker_health(db, worker: str, *, max_age_seconds: int = 600, now: datetime | None = None) -> WorkerHealth:
     name = str(worker or "").strip().lower().replace("-", "_")
-    if name not in {"sync_worker", "qualification_worker", "swap_worker"}:
+    if name not in {"sync_worker", "qualification_worker", "browser_worker", "swap_worker"}:
         return WorkerHealth(False, "invalid_worker")
     status_row = db.execute("SELECT value FROM settings WHERE key=?", (f"proxiware_{name}_status",)).fetchone()
     heartbeat_row = db.execute("SELECT value FROM settings WHERE key=?", (f"proxiware_{name}_heartbeat_at",)).fetchone()
@@ -36,10 +37,10 @@ def check_worker_health(db, worker: str, *, max_age_seconds: int = 600, now: dat
     except ValueError:
         return WorkerHealth(False, "invalid_timestamp", status=status, heartbeat_at=heartbeat)
     if age > max(1, int(max_age_seconds)) or age < -60:
-        return WorkerHealth(False, "stale", status=status, heartbeat_at=heartbeat)
-    if status in {"error", "blocked", "manual_action_required", "disabled", "paused"}:
-        return WorkerHealth(False, status, status=status, heartbeat_at=heartbeat)
-    return WorkerHealth(True, "ok", status=status, heartbeat_at=heartbeat)
+        return WorkerHealth(False, "stale", status=status, heartbeat_at=heartbeat, age_seconds=age)
+    if status in {"error", "degraded", "stopped", "blocked", "manual_action_required", "disabled", "paused"}:
+        return WorkerHealth(False, status, status=status, heartbeat_at=heartbeat, age_seconds=age)
+    return WorkerHealth(True, "ok", status=status, heartbeat_at=heartbeat, age_seconds=age)
 
 
 def main() -> int:

@@ -1,0 +1,24 @@
+[Unit]
+Description=Earn Proxy Proxiware dashboard observer
+After=network-online.target earn-proxy-proxiware-chrome.service
+Wants=network-online.target earn-proxy-proxiware-chrome.service
+
+[Service]
+Type=simple
+User=earnproxy-browser
+Group=earnproxy
+WorkingDirectory=/opt/earn-proxy
+EnvironmentFile=/etc/earn-proxy.env
+ExecStart=/opt/earn-proxy/.venv/bin/python -m app.proxiware_browser_service
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/earn-proxy
+
+[Install]
+WantedBy=multi-user.target

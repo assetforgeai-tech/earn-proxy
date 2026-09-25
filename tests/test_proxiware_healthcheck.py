@@ -42,3 +42,33 @@ def test_worker_healthcheck_rejects_unknown_worker_name(app):
 
     assert result.ok is False
     assert result.reason == "invalid_worker"
+
+
+def test_worker_healthcheck_accepts_browser_worker(app):
+    with app.app_context():
+        db = get_db()
+        record_worker_heartbeat(db, "browser_worker", "manual_action_required")
+        result = check_worker_health(db, "browser_worker", max_age_seconds=60)
+
+    assert result.ok is False
+    assert result.reason == "manual_action_required"
+
+
+def test_worker_healthcheck_rejects_degraded_worker(app):
+    with app.app_context():
+        db = get_db()
+        record_worker_heartbeat(db, "qualification_worker", "degraded")
+        result = check_worker_health(db, "qualification_worker", max_age_seconds=60)
+
+    assert result.ok is False
+    assert result.reason == "degraded"
+
+
+def test_worker_healthcheck_rejects_stopped_worker(app):
+    with app.app_context():
+        db = get_db()
+        record_worker_heartbeat(db, "qualification_worker", "stopped")
+        result = check_worker_health(db, "qualification_worker", max_age_seconds=60)
+
+    assert result.ok is False
+    assert result.reason == "stopped"

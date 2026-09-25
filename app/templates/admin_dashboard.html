@@ -109,7 +109,7 @@
     <input type="hidden" name="ui" value="1">
     <div class="field-group">
       <label for="new-user-email">Email</label>
-      <input id="new-user-email" name="email" type="email" placeholder="user@example.com" required aria-describedby="new-user-email-hint{% if error_focus == 'new-user-email' %} new-user-email-error{% endif %}"{% if error_focus == 'new-user-email' %} aria-invalid="true"{% endif %}>
+      <input id="new-user-email" name="email" type="email" maxlength="254" placeholder="user@example.com" required aria-describedby="new-user-email-hint{% if error_focus == 'new-user-email' %} new-user-email-error{% endif %}"{% if error_focus == 'new-user-email' %} aria-invalid="true"{% endif %}>
       <small id="new-user-email-hint" class="field-hint">Must not already be registered.</small>
       {% if error_focus == 'new-user-email' %}<small id="new-user-email-error" class="field-error">Enter an available email address.</small>{% endif %}
     </div>

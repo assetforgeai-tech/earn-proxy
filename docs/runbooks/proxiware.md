@@ -16,6 +16,24 @@ Keep values in the deployment secret file, never in Git:
 - `EARN_PROXY_PROXIWARE_SYNC_RETRY_LIMIT`
 - `EARN_PROXY_PROXIWARE_SYNC_RETRY_BACKOFF_SECONDS`
 
+Browser observation is separate from the official API sync. Keep these values
+disabled until the isolated browser profile is provisioned and manually
+verified:
+
+- `EARN_PROXY_PROXIWARE_CHROME_ENABLED=0`
+- `EARN_PROXY_PROXIWARE_BROWSER_ENABLED=0`
+- `EARN_PROXY_PROXIWARE_BROWSER_ALLOW_MUTATION=0`
+- `EARN_PROXY_PROXIWARE_CDP_URL=http://127.0.0.1:9222`
+- `EARN_PROXY_PROXIWARE_CHROME_PROFILE_DIR=/run/earn-proxy-browser/profile`
+
+Put Chrome-only values in `/etc/earn-proxy-browser.env` with mode `0600`.
+Do not reuse `/etc/earn-proxy.env`; the Chrome process must not receive the
+database, Fernet, API, or admin secrets. The Chrome unit runs as the separate
+`earnproxy-chrome` account, uses an ephemeral systemd runtime profile, and
+binds CDP to loopback. It does not log in, solve challenges, spoof a
+fingerprint, or perform a provider mutation. A missing binary/profile/session
+keeps the observer `manual_action_required` or disabled.
+
 Browser/session credentials are entered from the admin provider workspace and
 are encrypted at rest. They are write-only in the UI.
 
@@ -55,6 +73,13 @@ maintenance.
 - `manual_action_required`: leave auto-swap paused; inspect `Session` and
   `Credentials`, then renew only after verifying the provider account and
   challenge state.
+- `degraded`: a bounded transport/provider read failed. The observer records a
+  safe error code and schedules that subscription with exponential backoff;
+  it does not invalidate an otherwise active session.
+- `reconciliation_required`: a swap response was not enough to prove the new
+  provider assignment. Do not retry the mutation. Run official read-only sync,
+  wait for a fresh dashboard observation, and resolve the replacement by
+  subscription plus address before any later action.
 - repeated `provider_timeout`: inspect provider availability and network path;
   do not increase retry limits blindly.
 - stale inventory: run a read-only sync and inspect `Sync` before taking
@@ -85,3 +110,19 @@ script. Keep auto-swap disabled until a fresh dry-run passes.
 
 The first real swap requires a separately recorded pilot approval. The
 implementation and dry-run must never perform a production swap.
+
+## Release and observation rollout
+
+Run the redacted preflight against a disposable database first, then collect
+the production report without provider calls:
+
+```bash
+python scripts/proxiware_preflight.py --database /var/lib/earn-proxy/earn-proxy.db --production
+```
+
+The report includes branch/release and rollback paths, service state, safe
+heartbeat ages, session state, local/public health, adapter flags, and backup
+presence. It never prints credentials, cookies, CAPTCHA tokens, or provider
+payloads. Deploy with `deploy/release.sh <commit-sha>`, keep swap and
+distribution `0`, enable only Chrome plus dashboard observation, and observe
+at least two scheduled intervals before requesting any mutation approval.

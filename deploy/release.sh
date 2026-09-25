@@ -36,8 +36,20 @@ services=(
   earn-proxy-proxiware
   earn-proxy-proxiware-qualification
   earn-proxy-proxiware-swap
+  earn-proxy-proxiware-chrome
+  earn-proxy-proxiware-browser
 )
 previous_services=()
+
+if ! getent group earnproxy-chrome >/dev/null 2>&1; then
+  groupadd --system earnproxy-chrome
+fi
+if ! id -u earnproxy-browser >/dev/null 2>&1; then
+  useradd --system --gid earnproxy --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin earnproxy-browser
+fi
+if ! id -u earnproxy-chrome >/dev/null 2>&1; then
+  useradd --system --gid earnproxy-chrome --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin earnproxy-chrome
+fi
 
 cleanup() {
   rm -f -- "$archive" "$next_link"
@@ -96,6 +108,7 @@ systemd-run --quiet --wait --pipe --collect \
   --uid=earnproxy --gid=earnproxy \
   --working-directory="$release_dir" \
   --property=EnvironmentFile=/etc/earn-proxy.env \
+  --property=EnvironmentFile=-/etc/earn-proxy-browser.env \
   "$release_dir/.venv/bin/python" -m deploy.release_preflight --release-dir "$release_dir"
 
 install -m 0644 "$release_dir"/deploy/earn-proxy-*.service /etc/systemd/system/

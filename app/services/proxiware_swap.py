@@ -14,6 +14,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from app.crypto import decrypt_secret
+from app.services.proxiware_dashboard import dashboard_address_endpoint, normalize_dashboard_address
 from app.services.proxiware_health import is_proxiware_automation_paused
 from app.services.settings import get_setting
 
@@ -23,7 +25,9 @@ DEFAULT_COOLDOWN_SECONDS = 60
 DEFAULT_DASHBOARD_MAX_AGE_SECONDS = 900
 DEFAULT_CLAIM_SECONDS = 300
 DEFAULT_RETRY_LIMIT = 3
-ACTIVE_SWAP_STATES = frozenset({"pending", "running"})
+PRE_MUTATION_SWAP_STATES = frozenset({"pending", "running"})
+MUTATION_SWAP_STATES = frozenset({"mutating", "provider_applied", "reconciliation_required"})
+ACTIVE_SWAP_STATES = PRE_MUTATION_SWAP_STATES | MUTATION_SWAP_STATES
 SAFE_ERROR_CODES = frozenset(
     {
         "captcha_required",
@@ -39,6 +43,8 @@ SAFE_ERROR_CODES = frozenset(
         "provider_conflict",
         "provider_timeout",
         "provider_error",
+        "dashboard_stale",
+        "reconciliation_required",
     }
 )
 GUARD_ERROR_CODES = frozenset(
@@ -94,11 +100,28 @@ def _safe_code(value: object, default: str = "provider_error") -> str:
 
 def _safe_guard_code(value: object) -> str:
     candidate = _SAFE_CODE.sub("_", str(value or "").strip().lower()).strip("_")[:64]
-    return candidate if candidate in GUARD_ERROR_CODES else "manual_action_required"
+    return candidate if candidate in GUARD_ERROR_CODES or candidate == "dashboard_stale" else "manual_action_required"
 
 
 def _as_bool(value: object) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on", "eligible", "allow"}
+
+
+def _expiry_is_past(value: object, now: datetime) -> bool:
+    """Handle epoch and legacy ISO expiry values without fail-open behavior."""
+
+    if value is None or str(value).strip() == "":
+        return False
+    text = str(value).strip()
+    try:
+        expiry = datetime.fromtimestamp(float(text), UTC)
+    except (TypeError, ValueError, OverflowError):
+        try:
+            expiry = datetime.fromisoformat(text)
+        except ValueError:
+            return True
+        expiry = expiry.astimezone(UTC) if expiry.tzinfo else expiry.replace(tzinfo=UTC)
+    return expiry <= now
 
 
 def _column_names(db, table: str) -> set[str]:
@@ -150,6 +173,9 @@ def ensure_proxiware_swap_schema(db) -> None:
             first_seen_at TEXT NOT NULL DEFAULT '',
             last_seen_at TEXT NOT NULL DEFAULT '',
             missing_at TEXT,
+            dashboard_next_observe_at TEXT,
+            dashboard_observation_failures INTEGER NOT NULL DEFAULT 0,
+            dashboard_last_error_code TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             UNIQUE(provider, external_id)
@@ -177,6 +203,7 @@ def ensure_proxiware_swap_schema(db) -> None:
             dashboard_error_code TEXT NOT NULL DEFAULT '',
             assigned_at TEXT,
             last_seen_at TEXT,
+            missing_at TEXT,
             replacement_ready_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -195,6 +222,14 @@ def ensure_proxiware_swap_schema(db) -> None:
             claim_token TEXT,
             claimed_until TEXT,
             blocked_at TEXT,
+            mutation_started_at TEXT,
+            provider_applied_at TEXT,
+            reconciliation_required_at TEXT,
+            mutation_old_assignment_external_id TEXT,
+            mutation_dashboard_assignment_id TEXT,
+            mutation_subscription_external_id TEXT,
+            mutation_new_assignment_external_id TEXT,
+            mutation_new_assignment_address TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -266,6 +301,9 @@ def ensure_proxiware_swap_schema(db) -> None:
                 "eligible_count": "INTEGER NOT NULL DEFAULT 0",
                 "connections": "INTEGER NOT NULL DEFAULT 0",
                 "status": "TEXT NOT NULL DEFAULT 'active'",
+                "dashboard_next_observe_at": "TEXT",
+                "dashboard_observation_failures": "INTEGER NOT NULL DEFAULT 0",
+                "dashboard_last_error_code": "TEXT NOT NULL DEFAULT ''",
             },
         )
     if _column_names(db, "provider_assignments"):
@@ -284,6 +322,7 @@ def ensure_proxiware_swap_schema(db) -> None:
                 "protocol": "TEXT NOT NULL DEFAULT 'unknown'",
                 "last_checked_at": "TEXT",
                 "egress_verified_at": "TEXT",
+                "missing_at": "TEXT",
                 "last_error_code": "TEXT NOT NULL DEFAULT ''",
                 "duplicate_egress": "INTEGER NOT NULL DEFAULT 0",
                 "distribution_enabled": "INTEGER NOT NULL DEFAULT 0",
@@ -299,6 +338,64 @@ def ensure_proxiware_swap_schema(db) -> None:
                 "dashboard_source": "TEXT NOT NULL DEFAULT ''",
                 "dashboard_error_code": "TEXT NOT NULL DEFAULT ''",
             },
+        )
+    if _column_names(db, "swap_jobs"):
+        _ensure_columns(
+            db,
+            "swap_jobs",
+            {
+                "mutation_started_at": "TEXT",
+                "provider_applied_at": "TEXT",
+                "reconciliation_required_at": "TEXT",
+                "mutation_old_assignment_external_id": "TEXT",
+                "mutation_dashboard_assignment_id": "TEXT",
+                "mutation_subscription_external_id": "TEXT",
+                "mutation_new_assignment_external_id": "TEXT",
+                "mutation_new_assignment_address": "TEXT",
+            },
+        )
+        # Older releases allowed more than one active state per subscription.
+        # Preserve the most advanced job and quarantine the rest before adding
+        # the stronger uniqueness fence.
+        priority = {
+            "pending": 1,
+            "running": 2,
+            "mutating": 3,
+            "provider_applied": 4,
+            "reconciliation_required": 5,
+        }
+        active_rows = db.execute(
+            "SELECT id,subscription_id,state FROM swap_jobs "
+            "WHERE state IN ('pending','running','mutating','provider_applied','reconciliation_required') "
+            "ORDER BY subscription_id,id"
+        ).fetchall()
+        keep_by_subscription: dict[int, int] = {}
+        for row in active_rows:
+            subscription_id = int(row["subscription_id"])
+            current_id = keep_by_subscription.get(subscription_id)
+            if current_id is None:
+                keep_by_subscription[subscription_id] = int(row["id"])
+                continue
+            current = db.execute("SELECT state FROM swap_jobs WHERE id=?", (current_id,)).fetchone()
+            if current is not None and priority.get(str(row["state"]), 0) > priority.get(str(current["state"]), 0):
+                db.execute(
+                    "UPDATE swap_jobs SET state='blocked',reason='migration_conflict',"
+                    "error_code='manual_action_required',blocked_at=?,claim_token=NULL,claimed_until=NULL,updated_at=? "
+                    "WHERE id=?",
+                    (_iso(), _iso(), current_id),
+                )
+                keep_by_subscription[subscription_id] = int(row["id"])
+            else:
+                db.execute(
+                    "UPDATE swap_jobs SET state='blocked',reason='migration_conflict',"
+                    "error_code='manual_action_required',blocked_at=?,claim_token=NULL,claimed_until=NULL,updated_at=? "
+                    "WHERE id=?",
+                    (_iso(), _iso(), int(row["id"])),
+                )
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS swap_jobs_one_active_v2_idx "
+            "ON swap_jobs(subscription_id) "
+            "WHERE state IN ('pending','running','mutating','provider_applied','reconciliation_required')"
         )
     _ensure_columns(db, "provider_credentials", {"provider": "TEXT NOT NULL DEFAULT 'proxiware'"})
     _ensure_columns(db, "provider_action_attempts", {"provider": "TEXT NOT NULL DEFAULT 'proxiware'"})
@@ -451,6 +548,11 @@ class SwapDecision:
         ).fetchone()
         if subscription is None:
             return cls(False, "manual_action_required", int(subscription_id))
+        subscription_status = str(subscription["status"] or "").strip().lower()
+        if subscription_status not in {"active", "ready"} or subscription["missing_at"] is not None:
+            return cls(False, "manual_action_required", int(subscription_id))
+        if _expiry_is_past(subscription["expires_at"], current):
+            return cls(False, "manual_action_required", int(subscription_id))
         assignment = db.execute(
             "SELECT * FROM provider_assignments WHERE subscription_id=? AND provider=? "
             "AND status IN ('active','current') ORDER BY id DESC LIMIT 1",
@@ -478,8 +580,12 @@ class SwapDecision:
         try:
             observed_at = datetime.fromisoformat(dashboard_observed_at)
             observed_at = observed_at.astimezone(UTC) if observed_at.tzinfo else observed_at.replace(tzinfo=UTC)
-            max_age = int(get_setting(db, "proxiware_dashboard_max_age_seconds", str(DEFAULT_DASHBOARD_MAX_AGE_SECONDS)))
-            if current - observed_at > timedelta(seconds=max(60, max_age)) or observed_at - current > timedelta(seconds=60):
+            max_age = int(
+                get_setting(db, "proxiware_dashboard_max_age_seconds", str(DEFAULT_DASHBOARD_MAX_AGE_SECONDS))
+            )
+            if current - observed_at > timedelta(seconds=max(60, max_age)) or observed_at - current > timedelta(
+                seconds=60
+            ):
                 return cls(False, "dashboard_stale", int(subscription_id), assignment_id)
         except (TypeError, ValueError):
             return cls(False, "dashboard_stale", int(subscription_id), assignment_id)
@@ -534,6 +640,10 @@ class SwapDecision:
             except ValueError:
                 return cls(False, "manual_action_required", int(subscription_id), assignment_id)
         return cls(True, "ready", int(subscription_id), assignment_id)
+
+
+class SwapReconciliationPending(ValueError):
+    """Official sync or dashboard evidence has not arrived yet."""
 
 
 def _remember_decision(db, decision: SwapDecision, *, now: datetime) -> None:
@@ -671,20 +781,33 @@ def revalidate_swap_job(
     *,
     now: datetime | None = None,
     allow_manual: bool = False,
+    claim_token: str | None = None,
+    enter_mutation: bool = False,
 ) -> SwapDecision:
-    """Recheck mutable swap guards after a durable claim and before adapter I/O."""
+    """Recheck guards and optionally acquire the non-reclaimable mutation fence."""
 
     ensure_proxiware_swap_schema(db)
     current = _now(now)
     with _write_transaction(db):
         job = db.execute(
-            "SELECT state,subscription_id,old_assignment_id FROM swap_jobs WHERE id=? AND provider=?",
+            "SELECT state,subscription_id,old_assignment_id,claim_token,claimed_until FROM swap_jobs WHERE id=? AND provider=?",
             (int(job_id), PROVIDER),
         ).fetchone()
         if job is None:
             raise LookupError("Swap job not found")
+        if claim_token is not None and str(job["claim_token"] or "") != str(claim_token):
+            raise ValueError("Swap job claim is stale")
         if str(job["state"] or "") != "running":
             raise ValueError("Swap job is not running")
+        if enter_mutation:
+            if not str(claim_token or "").strip():
+                raise ValueError("Swap mutation requires a claim token")
+            claimed_until = str(job["claimed_until"] or "").strip()
+            try:
+                if not claimed_until or datetime.fromisoformat(claimed_until).astimezone(UTC) <= current:
+                    raise ValueError("Swap job claim is stale")
+            except ValueError:
+                raise ValueError("Swap job claim is stale") from None
         if (
             (is_proxiware_automation_paused(db) and not allow_manual)
             or get_setting(db, "proxiware_swap_worker_paused", "0") == "1"
@@ -714,6 +837,42 @@ def revalidate_swap_job(
                 cooldown_seconds=cooldown_seconds,
             )
         if decision.allowed and decision.assignment_id == job["old_assignment_id"]:
+            if enter_mutation:
+                token = str(job["claim_token"] or claim_token or "").strip()
+                if not token:
+                    raise ValueError("Swap mutation requires a claim token")
+                identity = db.execute(
+                    "SELECT pa.external_id AS old_external_id,pa.dashboard_assignment_id,"
+                    "ps.external_id AS subscription_external_id "
+                    "FROM provider_assignments pa JOIN provider_subscriptions ps ON ps.id=pa.subscription_id "
+                    "WHERE pa.id=? AND pa.provider=? AND ps.id=? AND ps.provider=?",
+                    (int(job["old_assignment_id"]), PROVIDER, int(job["subscription_id"]), PROVIDER),
+                ).fetchone()
+                if (
+                    identity is None
+                    or not str(identity["old_external_id"] or "").strip()
+                    or not str(identity["dashboard_assignment_id"] or "").strip()
+                    or not str(identity["subscription_external_id"] or "").strip()
+                ):
+                    raise ValueError("Swap mutation identity is missing")
+                cursor = db.execute(
+                    "UPDATE swap_jobs SET state='mutating', mutation_started_at=?, claimed_until=NULL, "
+                    "reason='provider_mutation', mutation_old_assignment_external_id=?, "
+                    "mutation_dashboard_assignment_id=?, mutation_subscription_external_id=?, updated_at=? "
+                    "WHERE id=? AND provider=? AND state='running' AND claim_token=?",
+                    (
+                        current.isoformat(),
+                        str(identity["old_external_id"]),
+                        str(identity["dashboard_assignment_id"]),
+                        str(identity["subscription_external_id"]),
+                        current.isoformat(),
+                        int(job_id),
+                        PROVIDER,
+                        token,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("Swap job claim is stale")
             return decision
         reason = decision.reason if decision.allowed is False else "manual_action_required"
         db.execute(
@@ -737,23 +896,200 @@ def _resolve_assignment(db, external_id: str):
     ).fetchone()
 
 
+def _validated_address(value: object) -> tuple[str, int | None, str]:
+    """Normalize provider replacement address without treating it as an ID."""
+
+    try:
+        host, port = dashboard_address_endpoint(str(value or ""))
+        normalized = normalize_dashboard_address(str(value or ""))
+    except (TypeError, ValueError):
+        raise ValueError("Swap replacement address is invalid") from None
+    return host, port, normalized
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or ""))
+    except (TypeError, ValueError):
+        return None
+    return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _resolve_replacement_by_address(
+    db,
+    *,
+    subscription_id: int,
+    old_assignment_id: int | None,
+    address: str,
+    mutation_time: datetime,
+):
+    """Resolve one post-mutation official row; never synthesize credentials."""
+
+    host, port, _ = _validated_address(address)
+    query = (
+        "SELECT pa.* FROM provider_assignments pa "
+        "JOIN provider_subscriptions ps ON ps.id=pa.subscription_id "
+        "WHERE pa.provider=? AND ps.provider=? AND pa.subscription_id=? "
+        "AND LOWER(pa.host)=? AND pa.missing_at IS NULL AND pa.status <> 'replaced'"
+    )
+    params: list[object] = [PROVIDER, PROVIDER, int(subscription_id), host]
+    if port is not None:
+        query += " AND pa.port=?"
+        params.append(port)
+    if old_assignment_id is not None:
+        query += " AND pa.id<>?"
+        params.append(int(old_assignment_id))
+    rows = db.execute(query + " ORDER BY pa.id", tuple(params)).fetchall()
+    fresh = [
+        row
+        for row in rows
+        if (_parse_timestamp(row["last_seen_at"]) or datetime.min.replace(tzinfo=UTC)) > mutation_time
+    ]
+    if len(fresh) != 1:
+        reason = "missing" if not fresh else "ambiguous"
+        raise SwapReconciliationPending(f"Replacement address reconciliation is {reason}")
+    return fresh[0]
+
+
+def _require_claim(job, claim_token: str | None) -> None:
+    if not str(claim_token or "").strip() or not str(job["claim_token"] or "").strip():
+        raise ValueError("Swap job claim is stale")
+    if str(job["claim_token"] or "") != str(claim_token):
+        raise ValueError("Swap job claim is stale")
+
+
+def mark_provider_applied(
+    db,
+    job_id: int,
+    *,
+    old_assignment_external_id: str,
+    new_assignment_external_id: str | None = None,
+    new_assignment_address: str | None = None,
+    applied_at: datetime | None = None,
+    claim_token: str | None = None,
+) -> None:
+    """Record a confirmed provider mutation without claiming reconciliation success."""
+
+    ensure_proxiware_swap_schema(db)
+    current = _now(applied_at)
+    old_external = str(old_assignment_external_id or "").strip()
+    new_external = str(new_assignment_external_id or "").strip()
+    address = str(new_assignment_address or "").strip()
+    if not old_external or (not new_external and not address) or old_external == new_external:
+        raise ValueError("Swap assignment mapping is invalid")
+    if address:
+        _validated_address(address)
+    if not str(claim_token or "").strip():
+        raise ValueError("Swap mutation requires a claim token")
+    with _write_transaction(db):
+        job = db.execute(
+            "SELECT * FROM swap_jobs WHERE id=? AND provider=?",
+            (int(job_id), PROVIDER),
+        ).fetchone()
+        if job is None:
+            raise LookupError("Swap job not found")
+        if str(job["state"] or "") != "mutating":
+            raise ValueError("Swap job is not mutating")
+        _require_claim(job, claim_token)
+        frozen_old = str(job["mutation_old_assignment_external_id"] or "").strip()
+        if frozen_old and frozen_old != old_external:
+            raise ValueError("Swap old assignment does not match mutation fence")
+        old = _resolve_assignment(db, old_external)
+        if old is None or int(old["subscription_id"]) != int(job["subscription_id"]):
+            raise ValueError("Swap old assignment subscription mismatch")
+        if job["old_assignment_id"] is not None and int(old["id"]) != int(job["old_assignment_id"]):
+            raise ValueError("Swap old assignment does not match job")
+        # Old dashboard evidence cannot authorize the replacement.  Keep the
+        # old row auditable, but remove it from distribution immediately.
+        db.execute(
+            "UPDATE provider_assignments SET dashboard_assignment_id=NULL, dashboard_eligible=NULL, "
+            "dashboard_connections=NULL, dashboard_observed_at=NULL, dashboard_source='', "
+            "dashboard_error_code='reconciliation_required', distribution_enabled=0, updated_at=? WHERE id=?",
+            (current.isoformat(), int(old["id"])),
+        )
+        replacement = _resolve_assignment(db, new_external) if new_external else None
+        if replacement is not None:
+            if int(replacement["subscription_id"]) != int(job["subscription_id"]):
+                raise ValueError("Swap new assignment subscription mismatch")
+            db.execute(
+                "UPDATE provider_assignments SET host='', port=0, username_encrypted='', password_encrypted='', "
+                "country='', status='pending', qualification='pending', provider_eligible=0, live_status='pending', "
+                "exit_ip=NULL, egress_verified_at=NULL, last_checked_at=NULL, duplicate_egress=0, "
+                "distribution_enabled=0, dashboard_assignment_id=NULL, dashboard_eligible=NULL, "
+                "dashboard_connections=NULL, dashboard_observed_at=NULL, dashboard_source='', "
+                "dashboard_error_code='reconciliation_required', replacement_ready_at=NULL, updated_at=? WHERE id=?",
+                (current.isoformat(), int(replacement["id"])),
+            )
+        db.execute(
+            "UPDATE swap_jobs SET state='provider_applied', reason='provider_applied', error_code='', "
+            "provider_applied_at=?, mutation_old_assignment_external_id=?, "
+            "mutation_new_assignment_external_id=?, mutation_new_assignment_address=?, "
+            "claimed_until=NULL, updated_at=? "
+            "WHERE id=? AND provider=? AND state='mutating'",
+            (
+                current.isoformat(),
+                old_external,
+                new_external or None,
+                normalize_dashboard_address(address) if address else None,
+                current.isoformat(),
+                int(job_id),
+                PROVIDER,
+            ),
+        )
+
+
+def mark_reconciliation_required(
+    db,
+    job_id: int,
+    *,
+    error_code: str,
+    required_at: datetime | None = None,
+    claim_token: str | None = None,
+) -> None:
+    """Freeze an uncertain mutation; never turn it into an automatic retry."""
+
+    ensure_proxiware_swap_schema(db)
+    current = _now(required_at)
+    safe_error = _safe_code(error_code, default="provider_timeout")
+    if not str(claim_token or "").strip():
+        raise ValueError("Swap reconciliation requires a claim token")
+    with _write_transaction(db):
+        job = db.execute(
+            "SELECT * FROM swap_jobs WHERE id=? AND provider=?",
+            (int(job_id), PROVIDER),
+        ).fetchone()
+        if job is None:
+            raise LookupError("Swap job not found")
+        if str(job["state"] or "") not in {"mutating", "provider_applied", "reconciliation_required"}:
+            raise ValueError("Swap job is not in a mutation state")
+        _require_claim(job, claim_token)
+        db.execute(
+            "UPDATE swap_jobs SET state='reconciliation_required', reason='reconciliation_required', "
+            "error_code=?, reconciliation_required_at=?, claimed_until=NULL, updated_at=? "
+            "WHERE id=? AND provider=? AND state IN ('mutating','provider_applied','reconciliation_required')",
+            (safe_error, current.isoformat(), current.isoformat(), int(job_id), PROVIDER),
+        )
+        _set_setting_no_commit(db, "proxiware_auto_swap", "0", now=current)
+
+
 def mark_swap_success(
     db,
     job_id: int,
     *,
     old_assignment_external_id: str,
-    new_assignment_external_id: str,
+    new_assignment_external_id: str | None = None,
+    new_assignment_address: str | None = None,
     success_at: datetime | None = None,
     new_assignment: dict[str, object] | None = None,
     claim_token: str | None = None,
 ) -> None:
-    """Persist mapping before exposing a successful swap state."""
+    """Finalize a replacement only after provider and dashboard reconciliation."""
 
     ensure_proxiware_swap_schema(db)
     current = _now(success_at)
     old_external = str(old_assignment_external_id or "").strip()
     new_external = str(new_assignment_external_id or "").strip()
-    if not old_external or not new_external or old_external == new_external:
+    if not old_external:
         raise ValueError("Swap assignment mapping is invalid")
     with _write_transaction(db):
         job = db.execute(
@@ -762,10 +1098,27 @@ def mark_swap_success(
         ).fetchone()
         if job is None:
             raise LookupError("Swap job not found")
-        if str(job["state"]) not in ACTIVE_SWAP_STATES:
-            raise ValueError("Swap job is not active")
-        if claim_token is not None and str(job["claim_token"] or "") != str(claim_token):
-            raise ValueError("Swap job claim is stale")
+        if str(job["state"] or "") != "provider_applied":
+            raise ValueError("Swap job is not awaiting reconciliation")
+        _require_claim(job, claim_token)
+        expected_old = str(job["mutation_old_assignment_external_id"] or "").strip()
+        expected_external = str(job["mutation_new_assignment_external_id"] or "").strip()
+        replacement_address = str(job["mutation_new_assignment_address"] or "").strip()
+        if expected_old != old_external:
+            raise ValueError("Swap old assignment does not match provider evidence")
+        if new_external and expected_external and expected_external != new_external:
+            raise ValueError("Swap new assignment does not match provider evidence")
+        if new_external and new_external == old_external:
+            raise ValueError("Swap assignment mapping is invalid")
+        supplied_address = str(new_assignment_address or "").strip()
+        if (
+            supplied_address
+            and replacement_address
+            and _validated_address(supplied_address)[2] != _validated_address(replacement_address)[2]
+        ):
+            raise ValueError("Swap replacement address does not match provider evidence")
+        if not expected_external and not replacement_address:
+            raise SwapReconciliationPending("Provider replacement address is missing")
         old = _resolve_assignment(db, old_external)
         if old is None:
             raise LookupError("Old assignment not found")
@@ -773,9 +1126,66 @@ def mark_swap_success(
             raise ValueError("Swap old assignment subscription mismatch")
         if job["old_assignment_id"] is not None and int(old["id"]) != int(job["old_assignment_id"]):
             raise ValueError("Swap old assignment does not match job")
-        new = _resolve_assignment(db, new_external)
-        if new is not None and int(new["subscription_id"]) != int(job["subscription_id"]):
+        mutation_at = job["provider_applied_at"] or job["mutation_started_at"]
+        mutation_time = _parse_timestamp(mutation_at)
+        if mutation_time is None:
+            raise SwapReconciliationPending("Replacement mutation timestamp is missing")
+        if expected_external:
+            new_external = expected_external
+            new = _resolve_assignment(db, new_external)
+            if new is None:
+                raise SwapReconciliationPending("Replacement assignment is not present in official sync")
+            if replacement_address:
+                address_host, address_port, _ = _validated_address(replacement_address)
+                if str(new["host"] or "").strip().lower() != address_host or (
+                    address_port is not None and int(new["port"] or 0) != address_port
+                ):
+                    raise SwapReconciliationPending("Replacement address does not match official sync")
+        else:
+            new = _resolve_replacement_by_address(
+                db,
+                subscription_id=int(job["subscription_id"]),
+                old_assignment_id=int(job["old_assignment_id"]) if job["old_assignment_id"] is not None else None,
+                address=replacement_address,
+                mutation_time=mutation_time,
+            )
+            new_external = str(new["external_id"] or "").strip()
+        if not new_external or new_external == old_external:
+            raise ValueError("Swap assignment mapping is invalid")
+        if int(new["subscription_id"]) != int(job["subscription_id"]):
             raise ValueError("Swap new assignment subscription mismatch")
+        synced_at = _parse_timestamp(new["last_seen_at"])
+        observed_at = _parse_timestamp(new["dashboard_observed_at"])
+        if synced_at is None or observed_at is None:
+            raise SwapReconciliationPending("Replacement reconciliation evidence is missing")
+        if synced_at <= mutation_time:
+            raise SwapReconciliationPending("Replacement official sync evidence is stale")
+        if observed_at <= mutation_time:
+            raise SwapReconciliationPending("Replacement dashboard evidence is stale")
+        if str(new["dashboard_source"] or "") != "provider_dashboard":
+            raise ValueError("Replacement dashboard evidence is untrusted")
+        if not str(new["dashboard_assignment_id"] or "").strip():
+            raise ValueError("Replacement dashboard identity is missing")
+        try:
+            max_age = max(
+                60,
+                int(get_setting(db, "proxiware_dashboard_max_age_seconds", str(DEFAULT_DASHBOARD_MAX_AGE_SECONDS))),
+            )
+        except (TypeError, ValueError):
+            max_age = DEFAULT_DASHBOARD_MAX_AGE_SECONDS
+        if current - observed_at > timedelta(seconds=max_age) or observed_at - current > timedelta(seconds=60):
+            raise SwapReconciliationPending("Replacement dashboard evidence is stale")
+        if not str(new["host"] or "").strip() or int(new["port"] or 0) <= 0:
+            raise SwapReconciliationPending("Replacement credential evidence is missing")
+        for column in ("username_encrypted", "password_encrypted"):
+            encrypted = str(new[column] or "").strip()
+            if not encrypted:
+                raise SwapReconciliationPending("Replacement credential evidence is missing")
+            try:
+                if not decrypt_secret(encrypted).strip():
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise SwapReconciliationPending("Replacement credential evidence is invalid") from None
         try:
             cooldown_seconds = max(
                 DEFAULT_COOLDOWN_SECONDS,
@@ -783,47 +1193,14 @@ def mark_swap_success(
             )
         except ValueError:
             cooldown_seconds = DEFAULT_COOLDOWN_SECONDS
-        ready_at = (current + timedelta(seconds=cooldown_seconds)).isoformat()
-        if new is None:
-            payload = dict(new_assignment or {})
-            db.execute(
-                """
-                INSERT INTO provider_assignments(
-                    subscription_id,provider,external_id,host,port,username_encrypted,password_encrypted,
-                    country,status,qualification,provider_eligible,live_status,assigned_at,replacement_ready_at,
-                    last_seen_at,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    int(old["subscription_id"]),
-                    PROVIDER,
-                    new_external,
-                    str(payload.get("host") or old["host"] or ""),
-                    int(payload.get("port") or old["port"] or 0),
-                    str(payload.get("username_encrypted") or old["username_encrypted"] or ""),
-                    str(payload.get("password_encrypted") or old["password_encrypted"] or ""),
-                    str(payload.get("country") or old["country"] or ""),
-                    "pending",
-                    "pending",
-                    0,
-                    "pending",
-                    current.isoformat(),
-                    ready_at,
-                    current.isoformat(),
-                    current.isoformat(),
-                    current.isoformat(),
-                ),
-            )
-            new = _resolve_assignment(db, new_external)
-        else:
-            db.execute(
-                "UPDATE provider_assignments SET replacement_ready_at=?, status='pending', "
-                "qualification='pending', provider_eligible=0, live_status='pending', "
-                "distribution_enabled=0, egress_verified_at=NULL, last_checked_at=NULL, updated_at=? WHERE id=?",
-                (ready_at, current.isoformat(), int(new["id"])),
-            )
-        if new is None:
-            raise RuntimeError("Replacement assignment could not be persisted")
+        ready_base = max(current, mutation_time)
+        ready_at = (ready_base + timedelta(seconds=cooldown_seconds)).isoformat()
+        db.execute(
+            "UPDATE provider_assignments SET replacement_ready_at=?, status='pending', "
+            "qualification='pending', provider_eligible=0, live_status='pending', "
+            "distribution_enabled=0, egress_verified_at=NULL, last_checked_at=NULL, updated_at=? WHERE id=?",
+            (ready_at, current.isoformat(), int(new["id"])),
+        )
         # Mapping is written first.  Any failure rolls back the whole state
         # transition, so a success can never be reported without lineage.
         db.execute(
@@ -848,6 +1225,47 @@ def mark_swap_success(
         )
 
 
+def reconcile_provider_applied_swaps(db, *, now: datetime | None = None, limit: int = 20) -> dict[str, int]:
+    """Finalize only jobs proven by post-mutation API and dashboard evidence."""
+
+    ensure_proxiware_swap_schema(db)
+    current = _now(now)
+    rows = db.execute(
+        "SELECT id,claim_token,mutation_old_assignment_external_id,mutation_new_assignment_external_id,"
+        "mutation_new_assignment_address "
+        "FROM swap_jobs WHERE provider=? AND state='provider_applied' ORDER BY updated_at,id LIMIT ?",
+        (PROVIDER, max(0, int(limit))),
+    ).fetchall()
+    result = {"success": 0, "pending": 0, "reconciliation_required": 0}
+    for row in rows:
+        try:
+            mark_swap_success(
+                db,
+                int(row["id"]),
+                old_assignment_external_id=str(row["mutation_old_assignment_external_id"] or ""),
+                # The provider may expose only the replacement address.  The
+                # success path resolves the official external ID after sync.
+                new_assignment_external_id=(str(row["mutation_new_assignment_external_id"] or "") or None),
+                new_assignment_address=str(row["mutation_new_assignment_address"] or "") or None,
+                success_at=current,
+                claim_token=str(row["claim_token"] or "") or None,
+            )
+        except SwapReconciliationPending:
+            result["pending"] += 1
+        except (LookupError, ValueError):
+            mark_reconciliation_required(
+                db,
+                int(row["id"]),
+                error_code="reconciliation_required",
+                required_at=current,
+                claim_token=str(row["claim_token"] or "") or None,
+            )
+            result["reconciliation_required"] += 1
+        else:
+            result["success"] += 1
+    return result
+
+
 def mark_swap_blocked(
     db,
     job_id: int,
@@ -868,7 +1286,7 @@ def mark_swap_blocked(
             ).fetchone()
             if (
                 active is None
-                or str(active["state"]) not in ACTIVE_SWAP_STATES
+                or str(active["state"]) not in PRE_MUTATION_SWAP_STATES
                 or str(active["claim_token"] or "") != str(claim_token)
             ):
                 raise ValueError("Swap job claim is stale")
@@ -908,7 +1326,7 @@ def mark_swap_failed(
         ).fetchone()
         if job is None:
             raise LookupError("Swap job not found")
-        if str(job["state"]) not in ACTIVE_SWAP_STATES:
+        if str(job["state"]) not in PRE_MUTATION_SWAP_STATES:
             raise ValueError("Swap job is not active")
         if claim_token is not None:
             current_claim = db.execute(
@@ -1020,13 +1438,17 @@ def request_manual_swap(db, job_id: int, *, now: datetime | None = None) -> None
 __all__ = [
     "ACTIVE_SWAP_STATES",
     "SwapDecision",
+    "SwapReconciliationPending",
     "cancel_swap",
     "claim_next_swap",
     "ensure_proxiware_swap_schema",
     "mark_swap_blocked",
     "mark_swap_failed",
+    "mark_provider_applied",
+    "mark_reconciliation_required",
     "mark_swap_success",
     "queue_eligible_swaps",
+    "reconcile_provider_applied_swaps",
     "revalidate_swap_job",
     "retry_swap",
     "request_manual_swap",

@@ -1,0 +1,86 @@
+[
+  {
+    "verdict": "confirmed",
+    "title": "Oversized registration email causes storage and admin-rendering DoS",
+    "description": "Before remediation, an unauthenticated caller could POST a unique email approximately 900 KB long. The registration route accepted it, the user service inserted it into the unbounded SQLite users.email TEXT column, and the unpaginated admin user page selected and rendered every stored email. A disposable-database reproduction returned HTTP 201 and stored length 900006. The worktree now rejects normalized emails longer than 254 characters at both routes and the shared service boundary.",
+    "root_cause": "The registration and admin user-creation paths in app/routes/auth.py and app/routes/admin.py did not bound email length before passing input to create_user in app/services/users.py, allowing oversized values to be persisted and rendered.",
+    "intended_behavior": "Accept a normal RFC-sized email identifier, persist it once, and keep administrative user views bounded against attacker-controlled input.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "app/routes/auth.py",
+        "line": 35,
+        "scope": "register",
+        "description": "Reads and normalizes the unauthenticated registration email form field."
+      },
+      {
+        "kind": "propagation",
+        "file": "app/services/users.py",
+        "line": 11,
+        "scope": "create_user",
+        "description": "Normalizes the email before the shared account-creation boundary."
+      },
+      {
+        "kind": "sink",
+        "file": "app/db.py",
+        "line": 14,
+        "scope": "SCHEMA",
+        "description": "The users.email TEXT column stores the caller-controlled identifier."
+      }
+    ],
+    "conditions": [
+      {
+        "kind": "authentication_level",
+        "description": "No account is required; the public registration endpoint is sufficient."
+      },
+      {
+        "kind": "system_configuration",
+        "description": "The pre-remediation route accepted request bodies up to the configured 1 MiB limit."
+      }
+    ],
+    "execution": {
+      "attacker_perspective": "Unauthenticated remote caller able to send registration requests from one or more client addresses.",
+      "payloads": [
+        "email=a repeated 900000 times followed by @x.com; password=member-password"
+      ],
+      "instructions": [
+        "Send the payload to POST /register on the pre-remediation build.",
+        "Repeat with unique addresses within the registration rate buckets.",
+        "Request the admin users page after records are stored."
+      ],
+      "expected_result": "The pre-remediation build stores the oversized identifier and forces the admin page to load/render it; the remediated build returns HTTP 400 and creates no user."
+    },
+    "remediation": {
+      "strategy": "Enforce one shared 254-character normalized-email ceiling at HTTP and service boundaries, with matching browser hints.",
+      "code_changes": [
+        {
+          "file_name": "app/services/users.py",
+          "fixed_code": "MAX_EMAIL_LENGTH = 254; create_user rejects normalized values longer than the limit."
+        },
+        {
+          "file_name": "app/routes/auth.py",
+          "fixed_code": "Public registration rejects email values longer than MAX_EMAIL_LENGTH before create_user."
+        },
+        {
+          "file_name": "app/routes/admin.py",
+          "fixed_code": "Admin-created users use the same MAX_EMAIL_LENGTH validation."
+        }
+      ]
+    },
+    "severity": {
+      "likelihood": {
+        "score": "low",
+        "reason": "The endpoint is public but registration buckets and request-size limits constrain sustained abuse."
+      },
+      "impact": {
+        "score": "low",
+        "reason": "Impact is storage growth and administrative page resource pressure, not account takeover or data disclosure."
+      },
+      "overall_severity": "low"
+    },
+    "confidence": {
+      "score": "high",
+      "reason": "The pre-remediation behavior was reproduced against a disposable database and the current fix has dedicated regression tests."
+    }
+  }
+]

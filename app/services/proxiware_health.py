@@ -22,6 +22,7 @@ def record_worker_heartbeat(
     now: datetime | None = None,
     last_success: bool = False,
     error_code: str = "",
+    next_wake_at: datetime | str | None = None,
 ) -> None:
     """Persist only safe worker status metadata; never persist exception text."""
 
@@ -37,6 +38,10 @@ def record_worker_heartbeat(
         values[f"proxiware_{name}_last_error_code"] = str(error_code).strip().lower()[:64]
     if last_success:
         values[f"proxiware_{name}_last_success_at"] = timestamp
+    if next_wake_at is not None:
+        values[f"proxiware_{name}_next_wake_at"] = (
+            _iso(next_wake_at) if isinstance(next_wake_at, datetime) else str(next_wake_at)[:64]
+        )
     for key, value in values.items():
         db.execute(
             "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) "

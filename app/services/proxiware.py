@@ -13,6 +13,7 @@ from typing import Any
 import requests
 
 from app.crypto import decrypt_secret, encrypt_secret
+from app.services.proxiware_swap import reconcile_provider_applied_swaps
 
 
 class ProxiwareAPIError(RuntimeError):
@@ -936,6 +937,9 @@ def sync_proxiware_inventory(db, client: ProxiwareClient, *, now: datetime | Non
         if cursor.rowcount != 1:
             raise SyncLeaseLost("Proxiware sync lease is no longer owned")
         db.commit()
+        # Reconciliation is read-only provider truth processing.  Run only
+        # after the inventory transaction is committed, never mid-sync.
+        reconcile_provider_applied_swaps(db, now=now)
         return SyncResult(run_id, added, updated, missing, errors)
     except (SyncCancelled, SyncLeaseLost):
         if db.in_transaction:

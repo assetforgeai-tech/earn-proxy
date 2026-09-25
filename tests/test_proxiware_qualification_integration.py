@@ -11,7 +11,7 @@ from app.services.users import create_user
 
 def _provider_assignment(db, external_id="provider-1", host="provider.example"):
     ensure_proxiware_swap_schema(db)
-    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC).isoformat()
+    now = datetime.now(UTC).replace(microsecond=0).isoformat()
     db.execute(
         """
         INSERT INTO provider_subscriptions
@@ -26,10 +26,12 @@ def _provider_assignment(db, external_id="provider-1", host="provider.example"):
         INSERT INTO provider_assignments
             (subscription_id, provider, external_id, host, port, username_encrypted,
              password_encrypted, status, qualification, provider_eligible, live_status,
-             assigned_at, last_seen_at, created_at, updated_at)
-        VALUES (?, 'proxiware', ?, ?, 8080, '', '', 'active', 'pending', 1, 'pending', ?, ?, ?, ?)
+             assigned_at, last_seen_at, created_at, updated_at,dashboard_assignment_id,
+             dashboard_eligible,dashboard_connections,dashboard_observed_at,dashboard_source)
+        VALUES (?, 'proxiware', ?, ?, 8080, '', '', 'active', 'pending', 1, 'pending', ?, ?, ?, ?,
+                'dashboard-qualification',1,10,?,'provider_dashboard')
         """,
-        (sub_id, external_id, host, now, now, now, now),
+        (sub_id, external_id, host, now, now, now, now, now),
     )
     db.commit()
     return int(db.execute("SELECT last_insert_rowid()").fetchone()[0])

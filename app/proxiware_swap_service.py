@@ -12,17 +12,22 @@ import inspect
 import logging
 import signal
 import threading
+from datetime import UTC, datetime
 from typing import Any, Callable
 
 from app import create_app
 from app.db import get_db
+from app.services.proxiware_browser import build_browser_adapter
+from app.services.proxiware_credentials import load_provider_session, mark_manual_action_required
 from app.services.proxiware_health import is_proxiware_automation_paused, record_worker_heartbeat
 from app.services.proxiware_swap import (
     MANUAL_ACTION_CODES,
     claim_next_swap,
+    mark_provider_applied,
+    mark_reconciliation_required,
     mark_swap_blocked,
     mark_swap_failed,
-    mark_swap_success,
+    queue_eligible_swaps,
     revalidate_swap_job,
 )
 from app.services.settings import get_setting
@@ -70,10 +75,41 @@ class ProxiwareSwapRunner:
         claim_seconds: int = 300,
     ) -> None:
         self.app = app or create_app()
-        self.adapter_factory = adapter_factory
+        self._uses_configured_adapter = adapter_factory is None
+        self.adapter_factory = adapter_factory or self._configured_adapter
         self.interval_seconds = max(1.0, float(interval_seconds))
         self.claim_seconds = max(30, int(claim_seconds))
         self._stop = threading.Event()
+
+    def _configured_adapter(self):
+        return build_browser_adapter(
+            enabled=bool(self.app.config.get("PROXIWARE_BROWSER_ENABLED", False)),
+            cdp_url=str(self.app.config.get("PROXIWARE_CDP_URL") or "").strip() or None,
+            dashboard_url=str(
+                self.app.config.get("PROXIWARE_BROWSER_DASHBOARD_URL") or "https://app.proxiware.com/static/proxy/isp"
+            ),
+            allow_mutation=bool(self.app.config.get("PROXIWARE_BROWSER_ALLOW_MUTATION", False)),
+        )
+
+    @staticmethod
+    def _configured_session(db) -> tuple[Any | None, str]:
+        row = db.execute("SELECT state,expires_at FROM provider_sessions WHERE provider='proxiware'").fetchone()
+        if row is None or str(row["state"] or "").strip().lower() != "active":
+            return None, "session_expired"
+        expires_at = str(row["expires_at"] or "").strip()
+        if expires_at:
+            try:
+                expiry = datetime.fromisoformat(expires_at)
+                expiry = expiry.astimezone(UTC) if expiry.tzinfo else expiry.replace(tzinfo=UTC)
+            except ValueError:
+                return None, "invalid_session"
+            if expiry <= datetime.now(UTC):
+                return None, "session_expired"
+        try:
+            cookies = load_provider_session(db)
+        except ValueError:
+            return None, "invalid_session"
+        return (cookies, "") if cookies else (None, "session_expired")
 
     @property
     def stopped(self) -> bool:
@@ -83,8 +119,6 @@ class ProxiwareSwapRunner:
         self._stop.set()
 
     def _adapter(self, job):
-        if self.adapter_factory is None:
-            return None
         try:
             parameters = inspect.signature(self.adapter_factory).parameters
             if parameters:
@@ -105,7 +139,8 @@ class ProxiwareSwapRunner:
             raise RuntimeError("manual_action_required")
         old_external = str(result.get("old_assignment_external_id") or "").strip()
         new_external = str(result.get("new_assignment_external_id") or "").strip()
-        if not old_external or not new_external:
+        new_address = str(result.get("new_assignment_address") or "").strip()
+        if not old_external or not (new_external or new_address):
             raise RuntimeError("manual_action_required")
         return result
 
@@ -127,32 +162,124 @@ class ProxiwareSwapRunner:
             if not allow_manual and get_setting(db, "proxiware_auto_swap", "0") != "1":
                 record_worker_heartbeat(db, "swap_worker", "disabled")
                 return {"status": "disabled"}
+            configured_adapter = None
+            if self._uses_configured_adapter:
+                if (
+                    not bool(self.app.config.get("PROXIWARE_BROWSER_ENABLED", False))
+                    or not bool(self.app.config.get("PROXIWARE_BROWSER_ALLOW_MUTATION", False))
+                    or bool(self.app.config.get("PROXIWARE_BROWSER_DRY_RUN", False))
+                ):
+                    record_worker_heartbeat(db, "swap_worker", "manual_action_required", error_code="adapter_missing")
+                    return {"status": "manual_action_required", "error_code": "adapter_missing"}
+                cookies, session_error = self._configured_session(db)
+                if session_error:
+                    mark_manual_action_required(db, session_error)
+                    record_worker_heartbeat(db, "swap_worker", "manual_action_required", error_code=session_error)
+                    return {"status": "manual_action_required", "error_code": session_error}
+                try:
+                    configured_adapter = self._adapter(None)
+                    restore = getattr(configured_adapter, "restore_session", None)
+                    if not callable(restore):
+                        raise RuntimeError("adapter_missing")
+                    restore(cookies)
+                except Exception as exc:  # noqa: BLE001 - session restore must fail before a mutation claim
+                    code = safe_swap_error(exc)
+                    if code == "provider_error":
+                        code = "manual_action_required"
+                    mark_manual_action_required(db, code)
+                    record_worker_heartbeat(db, "swap_worker", "manual_action_required", error_code=code)
+                    return {"status": "manual_action_required", "error_code": code}
+            if not allow_manual and job_id is None:
+                queue_eligible_swaps(db)
             job = claim_next_swap(db, claim_seconds=self.claim_seconds, job_id=job_id)
             if job is None:
                 record_worker_heartbeat(db, "swap_worker", "idle")
                 return {"status": "idle"}
+            context = db.execute(
+                "SELECT sj.*, pa.external_id AS old_assignment_external_id, "
+                "pa.dashboard_assignment_id, pa.dashboard_eligible, pa.dashboard_connections, "
+                "ps.external_id AS subscription_external_id "
+                "FROM swap_jobs sj "
+                "JOIN provider_assignments pa ON pa.id=sj.old_assignment_id "
+                "JOIN provider_subscriptions ps ON ps.id=sj.subscription_id "
+                "WHERE sj.id=? AND sj.provider=? AND pa.provider=? AND ps.provider=?",
+                (int(job["id"]), "proxiware", "proxiware", "proxiware"),
+            ).fetchone()
+            if context is None:
+                mark_swap_blocked(
+                    db, int(job["id"]), error_code="manual_action_required", claim_token=job["claim_token"]
+                )
+                record_worker_heartbeat(db, "swap_worker", "blocked", error_code="manual_action_required")
+                return {"status": "blocked", "job_id": int(job["id"]), "error_code": "manual_action_required"}
+            job = context
+            mutation_started = False
             try:
-                decision = revalidate_swap_job(db, int(job["id"]), allow_manual=allow_manual)
+                decision = revalidate_swap_job(
+                    db,
+                    int(job["id"]),
+                    allow_manual=allow_manual,
+                    claim_token=job["claim_token"],
+                )
                 if not decision.allowed:
+                    record_worker_heartbeat(db, "swap_worker", "blocked", error_code=decision.reason)
                     return {
                         "status": "rejected",
                         "job_id": int(job["id"]),
                         "error_code": decision.reason,
                     }
-                result = self._execute(self._adapter(job), job)
-                mark_swap_success(
+                adapter = configured_adapter or self._adapter(job)
+                if adapter is None or not (getattr(adapter, "swap", None) or getattr(adapter, "execute_swap", None)):
+                    raise RuntimeError("manual_action_required")
+                if getattr(adapter, "allow_mutation", True) is not True:
+                    raise RuntimeError("manual_action_required")
+                decision = revalidate_swap_job(
+                    db,
+                    int(job["id"]),
+                    allow_manual=allow_manual,
+                    claim_token=job["claim_token"],
+                    enter_mutation=True,
+                )
+                if not decision.allowed:
+                    record_worker_heartbeat(db, "swap_worker", "blocked", error_code=decision.reason)
+                    return {
+                        "status": "rejected",
+                        "job_id": int(job["id"]),
+                        "error_code": decision.reason,
+                    }
+                mutation_started = True
+                fenced = db.execute(
+                    "SELECT * FROM swap_jobs WHERE id=? AND provider=? AND state='mutating' AND claim_token=?",
+                    (int(job["id"]), "proxiware", str(job["claim_token"])),
+                ).fetchone()
+                if fenced is None:
+                    raise RuntimeError("manual_action_required")
+                job = dict(fenced)
+                job["old_assignment_external_id"] = job["mutation_old_assignment_external_id"]
+                job["dashboard_assignment_id"] = job["mutation_dashboard_assignment_id"]
+                job["subscription_external_id"] = job["mutation_subscription_external_id"]
+                result = self._execute(adapter, job)
+                mark_provider_applied(
                     db,
                     int(job["id"]),
                     old_assignment_external_id=result["old_assignment_external_id"],
-                    new_assignment_external_id=result["new_assignment_external_id"],
-                    new_assignment=result.get("new_assignment"),
+                    new_assignment_external_id=result.get("new_assignment_external_id"),
+                    new_assignment_address=result.get("new_assignment_address"),
+                    applied_at=datetime.now(UTC),
                     claim_token=job["claim_token"],
                 )
-                record_worker_heartbeat(db, "swap_worker", "ok", last_success=True)
-                return {"status": "success", "job_id": int(job["id"])}
+                record_worker_heartbeat(db, "swap_worker", "provider_applied")
+                return {"status": "reconciliation_required", "job_id": int(job["id"])}
             except Exception as exc:  # noqa: BLE001 - worker boundary must isolate adapters
                 code = safe_swap_error(exc)
-                if code in MANUAL_ACTION_CODES:
+                if mutation_started:
+                    mark_reconciliation_required(
+                        db,
+                        int(job["id"]),
+                        error_code=code,
+                        claim_token=job["claim_token"],
+                    )
+                    state = "reconciliation_required"
+                elif code in MANUAL_ACTION_CODES:
                     mark_swap_blocked(db, int(job["id"]), error_code=code, claim_token=job["claim_token"])
                     state = "blocked"
                 else:

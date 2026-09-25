@@ -18,6 +18,7 @@ from app.services.proxiware import (
     assignment_identity_from_row,
 )
 from app.services.proxiware_swap import ensure_proxiware_swap_schema
+from app.services.settings import get_setting
 
 _PRIVATE_EGRESS_NETWORKS = tuple(
     ipaddress.ip_network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
@@ -151,6 +152,26 @@ def _duplicate_egress(db, assignment_id: int, exit_ip: str) -> bool:
     return provider_duplicate is not None
 
 
+def _dashboard_ready(db, row, *, now: datetime | None = None) -> bool:
+    values = dict(row)
+    if (
+        not str(values.get("dashboard_assignment_id") or "").strip()
+        or str(values.get("dashboard_source") or "") != "provider_dashboard"
+        or str(values.get("dashboard_eligible") or "").strip().lower() not in {"1", "true", "yes", "on"}
+    ):
+        return False
+    try:
+        connections = int(values.get("dashboard_connections"))
+        observed = datetime.fromisoformat(str(values.get("dashboard_observed_at") or ""))
+        observed = observed.astimezone(UTC) if observed.tzinfo else observed.replace(tzinfo=UTC)
+        max_age = max(60, int(get_setting(db, "proxiware_dashboard_max_age_seconds", "900")))
+        current = now or datetime.now(UTC)
+        current = current.astimezone(UTC) if current.tzinfo else current.replace(tzinfo=UTC)
+    except (TypeError, ValueError):
+        return False
+    return 0 <= connections < 1000 and timedelta(0) <= current - observed <= timedelta(seconds=max_age)
+
+
 def reconcile_proxiware_duplicates(db, *, commit: bool = True) -> int:
     """Reconcile provider egress identity against user and provider inventory.
 
@@ -161,7 +182,8 @@ def reconcile_proxiware_duplicates(db, *, commit: bool = True) -> int:
 
     _ensure_columns(db)
     provider_rows = db.execute(
-        "SELECT id, exit_ip, qualification, live_status, provider_eligible, missing_at "
+        "SELECT id, exit_ip, qualification, live_status, provider_eligible, missing_at,"
+        "dashboard_assignment_id,dashboard_eligible,dashboard_connections,dashboard_observed_at,dashboard_source "
         "FROM provider_assignments WHERE provider='proxiware' AND missing_at IS NULL"
     ).fetchall()
     user_ips: set[str] = set()
@@ -195,6 +217,7 @@ def reconcile_proxiware_duplicates(db, *, commit: bool = True) -> int:
             and str(row["live_status"] or "").lower() == "live"
             and str(row["qualification"] or "").lower() == "allow"
             and str(row["provider_eligible"] or "").strip().lower() in {"1", "true", "yes", "on"}
+            and _dashboard_ready(db, row)
         )
         cursor = db.execute(
             "UPDATE provider_assignments SET duplicate_egress=?, distribution_enabled=? WHERE id=? "
@@ -295,6 +318,7 @@ def qualify_proxiware_assignment(
             qualification == "allow"
             and not duplicate
             and str(row["provider_eligible"] or "").strip().lower() in {"1", "true", "yes", "on"}
+            and _dashboard_ready(db, row, now=datetime.fromisoformat(current))
         )
     elif live_status == "dead":
         qualification = "dead"

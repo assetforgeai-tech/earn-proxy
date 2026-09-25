@@ -19,6 +19,23 @@ def test_admin_can_create_and_delete_a_user_without_reusing_the_record(app, clie
     assert row["session_version"] > 1
 
 
+def test_admin_rejects_email_longer_than_rfc_limit(app, client):
+    login_admin(client)
+    oversized = "a" * 245 + "@example.com"
+
+    response = client.post(
+        "/admin/users",
+        data={"email": oversized, "password": "created-password"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "A valid email and password of at least 8 characters are required"
+    with app.app_context():
+        assert (
+            get_db().execute("SELECT COUNT(*) AS count FROM users WHERE email=?", (oversized,)).fetchone()["count"] == 0
+        )
+
+
 def test_deleted_user_cannot_login_or_add_proxy(app, client):
     register(client, "delete-me@example.com", "delete-password")
     login_admin(client)

@@ -81,6 +81,17 @@ def create_app(test_config: dict | None = None) -> Flask:
         ),
         PROXIWARE_LOGIN_URL=os.environ.get("EARN_PROXY_PROXIWARE_LOGIN_URL", "https://app.proxiware.com/login"),
         PROXIWARE_HCAPTCHA_SITE_KEY=os.environ.get("EARN_PROXY_PROXIWARE_HCAPTCHA_SITE_KEY", ""),
+        PROXIWARE_BROWSER_ENABLED=os.environ.get("EARN_PROXY_PROXIWARE_BROWSER_ENABLED", "0") == "1",
+        PROXIWARE_BROWSER_DRY_RUN=os.environ.get("EARN_PROXY_PROXIWARE_BROWSER_DRY_RUN", "0") == "1",
+        PROXIWARE_BROWSER_ALLOW_MUTATION=os.environ.get("EARN_PROXY_PROXIWARE_BROWSER_ALLOW_MUTATION", "0") == "1",
+        PROXIWARE_CDP_URL=os.environ.get("EARN_PROXY_PROXIWARE_CDP_URL", "http://127.0.0.1:9222"),
+        PROXIWARE_BROWSER_DASHBOARD_URL=os.environ.get(
+            "EARN_PROXY_PROXIWARE_BROWSER_DASHBOARD_URL", "https://app.proxiware.com/static/proxy/isp"
+        ),
+        PROXIWARE_BROWSER_INTERVAL_SECONDS=int(os.environ.get("EARN_PROXY_PROXIWARE_BROWSER_INTERVAL_SECONDS", "300")),
+        PROXIWARE_BROWSER_HEARTBEAT_INTERVAL_SECONDS=float(
+            os.environ.get("EARN_PROXY_PROXIWARE_BROWSER_HEARTBEAT_INTERVAL_SECONDS", "30")
+        ),
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=os.environ.get("EARN_PROXY_COOKIE_SECURE", "1") == "1",

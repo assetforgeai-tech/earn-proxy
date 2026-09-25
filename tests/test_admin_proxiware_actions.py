@@ -355,15 +355,15 @@ def test_manual_swap_route_executes_only_selected_job_with_injected_adapter(clie
             assert int(job["id"]) == job_id
             return {
                 "old_assignment_external_id": "action-old",
-                "new_assignment_external_id": "action-new",
+                "new_assignment_address": "51.194.85.9",
             }
 
     app.extensions["proxiware_swap_adapter_factory"] = lambda _job: Adapter()
     response = client.post(f"/admin/providers/proxiware/swaps/{job_id}/manual")
-    assert response.status_code == 200
-    assert response.get_json()["status"] == "success"
+    assert response.status_code == 202
+    assert response.get_json()["status"] == "reconciliation_required"
     row = db.execute("SELECT state FROM swap_jobs WHERE id=?", (job_id,)).fetchone()
-    assert row["state"] == "success"
+    assert row["state"] == "provider_applied"
 
 
 def test_provider_action_rate_limit_blocks_repeated_sync_requests(client, app):
@@ -401,3 +401,39 @@ def test_provider_action_rate_limit_records_are_provider_scoped(client, db):
     assert "provider" in columns
     rows = db.execute("SELECT DISTINCT provider FROM provider_action_attempts").fetchall()
     assert [row["provider"] for row in rows] == ["proxiware"]
+
+
+def test_all_proxiware_admin_responses_are_no_store(client):
+    login_admin(client)
+
+    get_response = client.get("/admin/providers/proxiware")
+    post_response = client.post(
+        "/admin/providers/proxiware/settings",
+        data={
+            "eligibility_threshold": "1000",
+            "worker_concurrency": "1",
+            "retry_limit": "2",
+            "cooldown_seconds": "60",
+        },
+    )
+
+    assert get_response.headers["Cache-Control"] == "no-store"
+    assert post_response.headers["Cache-Control"] == "no-store"
+
+
+def test_provider_policy_mutations_are_rate_limited(client, app):
+    login_admin(client)
+    app.config["PROXIWARE_ACTION_RATE_LIMIT"] = 1
+    app.config["PROXIWARE_ACTION_RATE_WINDOW_SECONDS"] = 300
+    payload = {
+        "eligibility_threshold": "1000",
+        "worker_concurrency": "1",
+        "retry_limit": "2",
+        "cooldown_seconds": "60",
+    }
+
+    assert client.post("/admin/providers/proxiware/settings", data=payload).status_code == 200
+    response = client.post("/admin/providers/proxiware/settings", data=payload)
+
+    assert response.status_code == 429
+    assert response.get_json()["error_code"] == "rate_limited"

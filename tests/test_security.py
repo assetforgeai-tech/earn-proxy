@@ -5,6 +5,7 @@ import threading
 from datetime import UTC, datetime
 
 from app import create_app
+from app.db import get_db
 
 
 def test_production_rejects_placeholder_or_missing_secrets(tmp_path):
@@ -168,6 +169,20 @@ def test_registration_rate_limit_rejects_before_password_work(app, client, monke
     assert blocked.status_code == 429
     assert blocked.get_json()["error"] == "Too many registration attempts. Try again later."
     assert called is False
+
+
+def test_registration_rejects_email_longer_than_rfc_limit(app, client):
+    oversized = "a" * 245 + "@example.com"
+
+    response = client.post(
+        "/register",
+        data={"email": oversized, "password": "member-password"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "A valid email and password of at least 8 characters are required"
+    with app.app_context():
+        assert get_db().execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"] == 1
 
 
 def test_registration_limit_is_shared_across_web_processes(tmp_path):

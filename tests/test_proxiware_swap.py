@@ -5,19 +5,24 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from app.crypto import encrypt_secret
 from app.db import get_db
 from app.services.proxiware_swap import (
     ACTIVE_SWAP_STATES,
     SwapDecision,
+    SwapReconciliationPending,
     cancel_swap,
     claim_next_swap,
     ensure_proxiware_swap_schema,
     get_provider_secret_metadata,
+    mark_provider_applied,
+    mark_reconciliation_required,
     mark_swap_blocked,
     mark_swap_failed,
     mark_swap_success,
     queue_eligible_swaps,
     request_manual_swap,
+    revalidate_swap_job,
     save_provider_secret,
 )
 from app.services.settings import set_setting
@@ -118,6 +123,63 @@ def _seed_foreign_job(db):
     return int(db.execute("SELECT last_insert_rowid()").fetchone()[0])
 
 
+def _advance_to_provider_applied(db, *, now, new_external_id="assignment-2"):
+    set_setting(db, "proxiware_auto_swap", "1")
+    assert queue_eligible_swaps(db, now=now) == 1
+    job = claim_next_swap(db, now=now)
+    revalidate_swap_job(
+        db,
+        job["id"],
+        now=now,
+        claim_token=job["claim_token"],
+        enter_mutation=True,
+    )
+    mark_provider_applied(
+        db,
+        job["id"],
+        old_assignment_external_id="assignment-1",
+        new_assignment_external_id=new_external_id,
+        applied_at=now,
+        claim_token=job["claim_token"],
+    )
+    return job
+
+
+def _seed_replacement_evidence(
+    db,
+    subscription_id,
+    *,
+    external_id="assignment-2",
+    observed_at,
+    username="replacement-user",
+    password="replacement-password",
+):
+    timestamp = observed_at.isoformat()
+    db.execute(
+        """
+        INSERT INTO provider_assignments(
+            subscription_id,provider,external_id,host,port,username_encrypted,password_encrypted,
+            status,qualification,provider_eligible,live_status,protocol,distribution_enabled,
+            dashboard_assignment_id,dashboard_eligible,dashboard_connections,dashboard_observed_at,
+            dashboard_source,assigned_at,last_seen_at,created_at,updated_at
+        ) VALUES(?, 'proxiware', ?, 'new.example', 1080, ?, ?, 'active', 'pending', 1,
+                 'pending', 'socks5', 0, 'dashboard-new', 1, 1, ?, 'provider_dashboard', ?, ?, ?, ?)
+        """,
+        (
+            subscription_id,
+            external_id,
+            encrypt_secret(username) if username else "",
+            encrypt_secret(password) if password else "",
+            timestamp,
+            timestamp,
+            timestamp,
+            timestamp,
+            timestamp,
+        ),
+    )
+    db.commit()
+
+
 def test_queue_requires_all_guards_and_creates_one_durable_job(app):
     now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
     with app.app_context():
@@ -155,84 +217,76 @@ def test_queue_skips_failed_assignment_guards(app, field, value, reason):
 
 def test_success_persists_mapping_and_enforces_sixty_second_cooldown(app):
     success_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    reconciled_at = success_at + timedelta(seconds=1)
     with app.app_context():
         db = get_db()
         sub_id = _seed_subscription(db)
-        set_setting(db, "proxiware_auto_swap", "1")
-        assert queue_eligible_swaps(db, now=success_at) == 1
-        job_id = db.execute("SELECT id FROM swap_jobs WHERE subscription_id=?", (sub_id,)).fetchone()["id"]
+        job = _advance_to_provider_applied(db, now=success_at)
+        _seed_replacement_evidence(db, sub_id, observed_at=reconciled_at)
         mark_swap_success(
             db,
-            job_id,
+            job["id"],
             old_assignment_external_id="assignment-1",
             new_assignment_external_id="assignment-2",
-            success_at=success_at,
+            success_at=reconciled_at,
+            claim_token=job["claim_token"],
         )
-        job = db.execute("SELECT * FROM swap_jobs WHERE id=?", (job_id,)).fetchone()
-        mapping = db.execute("SELECT * FROM swap_mappings WHERE swap_job_id=?", (job_id,)).fetchone()
+        stored_job = db.execute("SELECT * FROM swap_jobs WHERE id=?", (job["id"],)).fetchone()
+        mapping = db.execute("SELECT * FROM swap_mappings WHERE swap_job_id=?", (job["id"],)).fetchone()
         assignment = db.execute(
             "SELECT replacement_ready_at FROM provider_assignments WHERE external_id='assignment-2'"
         ).fetchone()
-    assert job["state"] == "success"
+    assert stored_job["state"] == "success"
     assert mapping["old_assignment_external_id"] == "assignment-1"
     assert mapping["new_assignment_external_id"] == "assignment-2"
     assert assignment is not None
-    assert assignment["replacement_ready_at"] == (success_at + timedelta(seconds=60)).isoformat()
+    assert assignment["replacement_ready_at"] == (reconciled_at + timedelta(seconds=60)).isoformat()
 
 
 def test_success_uses_configured_cooldown_but_never_less_than_sixty_seconds(app):
     success_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    reconciled_at = success_at + timedelta(seconds=1)
     with app.app_context():
         db = get_db()
         sub_id = _seed_subscription(db)
-        set_setting(db, "proxiware_auto_swap", "1")
         set_setting(db, "proxiware_cooldown_seconds", "120")
-        assert queue_eligible_swaps(db, now=success_at) == 1
-        job_id = db.execute("SELECT id FROM swap_jobs WHERE subscription_id=?", (sub_id,)).fetchone()["id"]
+        job = _advance_to_provider_applied(db, now=success_at)
+        _seed_replacement_evidence(db, sub_id, observed_at=reconciled_at)
         mark_swap_success(
             db,
-            job_id,
+            job["id"],
             old_assignment_external_id="assignment-1",
             new_assignment_external_id="assignment-2",
-            success_at=success_at,
+            success_at=reconciled_at,
+            claim_token=job["claim_token"],
         )
         assignment = db.execute(
             "SELECT replacement_ready_at FROM provider_assignments WHERE external_id='assignment-2'"
         ).fetchone()
-    assert assignment["replacement_ready_at"] == (success_at + timedelta(seconds=120)).isoformat()
+    assert assignment["replacement_ready_at"] == (reconciled_at + timedelta(seconds=120)).isoformat()
 
 
 def test_success_disables_distribution_until_replacement_is_requalified(app):
     success_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    reconciled_at = success_at + timedelta(seconds=1)
     with app.app_context():
         db = get_db()
         sub_id = _seed_subscription(db)
-        set_setting(db, "proxiware_auto_swap", "1")
         db.execute(
             "UPDATE provider_assignments SET distribution_enabled=1 WHERE subscription_id=?",
             (sub_id,),
         )
         db.commit()
-        assert queue_eligible_swaps(db, now=success_at) == 1
-        job_id = db.execute("SELECT id FROM swap_jobs WHERE subscription_id=?", (sub_id,)).fetchone()["id"]
-        db.execute(
-            """
-            INSERT INTO provider_assignments(
-                subscription_id,provider,external_id,host,port,status,qualification,
-                provider_eligible,live_status,distribution_enabled,assigned_at,last_seen_at,
-                created_at,updated_at
-            ) VALUES(?, 'proxiware','assignment-2','new.example',8080,'active','allow',1,'live',1,?,?,?,?)
-            """,
-            (sub_id, success_at.isoformat(), success_at.isoformat(), success_at.isoformat(), success_at.isoformat()),
-        )
-        db.commit()
+        job = _advance_to_provider_applied(db, now=success_at)
+        _seed_replacement_evidence(db, sub_id, observed_at=reconciled_at)
 
         mark_swap_success(
             db,
-            job_id,
+            job["id"],
             old_assignment_external_id="assignment-1",
             new_assignment_external_id="assignment-2",
-            success_at=success_at,
+            success_at=reconciled_at,
+            claim_token=job["claim_token"],
         )
 
         rows = db.execute(
@@ -243,6 +297,87 @@ def test_success_disables_distribution_until_replacement_is_requalified(app):
 
     assert tuple(rows[0]) == ("assignment-1", "replaced", "risk", "live", 1, 0)
     assert tuple(rows[1]) == ("assignment-2", "pending", "pending", "pending", 0, 0)
+
+
+def test_success_requires_worker_claim_and_decryptable_replacement_credentials(app):
+    mutation_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    reconciled_at = mutation_at + timedelta(seconds=1)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db)
+        job = _advance_to_provider_applied(db, now=mutation_at)
+        _seed_replacement_evidence(db, sub_id, observed_at=reconciled_at, username="", password="")
+
+        with pytest.raises(ValueError, match="claim"):
+            mark_swap_success(
+                db,
+                job["id"],
+                old_assignment_external_id="assignment-1",
+                new_assignment_external_id="assignment-2",
+                success_at=reconciled_at,
+            )
+        with pytest.raises(SwapReconciliationPending, match="credential"):
+            mark_swap_success(
+                db,
+                job["id"],
+                old_assignment_external_id="assignment-1",
+                new_assignment_external_id="assignment-2",
+                success_at=reconciled_at,
+                claim_token=job["claim_token"],
+            )
+
+        stored = db.execute("SELECT state FROM swap_jobs WHERE id=?", (job["id"],)).fetchone()
+        mapping = db.execute("SELECT id FROM swap_mappings WHERE swap_job_id=?", (job["id"],)).fetchone()
+    assert stored["state"] == "provider_applied"
+    assert mapping is None
+
+
+def test_reconciliation_resolves_replacement_external_id_from_provider_new_address(app):
+    mutation_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    reconciled_at = mutation_at + timedelta(seconds=1)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db)
+        set_setting(db, "proxiware_auto_swap", "1")
+        assert queue_eligible_swaps(db, now=mutation_at) == 1
+        job = claim_next_swap(db, now=mutation_at)
+        revalidate_swap_job(
+            db,
+            job["id"],
+            now=mutation_at,
+            claim_token=job["claim_token"],
+            enter_mutation=True,
+        )
+        mark_provider_applied(
+            db,
+            job["id"],
+            old_assignment_external_id="assignment-1",
+            new_assignment_address="51.194.85.9",
+            applied_at=mutation_at,
+            claim_token=job["claim_token"],
+        )
+        _seed_replacement_evidence(
+            db,
+            sub_id,
+            external_id="official-replacement-id",
+            observed_at=reconciled_at,
+        )
+        db.execute("UPDATE provider_assignments SET host='51.194.85.9' WHERE external_id='official-replacement-id'")
+        db.commit()
+
+        mark_swap_success(
+            db,
+            job["id"],
+            old_assignment_external_id="assignment-1",
+            success_at=reconciled_at,
+            claim_token=job["claim_token"],
+        )
+        stored = db.execute("SELECT state,new_assignment_id FROM swap_jobs WHERE id=?", (job["id"],)).fetchone()
+        mapping = db.execute("SELECT new_assignment_external_id FROM swap_mappings").fetchone()
+
+    assert stored["state"] == "success"
+    assert stored["new_assignment_id"]
+    assert mapping["new_assignment_external_id"] == "official-replacement-id"
 
 
 def test_blocked_security_errors_pause_auto_swap_and_do_not_retry(app):
@@ -273,8 +408,94 @@ def test_secret_storage_is_encrypted_write_only_and_blank_preserves(app):
         assert db.execute("SELECT secret_encrypted FROM provider_credentials WHERE name='api_key'").fetchone()[0]
 
 
-def test_active_swap_states_are_explicit():
-    assert frozenset({"pending", "running"}) == ACTIVE_SWAP_STATES
+def test_active_swap_states_include_mutation_and_reconciliation():
+    assert frozenset({"pending", "running", "mutating", "provider_applied", "reconciliation_required"}) == (
+        ACTIVE_SWAP_STATES
+    )
+
+
+def test_expired_subscription_is_not_swap_eligible(app):
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db)
+        db.execute(
+            "UPDATE provider_subscriptions SET expires_at=?, status='active' WHERE id=?",
+            (int((now - timedelta(seconds=1)).timestamp()), sub_id),
+        )
+        db.commit()
+
+        assert SwapDecision.for_subscription(db, sub_id, now=now).reason == "manual_action_required"
+
+
+def test_mutation_fence_is_not_reclaimed_or_canceled(app):
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        _seed_subscription(db)
+        set_setting(db, "proxiware_auto_swap", "1")
+        assert queue_eligible_swaps(db, now=now) == 1
+        job = claim_next_swap(db, now=now, claim_seconds=30)
+        decision = revalidate_swap_job(
+            db,
+            job["id"],
+            now=now,
+            claim_token=job["claim_token"],
+            enter_mutation=True,
+        )
+        assert decision.allowed is True
+        stored = db.execute("SELECT state FROM swap_jobs WHERE id=?", (job["id"],)).fetchone()
+        assert stored["state"] == "mutating"
+        assert claim_next_swap(db, now=now + timedelta(hours=1)) is None
+        with pytest.raises(LookupError, match="terminal"):
+            cancel_swap(db, job["id"], now=now + timedelta(seconds=1))
+        assert db.execute("SELECT state FROM swap_jobs WHERE id=?", (job["id"],)).fetchone()["state"] == "mutating"
+
+
+def test_provider_response_requires_reconciliation_before_success(app):
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        _seed_subscription(db)
+        set_setting(db, "proxiware_auto_swap", "1")
+        assert queue_eligible_swaps(db, now=now) == 1
+        job = claim_next_swap(db, now=now)
+        revalidate_swap_job(db, job["id"], now=now, claim_token=job["claim_token"], enter_mutation=True)
+        mark_provider_applied(
+            db,
+            job["id"],
+            old_assignment_external_id="assignment-1",
+            new_assignment_external_id="assignment-2",
+            applied_at=now,
+            claim_token=job["claim_token"],
+        )
+        stored = db.execute("SELECT state,new_assignment_id FROM swap_jobs WHERE id=?", (job["id"],)).fetchone()
+        assert stored["state"] == "provider_applied"
+        assert stored["new_assignment_id"] is None
+        assert db.execute("SELECT COUNT(*) FROM swap_mappings WHERE swap_job_id=?", (job["id"],)).fetchone()[0] == 0
+        assert db.execute("SELECT id FROM provider_assignments WHERE external_id='assignment-2'").fetchone() is None
+
+
+def test_unknown_provider_outcome_requires_reconciliation_and_disables_auto_swap(app):
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        _seed_subscription(db)
+        set_setting(db, "proxiware_auto_swap", "1")
+        assert queue_eligible_swaps(db, now=now) == 1
+        job = claim_next_swap(db, now=now)
+        revalidate_swap_job(db, job["id"], now=now, claim_token=job["claim_token"], enter_mutation=True)
+        mark_reconciliation_required(
+            db,
+            job["id"],
+            error_code="provider_timeout",
+            required_at=now,
+            claim_token=job["claim_token"],
+        )
+        stored = db.execute("SELECT state,error_code FROM swap_jobs WHERE id=?", (job["id"],)).fetchone()
+        setting = db.execute("SELECT value FROM settings WHERE key='proxiware_auto_swap'").fetchone()
+    assert tuple(stored) == ("reconciliation_required", "provider_timeout")
+    assert setting["value"] == "0"
 
 
 def test_auto_swap_is_disabled_by_default(app):
@@ -316,9 +537,9 @@ def test_swap_requires_fresh_dashboard_eligibility_and_connections(app):
         db = get_db()
         sub_id = _seed_subscription(db)
         set_setting(db, "proxiware_auto_swap", "1")
-        assignment_id = db.execute(
-            "SELECT id FROM provider_assignments WHERE subscription_id=?", (sub_id,)
-        ).fetchone()["id"]
+        assignment_id = db.execute("SELECT id FROM provider_assignments WHERE subscription_id=?", (sub_id,)).fetchone()[
+            "id"
+        ]
         db.execute(
             "UPDATE provider_assignments SET dashboard_assignment_id='dash-1', dashboard_eligible=0, "
             "dashboard_connections=1, dashboard_observed_at=?, dashboard_source='provider_dashboard' WHERE id=?",
@@ -337,9 +558,9 @@ def test_swap_rejects_stale_dashboard_observation(app):
     with app.app_context():
         db = get_db()
         sub_id = _seed_subscription(db)
-        assignment_id = db.execute(
-            "SELECT id FROM provider_assignments WHERE subscription_id=?", (sub_id,)
-        ).fetchone()["id"]
+        assignment_id = db.execute("SELECT id FROM provider_assignments WHERE subscription_id=?", (sub_id,)).fetchone()[
+            "id"
+        ]
         db.execute(
             "UPDATE provider_assignments SET dashboard_assignment_id='dash-1', dashboard_eligible=1, "
             "dashboard_connections=1, dashboard_observed_at=?, dashboard_source='provider_dashboard' WHERE id=?",
@@ -391,22 +612,23 @@ def test_stale_worker_cannot_complete_reclaimed_swap(app):
         stale = claim_next_swap(db, now=now, claim_seconds=30)
         current = claim_next_swap(db, now=now + timedelta(seconds=31), claim_seconds=30)
         with pytest.raises(ValueError, match="claim"):
-            mark_swap_success(
+            revalidate_swap_job(
                 db,
                 stale["id"],
-                old_assignment_external_id="assignment-1",
-                new_assignment_external_id="assignment-2",
-                success_at=now + timedelta(seconds=32),
+                now=now + timedelta(seconds=32),
                 claim_token=stale["claim_token"],
+                enter_mutation=True,
             )
-        mark_swap_success(
+        decision = revalidate_swap_job(
             db,
             current["id"],
-            old_assignment_external_id="assignment-1",
-            new_assignment_external_id="assignment-2",
-            success_at=now + timedelta(seconds=32),
+            now=now + timedelta(seconds=32),
             claim_token=current["claim_token"],
+            enter_mutation=True,
         )
+        stored = db.execute("SELECT state FROM swap_jobs WHERE id=?", (current["id"],)).fetchone()
+    assert decision.allowed is True
+    assert stored["state"] == "mutating"
 
 
 def test_proxiware_claim_ignores_jobs_owned_by_another_provider(app):
@@ -466,13 +688,8 @@ def test_swap_success_rejects_cross_subscription_assignment_mapping(app):
     success_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
     with app.app_context():
         db = get_db()
-        first_sub_id = _seed_subscription(db)
-        set_setting(db, "proxiware_auto_swap", "1")
-        assert queue_eligible_swaps(db, now=success_at) == 1
-        job = db.execute(
-            "SELECT id,old_assignment_id FROM swap_jobs WHERE subscription_id=?",
-            (first_sub_id,),
-        ).fetchone()
+        _seed_subscription(db)
+        job = _advance_to_provider_applied(db, now=success_at, new_external_id="foreign-new")
         db.execute(
             """
             INSERT INTO provider_subscriptions
@@ -502,12 +719,13 @@ def test_swap_success_rejects_cross_subscription_assignment_mapping(app):
                 int(job["id"]),
                 old_assignment_external_id="assignment-1",
                 new_assignment_external_id="foreign-new",
-                success_at=success_at,
+                success_at=success_at + timedelta(seconds=1),
+                claim_token=job["claim_token"],
             )
 
         stored_job = db.execute("SELECT state FROM swap_jobs WHERE id=?", (job["id"],)).fetchone()
         mapping = db.execute("SELECT id FROM swap_mappings WHERE swap_job_id=?", (job["id"],)).fetchone()
-    assert stored_job["state"] == "pending"
+    assert stored_job["state"] == "provider_applied"
     assert mapping is None
 
 

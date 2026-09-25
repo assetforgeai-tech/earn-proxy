@@ -7,9 +7,11 @@ import pytest
 from app.db import get_db
 from app.services.proxiware import sync_proxiware_inventory
 from app.services.proxiware_dashboard import (
+    DashboardAssignment,
     DashboardObservationError,
     ProxiwareDashboardObserver,
     apply_dashboard_observation,
+    apply_dashboard_snapshot,
 )
 
 
@@ -183,11 +185,151 @@ def test_observer_rejects_invalid_payload(payload):
         ProxiwareDashboardObserver(RecordingTransport(payload)).observe(subscription_id="39277")
 
 
-def test_observer_ignores_rows_from_other_subscriptions():
+def test_observer_filters_rows_from_other_subscriptions():
     rows = ProxiwareDashboardObserver(
         RecordingTransport(
-            {"proxies": [{"assignment_id": 1, "subscription_id": 99999, "addr": "51.194.85.8"}]}
+            {
+                "proxies": [
+                    {"assignment_id": 99, "subscription_id": 99999, "addr": "51.194.85.9"},
+                    {"assignment_id": 1, "subscription_id": 39277, "addr": "51.194.85.8"},
+                ]
+            }
         )
     ).observe(subscription_id="39277")
 
-    assert rows == []
+    assert [(row.assignment_id, row.subscription_id) for row in rows] == [("1", "39277")]
+
+
+def test_older_dashboard_snapshot_cannot_overwrite_newer_observation(app):
+    newest = datetime(2026, 9, 25, 8, 5, tzinfo=UTC)
+    older = newest - timedelta(minutes=2)
+    with app.app_context():
+        db = get_db()
+        sync_proxiware_inventory(db, FakeClient(), now=newest)
+        apply_dashboard_observation(
+            db,
+            ProxiwareDashboardObserver(
+                RecordingTransport(
+                    {
+                        "proxies": [
+                            {
+                                "assignment_id": 141943,
+                                "subscription_id": 39277,
+                                "addr": "51.194.85.8:1337",
+                                "eligible": True,
+                                "connections": 5,
+                            }
+                        ]
+                    }
+                ),
+                now=lambda: newest,
+            ).observe(subscription_id="39277")[0],
+            now=newest,
+        )
+
+        with pytest.raises(DashboardObservationError, match="older dashboard observation"):
+            apply_dashboard_observation(
+                db,
+                ProxiwareDashboardObserver(
+                    RecordingTransport(
+                        {
+                            "proxies": [
+                                {
+                                    "assignment_id": 141943,
+                                    "subscription_id": 39277,
+                                    "addr": "51.194.85.8:1337",
+                                    "eligible": False,
+                                    "connections": 999,
+                                }
+                            ]
+                        }
+                    ),
+                    now=lambda: older,
+                ).observe(subscription_id="39277")[0],
+                now=newest,
+            )
+        row = db.execute(
+            "SELECT dashboard_eligible,dashboard_connections,dashboard_observed_at "
+            "FROM provider_assignments WHERE external_id='api-assignment'"
+        ).fetchone()
+
+    assert tuple(row) == (1, 5, newest.isoformat())
+
+
+def test_dashboard_address_with_port_maps_exact_assignment(app):
+    observed_at = datetime(2026, 9, 25, 8, 0, tzinfo=UTC)
+
+    class SameHostClient(FakeClient):
+        def list_subscription_proxies(self, _subscription_id):
+            return [
+                {"id": "first", "host": "51.194.85.8", "port": 1337, "protocol": "socks5"},
+                {"id": "second", "host": "51.194.85.8", "port": 1443, "protocol": "socks5"},
+            ]
+
+    snapshot = ProxiwareDashboardObserver(
+        RecordingTransport(
+            {
+                "proxies": [
+                    {
+                        "assignment_id": "dashboard-second",
+                        "subscription_id": 39277,
+                        "addr": "51.194.85.8:1443",
+                        "eligible": True,
+                        "connections": 4,
+                    }
+                ]
+            }
+        ),
+        now=lambda: observed_at,
+    ).observe(subscription_id="39277")[0]
+
+    with app.app_context():
+        db = get_db()
+        sync_proxiware_inventory(db, SameHostClient(), now=observed_at)
+        assignment_id = apply_dashboard_observation(db, snapshot, now=observed_at)
+        row = db.execute("SELECT external_id FROM provider_assignments WHERE id=?", (assignment_id,)).fetchone()
+
+    assert row["external_id"] == "second"
+
+
+def test_dashboard_snapshot_is_atomic_when_one_row_is_ambiguous(app):
+    observed_at = datetime(2026, 9, 25, 8, 0, tzinfo=UTC)
+
+    class SameHostClient(FakeClient):
+        def list_subscription_proxies(self, _subscription_id):
+            return [
+                {"id": "first", "host": "51.194.85.8", "port": 1337, "protocol": "socks5"},
+                {"id": "second", "host": "51.194.85.9", "port": 1443, "protocol": "socks5"},
+                {"id": "third", "host": "51.194.85.9", "port": 1553, "protocol": "socks5"},
+            ]
+
+    snapshots = [
+        DashboardAssignment("dashboard-first", "39277", "51.194.85.8:1337", True, 1, observed_at),
+        DashboardAssignment("dashboard-ambiguous", "39277", "51.194.85.9", True, 1, observed_at),
+    ]
+    with app.app_context():
+        db = get_db()
+        sync_proxiware_inventory(db, SameHostClient(), now=observed_at)
+        with pytest.raises(DashboardObservationError, match="ambiguous"):
+            apply_dashboard_snapshot(db, "39277", snapshots, now=observed_at)
+        rows = db.execute("SELECT dashboard_assignment_id FROM provider_assignments ORDER BY id").fetchall()
+
+    assert [row["dashboard_assignment_id"] for row in rows] == [None, None, None]
+
+
+def test_empty_dashboard_snapshot_invalidates_stale_authorization(app):
+    observed_at = datetime(2026, 9, 25, 8, 0, tzinfo=UTC)
+    snapshot = DashboardAssignment("dashboard-first", "39277", "51.194.85.8:1337", True, 1, observed_at)
+    with app.app_context():
+        db = get_db()
+        sync_proxiware_inventory(db, FakeClient(), now=observed_at)
+        apply_dashboard_snapshot(db, "39277", [snapshot], now=observed_at)
+
+        with pytest.raises(DashboardObservationError, match="empty"):
+            apply_dashboard_snapshot(db, "39277", [], now=observed_at + timedelta(minutes=1))
+        row = db.execute(
+            "SELECT dashboard_assignment_id,dashboard_observed_at,dashboard_error_code,distribution_enabled "
+            "FROM provider_assignments WHERE external_id='api-assignment'"
+        ).fetchone()
+
+    assert tuple(row) == (None, None, "empty_snapshot", 0)

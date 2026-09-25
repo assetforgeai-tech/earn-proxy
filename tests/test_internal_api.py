@@ -93,6 +93,85 @@ def test_api_excludes_stale_online_and_suspect_proxies(app, client):
     assert response.get_data(as_text=True).splitlines() == ["fresh.example:9001:u:p"]
 
 
+def test_api_excludes_user_proxy_with_health_timestamp_too_far_in_future(app, client):
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "future-health@example.com", "password", status="active")
+        proxy_id = _online_proxy(
+            db,
+            user_id,
+            "future.example:9001:u:p",
+            "allow",
+            "198.51.100.34",
+        )
+        db.execute(
+            "UPDATE proxies SET last_success_at=? WHERE id=?",
+            ((datetime.now(UTC) + timedelta(days=7)).isoformat(), proxy_id),
+        )
+        db.commit()
+
+    response = client.get("/internal/api/v1/proxies", headers={"X-API-Key": "internal-test-key"})
+
+    assert response.status_code == 200
+    assert response.get_data(as_text=True) == ""
+
+
+def test_api_excludes_expired_proxiware_subscription_even_when_status_is_active(app, client):
+    from app.services.proxiware_swap import ensure_proxiware_swap_schema
+
+    with app.app_context():
+        db = get_db()
+        ensure_proxiware_swap_schema(db)
+        now = datetime.now(UTC)
+        db.execute(
+            """
+            INSERT INTO provider_subscriptions(
+                provider,external_id,status,expires_at,created_at,updated_at
+            ) VALUES('proxiware','expired-sub','active',?,?,?)
+            """,
+            (
+                int((now - timedelta(days=1)).timestamp()),
+                now.isoformat(),
+                now.isoformat(),
+            ),
+        )
+        subscription_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.execute(
+            """
+            INSERT INTO provider_assignments(
+                subscription_id,provider,external_id,host,port,status,qualification,
+                provider_eligible,live_status,protocol,distribution_enabled,duplicate_egress,
+                dashboard_assignment_id,dashboard_source,dashboard_eligible,dashboard_connections,
+                dashboard_observed_at,exit_ip,egress_verified_at,last_checked_at,created_at,updated_at
+            ) VALUES(?,?,?,?,?,'active','allow',1,'live','socks5',1,0,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                subscription_id,
+                "proxiware",
+                "expired-assignment",
+                "expired.example",
+                8080,
+                "dashboard-expired",
+                "provider_dashboard",
+                1,
+                1,
+                now.isoformat(),
+                "198.51.100.35",
+                now.isoformat(),
+                now.isoformat(),
+                now.isoformat(),
+                now.isoformat(),
+            ),
+        )
+        db.commit()
+        set_setting(db, "proxiware_distribution_enabled", "1")
+
+    response = client.get("/internal/api/v1/proxy-raw", headers={"X-API-Key": "internal-test-key"})
+
+    assert response.status_code == 200
+    assert response.get_data(as_text=True) == ""
+
+
 def test_api_excludes_online_rows_without_a_successful_health_observation(app, client):
     with app.app_context():
         db = get_db()
@@ -267,6 +346,31 @@ def test_transfer_api_returns_service_unavailable_when_relay_feed_fails(client, 
 
     assert response.status_code == 503
     assert response.get_json() == {"error": "Transfer feed is temporarily unavailable"}
+
+
+def test_transfer_feed_never_follows_redirects(app, client, monkeypatch):
+    seen = {}
+
+    class Response:
+        content = b'{"items": []}'
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"items": []}
+
+    def fake_get(_url, **kwargs):
+        seen.update(kwargs)
+        return Response()
+
+    app.config.update(RELAY_FEED_KEY="test-relay-feed-key")
+    monkeypatch.setattr("app.routes.internal_api.requests.get", fake_get)
+
+    response = client.get("/api/v1/proxy-transfer", headers={"X-API-Key": "internal-test-key"})
+
+    assert response.status_code == 200
+    assert seen["allow_redirects"] is False
 
 
 def test_transfer_feed_limit_allows_the_full_fixed_listener_range():

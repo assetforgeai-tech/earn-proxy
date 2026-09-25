@@ -10,13 +10,21 @@ from app.services.settings import set_setting
 from app.services.users import create_user
 
 
-def _assignment(db, *, exit_ip="198.51.100.80", duplicate=0, qualification="allow"):
+def _assignment(
+    db,
+    *,
+    exit_ip="198.51.100.80",
+    duplicate=0,
+    qualification="allow",
+    subscription_status="active",
+    protocol="socks5",
+):
     _ensure_columns(db)
     now = datetime.now(UTC).isoformat()
     db.execute(
         "INSERT INTO provider_subscriptions(provider,external_id,status,first_seen_at,last_seen_at,created_at,updated_at) "
-        "VALUES('proxiware','sub-feed','active',?,?,?,?)",
-        (now, now, now, now),
+        "VALUES('proxiware','sub-feed',?,?,?,?,?)",
+        (subscription_status, now, now, now, now),
     )
     sub_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.execute(
@@ -25,8 +33,10 @@ def _assignment(db, *, exit_ip="198.51.100.80", duplicate=0, qualification="allo
             subscription_id,provider,external_id,host,port,username_encrypted,password_encrypted,
             status,qualification,provider_eligible,live_status,exit_ip,assigned_at,last_seen_at,
             created_at,updated_at,protocol,last_checked_at,egress_verified_at,duplicate_egress,
-            distribution_enabled
-        ) VALUES(?, 'proxiware','feed-1','provider-feed.example',9000,?,?, 'active',?,1,'live',?,?,?,?,?,'socks5',?,?,?,1)
+            distribution_enabled,dashboard_assignment_id,dashboard_eligible,dashboard_connections,
+            dashboard_observed_at,dashboard_source
+        ) VALUES(?, 'proxiware','feed-1','provider-feed.example',9000,?,?, 'active',?,1,'live',?,?,?,?,?,?,?, ?,?,1,
+                 'dashboard-feed',1,10,?,'provider_dashboard')
         """,
         (
             sub_id,
@@ -38,9 +48,11 @@ def _assignment(db, *, exit_ip="198.51.100.80", duplicate=0, qualification="allo
             now,
             now,
             now,
+            protocol,
             now,
             now,
             duplicate,
+            now,
         ),
     )
     db.commit()
@@ -131,4 +143,96 @@ def test_provider_proxy_with_active_swap_job_is_never_exported(app, client):
         set_setting(db, "proxiware_distribution_enabled", "1")
 
     response = client.get("/api/v1/proxy-raw", headers={"X-API-Key": "internal-test-key"})
+    assert response.get_data(as_text=True) == ""
+
+
+def test_provider_proxy_without_fresh_dashboard_evidence_is_never_exported(app, client):
+    with app.app_context():
+        db = get_db()
+        _assignment(db)
+        stale = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        db.execute(
+            "UPDATE provider_assignments SET dashboard_observed_at=?,distribution_enabled=1",
+            (stale,),
+        )
+        db.commit()
+        set_setting(db, "proxiware_distribution_enabled", "1")
+        set_setting(db, "proxiware_dashboard_max_age_seconds", "300")
+
+    response = client.get("/api/v1/proxy-raw", headers={"X-API-Key": "internal-test-key"})
+
+    assert response.get_data(as_text=True) == ""
+
+
+def test_provider_proxy_honors_global_allow_and_risk_toggles(app, client):
+    with app.app_context():
+        db = get_db()
+        _assignment(db)
+        set_setting(db, "proxiware_distribution_enabled", "1")
+        set_setting(db, "api_include_allow", "0")
+        set_setting(db, "api_include_risk", "1")
+
+    headers = {"X-API-Key": "internal-test-key"}
+    assert client.get("/api/v1/proxy-raw", headers=headers).get_data(as_text=True) == ""
+
+    with app.app_context():
+        db = get_db()
+        db.execute("UPDATE provider_assignments SET qualification='risk',distribution_enabled=1")
+        db.commit()
+
+    assert client.get("/api/v1/proxy-raw", headers=headers).get_data(as_text=True).strip() == (
+        "provider-feed.example:9000:provider-user:provider-pass"
+    )
+
+
+def test_provider_proxy_with_inactive_parent_subscription_is_never_exported(app, client):
+    with app.app_context():
+        db = get_db()
+        _assignment(db, subscription_status="expired")
+        set_setting(db, "proxiware_distribution_enabled", "1")
+
+    response = client.get("/api/v1/proxy-raw", headers={"X-API-Key": "internal-test-key"})
+
+    assert response.get_data(as_text=True) == ""
+
+
+def test_provider_proxy_with_unknown_protocol_is_never_exported(app, client):
+    with app.app_context():
+        db = get_db()
+        _assignment(db, protocol="unknown")
+        set_setting(db, "proxiware_distribution_enabled", "1")
+
+    response = client.get("/api/v1/proxy-raw", headers={"X-API-Key": "internal-test-key"})
+
+    assert response.get_data(as_text=True) == ""
+
+
+def test_provider_proxy_with_future_health_or_dashboard_timestamp_is_never_exported(app, client):
+    with app.app_context():
+        db = get_db()
+        _assignment(db)
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        db.execute(
+            "UPDATE provider_assignments SET last_checked_at=?,dashboard_observed_at=?",
+            (future, future),
+        )
+        db.commit()
+        set_setting(db, "proxiware_distribution_enabled", "1")
+
+    response = client.get("/api/v1/proxy-raw", headers={"X-API-Key": "internal-test-key"})
+
+    assert response.get_data(as_text=True) == ""
+
+
+def test_provider_proxy_with_future_health_timestamp_is_never_exported(app, client):
+    with app.app_context():
+        db = get_db()
+        _assignment(db)
+        future = (datetime.now(UTC) + timedelta(days=7)).isoformat()
+        db.execute("UPDATE provider_assignments SET last_checked_at=?,egress_verified_at=?", (future, future))
+        db.commit()
+        set_setting(db, "proxiware_distribution_enabled", "1")
+
+    response = client.get("/api/v1/proxy-raw", headers={"X-API-Key": "internal-test-key"})
+
     assert response.get_data(as_text=True) == ""

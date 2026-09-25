@@ -8,7 +8,7 @@ from werkzeug.security import check_password_hash
 from app.db import get_db
 from app.registration_rate_limit import admit_login_attempt, admit_registration_attempt, request_identity
 from app.routes.forms import form_error, form_success, is_browser_form
-from app.services.users import create_user
+from app.services.users import MAX_EMAIL_LENGTH, create_user
 
 bp = Blueprint("auth", __name__)
 
@@ -34,8 +34,8 @@ def register():
         )
     email = str(request.form.get("email") or "").strip().lower()
     password = str(request.form.get("password") or "")
-    if "@" not in email or len(password) < 8:
-        field = "email" if "@" not in email else "password"
+    if "@" not in email or len(email) > MAX_EMAIL_LENGTH or len(password) < 8:
+        field = "email" if "@" not in email or len(email) > MAX_EMAIL_LENGTH else "password"
         return form_error(
             "A valid email and password of at least 8 characters are required",
             400,

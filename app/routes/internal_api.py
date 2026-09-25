@@ -25,8 +25,26 @@ def _api_key_required() -> bool:
     return authenticate_api_key(get_db(), supplied) is not None
 
 
+def _provider_subscription_expired(value: object, now: datetime) -> bool:
+    """Fail closed for malformed or past provider expiry values."""
+
+    if value is None or str(value).strip() == "":
+        return False
+    text = str(value).strip()
+    try:
+        expiry = datetime.fromtimestamp(float(text), UTC)
+    except (TypeError, ValueError, OverflowError):
+        try:
+            expiry = datetime.fromisoformat(text)
+        except ValueError:
+            return True
+        expiry = expiry.astimezone(UTC) if expiry.tzinfo else expiry.replace(tzinfo=UTC)
+    return expiry <= now
+
+
 def _raw_rows():
     db = get_db()
+    current = datetime.now(UTC)
     enabled = []
     if get_setting(db, "api_include_allow", "1") == "1":
         enabled.append("allow")
@@ -35,7 +53,13 @@ def _raw_rows():
     if not enabled:
         return []
     placeholders = ",".join("?" for _ in enabled)
-    stale_cutoff = (datetime.now(UTC) - timedelta(minutes=checker_settings(db).health_stale_minutes)).isoformat()
+    stale_cutoff = (current - timedelta(minutes=checker_settings(db).health_stale_minutes)).isoformat()
+    try:
+        dashboard_max_age = max(60, int(get_setting(db, "proxiware_dashboard_max_age_seconds", "900")))
+    except ValueError:
+        dashboard_max_age = 900
+    dashboard_cutoff = (current - timedelta(seconds=dashboard_max_age)).isoformat()
+    future_cutoff = (current + timedelta(seconds=60)).isoformat()
     rows = db.execute(
         f"""
         SELECT p.* FROM proxies p JOIN users u ON u.id=p.user_id
@@ -43,10 +67,10 @@ def _raw_rows():
           AND p.eligibility IN ({placeholders}) AND u.status='active'
           AND p.exit_ip IS NOT NULL AND trim(p.exit_ip) <> ''
           AND p.egress_attestation_source IN ('https_quorum','earnapp_tls')
-          AND p.last_success_at IS NOT NULL AND p.last_success_at >= ?
+          AND p.last_success_at IS NOT NULL AND p.last_success_at >= ? AND p.last_success_at <= ?
         ORDER BY p.id
         """,
-        [*enabled, stale_cutoff],
+        [*enabled, stale_cutoff, future_cutoff],
     ).fetchall()
     distributable = []
     for row in rows:
@@ -66,37 +90,57 @@ def _raw_rows():
         }
         if required.issubset(provider_columns):
             provider_rows = db.execute(
-                """
-                SELECT * FROM provider_assignments
-                WHERE provider='proxiware' AND missing_at IS NULL
-                  AND status IN ('active','current') AND live_status='live'
-                  AND qualification='allow' AND provider_eligible=1
-                  AND distribution_enabled=1 AND duplicate_egress=0
-                  AND exit_ip IS NOT NULL AND trim(exit_ip)<>''
-                  AND egress_verified_at IS NOT NULL AND last_checked_at>=?
-                  AND (replacement_ready_at IS NULL OR replacement_ready_at<=?)
+                f"""
+                SELECT pa.*, ps.expires_at AS parent_expires_at FROM provider_assignments pa
+                JOIN provider_subscriptions ps ON ps.id=pa.subscription_id AND ps.provider='proxiware'
+                WHERE pa.provider='proxiware' AND pa.missing_at IS NULL
+                  AND ps.missing_at IS NULL AND ps.status IN ('active','ready')
+                  AND pa.status IN ('active','current') AND pa.live_status='live'
+                  AND pa.qualification IN ({placeholders}) AND pa.provider_eligible=1
+                  AND pa.protocol IN ('http','socks5')
+                  AND pa.distribution_enabled=1 AND pa.duplicate_egress=0
+                  AND pa.dashboard_assignment_id IS NOT NULL AND trim(pa.dashboard_assignment_id)<>''
+                  AND pa.dashboard_source='provider_dashboard' AND pa.dashboard_eligible=1
+                  AND pa.dashboard_connections IS NOT NULL
+                  AND pa.dashboard_connections>=0 AND pa.dashboard_connections<1000
+                  AND pa.dashboard_observed_at BETWEEN ? AND ?
+                  AND pa.exit_ip IS NOT NULL AND trim(pa.exit_ip)<>''
+                  AND pa.egress_verified_at BETWEEN ? AND ?
+                  AND pa.last_checked_at BETWEEN ? AND ?
+                  AND (pa.replacement_ready_at IS NULL OR pa.replacement_ready_at<=?)
                   AND NOT EXISTS (
                       SELECT 1 FROM swap_jobs sj
-                      WHERE sj.provider='proxiware' AND sj.subscription_id=provider_assignments.subscription_id
-                        AND sj.state IN ('pending','running')
+                      WHERE sj.provider='proxiware' AND sj.subscription_id=pa.subscription_id
+                        AND sj.state IN ('pending','running','mutating','provider_applied','reconciliation_required')
                   )
                   AND NOT EXISTS (
                       SELECT 1 FROM proxies p
-                      WHERE p.archived_at IS NULL AND p.exit_ip=provider_assignments.exit_ip
+                      WHERE p.archived_at IS NULL AND p.exit_ip=pa.exit_ip
                         AND p.duplicate_of IS NULL
                         AND p.egress_attestation_source IN ('https_quorum','earnapp_tls')
                   )
-                  AND id = COALESCE(
+                  AND pa.id = COALESCE(
                       (SELECT MIN(pa2.id) FROM provider_assignments pa2
                        WHERE pa2.provider='proxiware' AND pa2.missing_at IS NULL
-                         AND pa2.exit_ip=provider_assignments.exit_ip
-                         AND pa2.live_status='live' AND pa2.egress_verified_at IS NOT NULL), id
+                         AND pa2.exit_ip=pa.exit_ip
+                         AND pa2.live_status='live' AND pa2.egress_verified_at IS NOT NULL), pa.id
                   )
-                ORDER BY id
+                ORDER BY pa.id
                 """,
-                (stale_cutoff, datetime.now(UTC).isoformat()),
+                [
+                    *enabled,
+                    dashboard_cutoff,
+                    future_cutoff,
+                    stale_cutoff,
+                    future_cutoff,
+                    stale_cutoff,
+                    future_cutoff,
+                    current.isoformat(),
+                ],
             ).fetchall()
             for row in provider_rows:
+                if _provider_subscription_expired(row["parent_expires_at"], current):
+                    continue
                 if not normalize_exit_ip(row["exit_ip"]):
                     continue
                 try:
@@ -162,6 +206,7 @@ def _transfer_rows():
         target,
         headers={"X-Relay-Feed-Key": key, "Accept": "application/json"},
         timeout=(2, 5),
+        allow_redirects=False,
     )
     response.raise_for_status()
     if len(response.content) > MAX_TRANSFER_FEED_BYTES:

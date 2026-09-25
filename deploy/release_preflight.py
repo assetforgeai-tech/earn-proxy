@@ -3,9 +3,12 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import posixpath
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Mapping
+from urllib.parse import urlparse
 
 
 def validate_runtime_prefix(release_dir: Path) -> list[str]:
@@ -16,11 +19,51 @@ def validate_runtime_prefix(release_dir: Path) -> list[str]:
     return []
 
 
+def validate_browser_runtime(environment: Mapping[str, str] | None = None) -> list[str]:
+    env = os.environ if environment is None else environment
+    browser_enabled = str(env.get("EARN_PROXY_PROXIWARE_BROWSER_ENABLED", "0")) == "1"
+    chrome_enabled = str(env.get("EARN_PROXY_PROXIWARE_CHROME_ENABLED", "0")) == "1"
+    if browser_enabled and not chrome_enabled:
+        return ["enabled Proxiware browser requires isolated Chrome"]
+    if not chrome_enabled:
+        return []
+
+    errors: list[str] = []
+    binary = Path(str(env.get("EARN_PROXY_PROXIWARE_CHROME_BINARY", "/usr/bin/google-chrome")))
+    if not binary.is_absolute() or not binary.is_file() or not os.access(binary, os.X_OK):
+        errors.append("Proxiware Chrome binary is missing or not executable")
+
+    endpoint = urlparse(str(env.get("EARN_PROXY_PROXIWARE_CDP_URL", "http://127.0.0.1:9222")))
+    try:
+        port = int(endpoint.port or 0)
+    except ValueError:
+        port = 0
+    if (
+        endpoint.scheme not in {"http", "https"}
+        or endpoint.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or not 1 <= port <= 65535
+    ):
+        errors.append("Proxiware CDP endpoint must be loopback HTTP with an explicit port")
+
+    root = posixpath.normpath(
+        str(env.get("EARN_PROXY_PROXIWARE_CHROME_PROFILE_ROOT", "/run/earn-proxy-browser"))
+    )
+    profile = posixpath.normpath(
+        str(env.get("EARN_PROXY_PROXIWARE_CHROME_PROFILE_DIR", "/run/earn-proxy-browser/profile"))
+    )
+    if not root.startswith("/run/"):
+        errors.append("Proxiware Chrome profile root must be under /run")
+    if profile == root or not profile.startswith(root.rstrip("/") + "/"):
+        errors.append("Proxiware Chrome profile must stay inside its runtime root")
+    return errors
+
+
 def validate_runtime(release_dir: Path) -> list[str]:
     errors = validate_runtime_prefix(release_dir)
+    errors.extend(validate_browser_runtime())
     missing_modules = [
         name
-        for name in ("app", "cryptography", "flask", "gunicorn", "requests", "urllib3")
+        for name in ("app", "cryptography", "flask", "gunicorn", "playwright", "requests", "urllib3")
         if importlib.util.find_spec(name) is None
     ]
     if missing_modules:

@@ -23,6 +23,7 @@ SAFE_SESSION_ERROR_CODES = frozenset(
         "captcha_timeout",
         "csrf_failed",
         "fingerprint_failed",
+        "invalid_session",
         "login_failed",
         "manual_action_required",
         "session_expired",

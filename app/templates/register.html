@@ -10,7 +10,7 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="ui" value="1">
     <label for="email">Email</label>
-    <input id="email" name="email" type="email" autocomplete="email" required aria-describedby="email-hint{% if error_field == 'email' %} email-error{% endif %}"{% if error_field == 'email' %} aria-invalid="true"{% endif %}>
+    <input id="email" name="email" type="email" maxlength="254" autocomplete="email" required aria-describedby="email-hint{% if error_field == 'email' %} email-error{% endif %}"{% if error_field == 'email' %} aria-invalid="true"{% endif %}>
     <small id="email-hint" class="field-hint">We use this only to identify your contributor account.</small>
     {% if error_field == 'email' %}<small id="email-error" class="field-error">Enter a valid, available email address.</small>{% endif %}
     <label for="password">Password</label>

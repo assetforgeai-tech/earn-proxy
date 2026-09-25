@@ -52,7 +52,7 @@ from app.services.proxiware_swap import (
 )
 from app.services.relay_sso import create_relay_sso_token
 from app.services.settings import get_setting, set_setting
-from app.services.users import create_user
+from app.services.users import MAX_EMAIL_LENGTH, create_user
 
 bp = Blueprint("admin", __name__, url_prefix="/admin")
 
@@ -146,7 +146,7 @@ PROXIWARE_SAFE_ERROR_CODES = frozenset(
         "timeout",
     }
 )
-PROXIWARE_RATE_LIMITED_ACTIONS = frozenset({"sync", "test_connection", "renew_session", "swap"})
+PROXIWARE_RATE_LIMITED_ACTIONS = frozenset({"sync", "test_connection", "renew_session", "swap", "settings"})
 
 
 def _proxiware_area_url(area: str) -> str:
@@ -1340,11 +1340,13 @@ def proxiware_credentials():
         )
     except ValueError as exc:
         return form_error(str(exc), 400, "admin.proxiware_workspace", area="credentials")
-    return form_success(
-        {"status": "saved"},
-        endpoint="admin.proxiware_workspace",
-        area="credentials",
-        message="Provider credentials saved.",
+    return _no_store_response(
+        form_success(
+            {"status": "saved"},
+            endpoint="admin.proxiware_workspace",
+            area="credentials",
+            message="Provider credentials saved.",
+        )
     )
 
 
@@ -1369,17 +1371,22 @@ def proxiware_clear_credential(name: str):
         target_id=name,
         result="success",
     )
-    return form_success(
-        {"status": "cleared", "name": name},
-        endpoint="admin.proxiware_workspace",
-        area="credentials",
-        message="Provider credential cleared.",
+    return _no_store_response(
+        form_success(
+            {"status": "cleared", "name": name},
+            endpoint="admin.proxiware_workspace",
+            area="credentials",
+            message="Provider credential cleared.",
+        )
     )
 
 
 @bp.post("/providers/proxiware/settings")
 @admin_required
 def proxiware_settings():
+    db = get_db()
+    if not _provider_action_allowed(db, "settings"):
+        return _proxiware_action_error("Provider policy rate limit reached.", 429, code="rate_limited")
     try:
         threshold = max(1, min(100_000, int(request.form.get("eligibility_threshold", "1000"))))
         concurrency = max(1, min(20, int(request.form.get("worker_concurrency", "1"))))
@@ -1387,7 +1394,6 @@ def proxiware_settings():
         cooldown = max(60, min(86_400, int(request.form.get("cooldown_seconds", "60"))))
     except ValueError:
         return form_error("Provider settings must be numbers", 400, "admin.proxiware_workspace", area="settings")
-    db = get_db()
     set_setting(db, "proxiware_eligible_threshold", str(threshold))
     set_setting(db, "proxiware_worker_concurrency", str(concurrency))
     set_setting(db, "proxiware_retry_limit", str(retry_limit))
@@ -1400,11 +1406,13 @@ def proxiware_settings():
         action="save_settings",
         result="success",
     )
-    return form_success(
-        {"status": "saved"},
-        endpoint="admin.proxiware_workspace",
-        area="settings",
-        message="Provider settings saved.",
+    return _no_store_response(
+        form_success(
+            {"status": "saved"},
+            endpoint="admin.proxiware_workspace",
+            area="settings",
+            message="Provider settings saved.",
+        )
     )
 
 
@@ -1474,6 +1482,13 @@ def _no_store_response(response):
     flask_response = current_app.make_response(response) if isinstance(response, tuple) else response
     flask_response.headers["Cache-Control"] = "no-store"
     return flask_response
+
+
+@bp.after_request
+def _protect_proxiware_responses(response):
+    if request.path.startswith("/admin/providers/proxiware"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def _proxiware_api_client(api_key: str):
@@ -1735,6 +1750,12 @@ def proxiware_swap_manual(job_id: int):
             result="success",
         )
         return _proxiware_action_response(result, message="Manual swap completed.")
+    if state == "reconciliation_required":
+        return _proxiware_action_response(
+            result,
+            status=202,
+            message="Provider swap confirmed; waiting for read-only reconciliation.",
+        )
     if state in {"blocked", "paused"}:
         return _proxiware_action_error(
             "Manual swap did not run; resolve the provider action state first.",
@@ -2117,13 +2138,13 @@ def block_user(user_id: int):
 def create_admin_user():
     email = str(request.form.get("email") or "").strip().lower()
     password = str(request.form.get("password") or "")
-    if "@" not in email or len(password) < 8:
+    if "@" not in email or len(email) > MAX_EMAIL_LENGTH or len(password) < 8:
         return form_error(
             "A valid email and password of at least 8 characters are required",
             400,
             "admin.users",
-            field="email" if "@" not in email else "password",
-            focus="new-user-email" if "@" not in email else "new-user-password",
+            field="email" if "@" not in email or len(email) > MAX_EMAIL_LENGTH else "password",
+            focus="new-user-email" if "@" not in email or len(email) > MAX_EMAIL_LENGTH else "new-user-password",
         )
     try:
         user_id = create_user(get_db(), email, password, status="active")

@@ -1,0 +1,34 @@
+[Unit]
+Description=Earn Proxy isolated Proxiware Chromium CDP
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=earnproxy-chrome
+Group=earnproxy-chrome
+RuntimeDirectory=earn-proxy-browser
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=no
+UMask=0077
+WorkingDirectory=/opt/earn-proxy
+Environment=EARN_PROXY_PROXIWARE_CHROME_ENABLED=0
+Environment=EARN_PROXY_PROXIWARE_CHROME_BINARY=/usr/bin/google-chrome
+Environment=EARN_PROXY_PROXIWARE_CDP_URL=http://127.0.0.1:9222
+Environment=EARN_PROXY_PROXIWARE_CHROME_PROFILE_ROOT=/run/earn-proxy-browser
+Environment=EARN_PROXY_PROXIWARE_CHROME_PROFILE_DIR=/run/earn-proxy-browser/profile
+Environment=EARN_PROXY_PROXIWARE_CHROME_HEADLESS=1
+EnvironmentFile=-/etc/earn-proxy-browser.env
+ExecStart=/opt/earn-proxy/.venv/bin/python -m app.proxiware_chrome_service
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/run/earn-proxy-browser
+
+[Install]
+WantedBy=multi-user.target
