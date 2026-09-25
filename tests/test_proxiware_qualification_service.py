@@ -115,3 +115,21 @@ def test_global_proxiware_pause_stops_qualification_before_claim(app):
             .fetchone()["value"]
         )
     assert value == "paused"
+
+
+def test_runner_refreshes_heartbeat_while_waiting_between_cycles(app):
+    runner = ProxiwareQualificationRunner(app=app, interval_seconds=120)
+    runner._stop.wait = lambda _seconds: True
+
+    with app.app_context():
+        runner._wait_with_heartbeat(120)
+        values = dict(
+            get_db()
+            .execute(
+                "SELECT key,value FROM settings WHERE key LIKE 'proxiware_qualification_worker_%'"
+            )
+            .fetchall()
+        )
+
+    assert values["proxiware_qualification_worker_status"] == "sleeping"
+    assert values["proxiware_qualification_worker_heartbeat_at"]

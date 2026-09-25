@@ -20,6 +20,7 @@ from app.services.settings import get_setting
 PROVIDER = "proxiware"
 DEFAULT_ELIGIBLE_THRESHOLD = 1000
 DEFAULT_COOLDOWN_SECONDS = 60
+DEFAULT_DASHBOARD_MAX_AGE_SECONDS = 900
 DEFAULT_CLAIM_SECONDS = 300
 DEFAULT_RETRY_LIMIT = 3
 ACTIVE_SWAP_STATES = frozenset({"pending", "running"})
@@ -168,6 +169,12 @@ def ensure_proxiware_swap_schema(db) -> None:
             provider_eligible INTEGER NOT NULL DEFAULT 0,
             live_status TEXT NOT NULL DEFAULT 'pending',
             exit_ip TEXT,
+            dashboard_assignment_id TEXT,
+            dashboard_eligible INTEGER,
+            dashboard_connections INTEGER,
+            dashboard_observed_at TEXT,
+            dashboard_source TEXT NOT NULL DEFAULT '',
+            dashboard_error_code TEXT NOT NULL DEFAULT '',
             assigned_at TEXT,
             last_seen_at TEXT,
             replacement_ready_at TEXT,
@@ -285,6 +292,12 @@ def ensure_proxiware_swap_schema(db) -> None:
                 "qualification_claimed_until": "TEXT",
                 "qualification_claim_token": "TEXT",
                 "qualification_attempts": "INTEGER NOT NULL DEFAULT 0",
+                "dashboard_assignment_id": "TEXT",
+                "dashboard_eligible": "INTEGER",
+                "dashboard_connections": "INTEGER",
+                "dashboard_observed_at": "TEXT",
+                "dashboard_source": "TEXT NOT NULL DEFAULT ''",
+                "dashboard_error_code": "TEXT NOT NULL DEFAULT ''",
             },
         )
     _ensure_columns(db, "provider_credentials", {"provider": "TEXT NOT NULL DEFAULT 'proxiware'"})
@@ -458,6 +471,34 @@ class SwapDecision:
             return cls(False, "not_risk", int(subscription_id), assignment_id)
         if not _as_bool(assignment["provider_eligible"]):
             return cls(False, "provider_ineligible", int(subscription_id), assignment_id)
+        dashboard_assignment_id = str(assignment["dashboard_assignment_id"] or "").strip()
+        dashboard_observed_at = str(assignment["dashboard_observed_at"] or "").strip()
+        if not dashboard_assignment_id or not dashboard_observed_at:
+            return cls(False, "dashboard_stale", int(subscription_id), assignment_id)
+        try:
+            observed_at = datetime.fromisoformat(dashboard_observed_at)
+            observed_at = observed_at.astimezone(UTC) if observed_at.tzinfo else observed_at.replace(tzinfo=UTC)
+            max_age = int(get_setting(db, "proxiware_dashboard_max_age_seconds", str(DEFAULT_DASHBOARD_MAX_AGE_SECONDS)))
+            if current - observed_at > timedelta(seconds=max(60, max_age)) or observed_at - current > timedelta(seconds=60):
+                return cls(False, "dashboard_stale", int(subscription_id), assignment_id)
+        except (TypeError, ValueError):
+            return cls(False, "dashboard_stale", int(subscription_id), assignment_id)
+        dashboard_eligible = assignment["dashboard_eligible"]
+        if dashboard_eligible is None:
+            return cls(False, "dashboard_stale", int(subscription_id), assignment_id)
+        if not _as_bool(dashboard_eligible):
+            return cls(False, "provider_ineligible", int(subscription_id), assignment_id)
+        dashboard_connections = assignment["dashboard_connections"]
+        if dashboard_connections is None:
+            return cls(False, "dashboard_stale", int(subscription_id), assignment_id)
+        try:
+            connections = int(dashboard_connections)
+        except (TypeError, ValueError):
+            return cls(False, "dashboard_stale", int(subscription_id), assignment_id)
+        if connections < 0:
+            return cls(False, "dashboard_stale", int(subscription_id), assignment_id)
+        if connections >= 1000:
+            return cls(False, "connections_limit", int(subscription_id), assignment_id)
         try:
             if subscription["eligible_count"] is None:
                 raise ValueError
@@ -466,14 +507,6 @@ class SwapDecision:
             return cls(False, "manual_action_required", int(subscription_id), assignment_id)
         if eligible_count >= max(1, int(threshold)):
             return cls(False, "provider_ineligible", int(subscription_id), assignment_id)
-        try:
-            if subscription["connections"] is None:
-                raise ValueError
-            connections = int(subscription["connections"])
-        except (TypeError, ValueError):
-            return cls(False, "manual_action_required", int(subscription_id), assignment_id)
-        if connections >= 1000:
-            return cls(False, "connections_limit", int(subscription_id), assignment_id)
         try:
             quota = int(subscription["swap_quota"] or 0)
             used = int(subscription["swap_used"] or 0)

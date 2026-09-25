@@ -81,11 +81,14 @@ def _seed_subscription(db, *, eligible_count=500, connections=100, quota=1, cool
         INSERT INTO provider_assignments
             (subscription_id, provider, external_id, host, port, status,
              qualification, provider_eligible, live_status, country,
+             dashboard_assignment_id, dashboard_eligible, dashboard_connections,
+             dashboard_observed_at, dashboard_source,
              assigned_at, last_seen_at, created_at, updated_at)
         VALUES (?, 'proxiware', 'assignment-1', 'proxy.example', 8080, 'active',
-                'risk', 1, 'live', 'US', ?, ?, ?, ?)
+                'risk', 1, 'live', 'US', 'dashboard-1', 1, 10, ?,
+                'provider_dashboard', ?, ?, ?, ?)
         """,
-        (sub_id, now, now, now, now),
+        (sub_id, now, now, now, now, now),
     )
     db.commit()
     return int(sub_id)
@@ -305,6 +308,49 @@ def test_duplicate_egress_assignment_is_not_swapped(app):
         assert queue_eligible_swaps(db, now=now) == 0
         decision = SwapDecision.for_subscription(db, sub_id, now=now)
     assert decision.reason == "duplicate_egress"
+
+
+def test_swap_requires_fresh_dashboard_eligibility_and_connections(app):
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db)
+        set_setting(db, "proxiware_auto_swap", "1")
+        assignment_id = db.execute(
+            "SELECT id FROM provider_assignments WHERE subscription_id=?", (sub_id,)
+        ).fetchone()["id"]
+        db.execute(
+            "UPDATE provider_assignments SET dashboard_assignment_id='dash-1', dashboard_eligible=0, "
+            "dashboard_connections=1, dashboard_observed_at=?, dashboard_source='provider_dashboard' WHERE id=?",
+            (now.isoformat(), assignment_id),
+        )
+        db.commit()
+
+        decision = SwapDecision.for_subscription(db, sub_id, now=now)
+
+    assert decision.allowed is False
+    assert decision.reason == "provider_ineligible"
+
+
+def test_swap_rejects_stale_dashboard_observation(app):
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db)
+        assignment_id = db.execute(
+            "SELECT id FROM provider_assignments WHERE subscription_id=?", (sub_id,)
+        ).fetchone()["id"]
+        db.execute(
+            "UPDATE provider_assignments SET dashboard_assignment_id='dash-1', dashboard_eligible=1, "
+            "dashboard_connections=1, dashboard_observed_at=?, dashboard_source='provider_dashboard' WHERE id=?",
+            ((now - timedelta(hours=1)).isoformat(), assignment_id),
+        )
+        db.commit()
+
+        decision = SwapDecision.for_subscription(db, sub_id, now=now)
+
+    assert decision.allowed is False
+    assert decision.reason == "dashboard_stale"
 
 
 def test_expired_running_claim_is_recovered_after_restart(app):

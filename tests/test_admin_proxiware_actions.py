@@ -274,8 +274,10 @@ def _swap_job(db, state="blocked"):
     )
     subscription_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.execute(
-        "INSERT INTO provider_assignments(subscription_id,provider,external_id,host,port,status,qualification,provider_eligible,live_status,created_at,updated_at) "
-        "VALUES(?,'proxiware','action-old','old.example',8080,'active','risk',1,'live',datetime('now'),datetime('now'))",
+        "INSERT INTO provider_assignments(subscription_id,provider,external_id,host,port,status,qualification,provider_eligible,live_status,"
+        "dashboard_assignment_id,dashboard_eligible,dashboard_connections,dashboard_observed_at,dashboard_source,created_at,updated_at) "
+        "VALUES(?,'proxiware','action-old','old.example',8080,'active','risk',1,'live',"
+        "'dashboard-action',1,10,datetime('now'),'provider_dashboard',datetime('now'),datetime('now'))",
         (subscription_id,),
     )
     assignment_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]

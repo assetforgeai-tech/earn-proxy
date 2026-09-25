@@ -81,6 +81,18 @@ class ProxiwareQualificationRunner:
     def stop(self) -> None:
         self._stop.set()
 
+    def _wait_with_heartbeat(self, seconds: float) -> None:
+        """Sleep in bounded slices so an idle worker remains observable."""
+
+        remaining = max(0.0, float(seconds))
+        while remaining > 0 and not self.stopped:
+            with self.app.app_context():
+                record_worker_heartbeat(get_db(), "qualification_worker", "sleeping")
+            step = min(60.0, remaining)
+            if self._stop.wait(step):
+                break
+            remaining -= step
+
     def _settings(self, db) -> tuple[int, int]:
         concurrency = self.concurrency
         if concurrency is None:
@@ -191,7 +203,7 @@ class ProxiwareQualificationRunner:
             cycles += 1
             if max_cycles is not None and cycles >= max_cycles:
                 break
-            self._stop.wait(self.interval_seconds)
+            self._wait_with_heartbeat(self.interval_seconds)
         return cycles
 
 

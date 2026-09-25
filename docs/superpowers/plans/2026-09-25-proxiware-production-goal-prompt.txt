@@ -1,0 +1,77 @@
+Muc tieu: hoan thien Proxiware trong Earn Proxy thanh production-ready end-to-end, gom dashboard observation, qualification worker, isolated browser/session worker, guarded swap, admin control center, distribution safety, security audit, merge, deploy va production verification.
+
+Workspace bat buoc:
+D:\1. WORK_true\Tranfer Proxy\earn-proxy
+
+Doc toan bo va thuc hien tuan tu ke hoach:
+D:\1. WORK_true\Tranfer Proxy\earn-proxy\docs\superpowers\plans\2026-09-25-proxiware-production-ready.md
+
+Pham vi va an toan:
+
+- Chi doc, sua, test, commit va deploy repo Earn Proxy o duong dan tren.
+- Tuyet doi khong doc, sua, deploy, migrate hoac chay lenh trong D:\1. WORK_true\CashPilot.
+- Tiep tuc tu thay doi hop le hien co; khong reset, checkout, clean, stash, revert hoac ghi de cong viec hien tai.
+- Baseline: 7f61f4397178b3ef00c28a3928f79158d7d4c62f.
+- Official Proxiware API chi read-only.
+- Khong mua proxy, billing, renewal, tao subscription hoac thanh toan.
+- Khong bypass CAPTCHA, spoof fingerprint, stealth patch hoac random profile.
+- Chrome profile 40/CDP 9222 chi dung read-only/manual verification. Production worker phai co OS user/profile rieng; CDP chi bind 127.0.0.1.
+- Khong log, luu hoac tra ve password, API key, cookie, CAPTCHA token, CDP state, fingerprint, raw provider payload.
+- Giu proxiware_auto_swap=0 va proxiware_distribution_enabled=0 den khi moi gate pass va canary duoc review.
+- Khong lap lai pilot 188.220.155.85 -> 51.194.85.8.
+- Khong thuc hien swap that moi neu chua co approval rieng ghi ro target, rollback owner va observation window.
+
+Trang thai khoi dau can bao ton va xac minh lai:
+
+- Branch dang lam: fix/proxiware-dashboard-observation.
+- HEAD va origin/main da quan sat: 7f61f4397178b3ef00c28a3928f79158d7d4c62f.
+- Dang co uncommitted dashboard-observation va qualification-heartbeat changes.
+- Test gan nhat: dashboard/sync/bootstrap 29 passed; qualification/healthcheck 8 passed; swap/service/admin 37 passed, 21 failed.
+- Nguyen nhan 21 fail da biet: fixture cu chua seed fresh dashboard evidence sau khi swap guard duoc fail-close.
+- Production browser adapter hien van unavailable/manual_action_required.
+
+Thu tu thuc hien:
+
+1. Doc plan day du. Chay git status va review tung diff hien co. Khong bat dau lai.
+2. Hoan tat Task 0: sua fixture test, giu day du negative guard tests, dua focused swap/service/admin suite ve zero failures.
+3. Hoan tat heartbeat worker: bounded sleep/concurrency, lease recovery, restart-safe, idle CPU thap, health status co heartbeat age.
+4. Hoan tat typed dashboard observation: scope/freshness/identity invalidation/redaction; API sync khong duoc ghi de observation moi bang NULL.
+5. Xay production browser/session worker co lap: observe_dashboard va swap_assignment tach rieng, encrypted opaque session, loopback-only CDP, least privilege, restart-safe, fail-closed.
+6. Hoan tat swap guards va durable old/new mapping. Revalidate moi dieu kien ngay truoc mutation; replacement chi probe sau toi thieu 60 giay; chua requalify thi khong distribution.
+7. Hoan tat admin UX/control: trang thai tung subsystem, confirmation, CSRF, authorization, rate limit, audit log, safe reason codes, no-store; smoke desktop/mobile va keyboard.
+8. Hoan tat distribution/API safety: loai moi record unsafe/stale/duplicate/cooldown/active-swap; raw va transfer tach rieng; khong anh huong earnings/accounting.
+9. Audit security va release. Khac phuc moi finding exploitable truoc deploy.
+10. Chay full gate:
+    python -m pytest -q -p no:cacheprovider
+    python -m ruff check app tests scripts
+    python -m ruff format --check app tests scripts
+    python -m compileall -q app tests scripts
+    python -m pip check
+    git diff --check
+11. Chi khi tat ca gate xanh: commit thanh cac slice ro rang, push branch, review diff, merge main, xac minh main == origin/main.
+12. Deploy bang versioned release flow hien co. Tao DB backup, giu rollback release. Verify systemd enabled/active, heartbeat fresh, local/public health, authorization, logs va no-secret leakage.
+13. Bat dashboard observation truoc, auto-swap/distribution van OFF. Soak toi thieu hai worker intervals.
+14. Dung tai canary approval gate neu chua co target moi duoc phe duyet. Khong gia lap canary hoac success.
+15. Sau canary duoc phe duyet: dung dung mot assignment; doi >=60 giay; re-observe, requalify, verify mapping, exclusion va rollback. Auto-swap chi bat bang thay doi rieng sau review.
+
+Quy tac xu ly blocker:
+
+- Khong dung som chi vi mot external gate bi chan. Hoan tat tat ca cong viec local/an toan con lai, ghi exact blocker va evidence.
+- Neu adapter/session/provider flow khong verified: giu manual_action_required, auto-swap OFF, distribution OFF.
+- Khong tu sua production truc tiep ngoai versioned release flow.
+- Khong ket luan production-ready neu bat ky test, static, security, browser, preflight, heartbeat, rollback, session hoac canary gate con thieu.
+
+Bao cao cuoi bat buoc:
+
+1. Files changed va commits.
+2. Schema/migrations.
+3. Exact test/static/security results.
+4. Security findings theo severity va cach xu ly.
+5. Main/origin/main, release path, rollback path, DB backup.
+6. Services, heartbeat age, idle CPU, local/public health.
+7. Browser adapter/session/dashboard freshness state.
+8. Canary evidence hoac exact approval blocker.
+9. Auto-swap/distribution final state.
+10. Remaining risks va manual operator actions.
+
+Chi bao production-ready khi toan bo Definition of Done trong plan da co evidence. Neu canary chua duoc phe duyet hoac browser/session chua verified, bao chinh xac la deploy-ready/observation-ready, khong bao production-ready.

@@ -9,7 +9,7 @@ from app.services.settings import set_setting
 
 def _seed(db):
     ensure_proxiware_swap_schema(db)
-    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC).isoformat()
+    now = datetime.now(UTC).replace(microsecond=0).isoformat()
     db.execute(
         """
         INSERT INTO provider_subscriptions
@@ -24,10 +24,13 @@ def _seed(db):
         """
         INSERT INTO provider_assignments
             (subscription_id, provider, external_id, host, port, status, qualification,
-             provider_eligible, live_status, assigned_at, last_seen_at, created_at, updated_at)
-        VALUES (?, 'proxiware','old-worker','proxy.example',8080,'active','risk',1,'live',?,?,?,?)
+             provider_eligible, live_status, dashboard_assignment_id, dashboard_eligible,
+             dashboard_connections, dashboard_observed_at, dashboard_source,
+             assigned_at, last_seen_at, created_at, updated_at)
+        VALUES (?, 'proxiware','old-worker','proxy.example',8080,'active','risk',1,'live',
+                'dashboard-worker',1,10,?,'provider_dashboard',?,?,?,?)
         """,
-        (sub_id, now, now, now, now),
+        (sub_id, now, now, now, now, now),
     )
     db.commit()
     return int(sub_id)
