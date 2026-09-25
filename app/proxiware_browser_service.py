@@ -203,6 +203,9 @@ class ProxiwareBrowserRunner:
                 return self._manual(db, exc.error_code, subscriptions=len(subscriptions))
             if cookies is None:
                 return self._manual(db, "session_expired", subscriptions=len(subscriptions))
+            adapter = None
+            heartbeat_stop = None
+            heartbeat_thread = None
             try:
                 adapter = self.adapter_factory()
                 if adapter is None:
@@ -214,32 +217,28 @@ class ProxiwareBrowserRunner:
                 heartbeat_stop = Event()
                 heartbeat_thread = Thread(target=self._active_heartbeat, args=(heartbeat_stop,), daemon=True)
                 heartbeat_thread.start()
-                try:
-                    record_worker_heartbeat(db, "browser_worker", "running")
-                    restore(cookies)
-                    observed = 0
-                    for subscription_id in subscriptions:
-                        try:
-                            snapshots = observe(subscription_id=subscription_id)
-                            if not isinstance(snapshots, list) or not all(
-                                isinstance(snapshot, DashboardAssignment) for snapshot in snapshots
-                            ):
-                                raise DashboardObservationError("invalid dashboard response")
-                            if any(
-                                str(snapshot.subscription_id).strip() != str(subscription_id).strip()
-                                for snapshot in snapshots
-                            ):
-                                raise DashboardObservationError("dashboard subscription scope mismatch")
-                            apply_dashboard_snapshot(db, subscription_id, snapshots, now=current)
-                            self._schedule(db, subscription_id, current)
-                            observed += len(snapshots)
-                        except Exception as exc:
-                            code = self._safe_degraded_code(exc)
-                            self._schedule(db, subscription_id, current, error_code=code)
-                            raise
-                finally:
-                    heartbeat_stop.set()
-                    heartbeat_thread.join(timeout=max(1.0, self.heartbeat_interval_seconds * 2))
+                record_worker_heartbeat(db, "browser_worker", "running")
+                restore(cookies)
+                observed = 0
+                for subscription_id in subscriptions:
+                    try:
+                        snapshots = observe(subscription_id=subscription_id)
+                        if not isinstance(snapshots, list) or not all(
+                            isinstance(snapshot, DashboardAssignment) for snapshot in snapshots
+                        ):
+                            raise DashboardObservationError("invalid dashboard response")
+                        if any(
+                            str(snapshot.subscription_id).strip() != str(subscription_id).strip()
+                            for snapshot in snapshots
+                        ):
+                            raise DashboardObservationError("dashboard subscription scope mismatch")
+                        apply_dashboard_snapshot(db, subscription_id, snapshots, now=current)
+                        self._schedule(db, subscription_id, current)
+                        observed += len(snapshots)
+                    except Exception as exc:
+                        code = self._safe_degraded_code(exc)
+                        self._schedule(db, subscription_id, current, error_code=code)
+                        raise
                 record_worker_heartbeat(db, "browser_worker", "ok", last_success=True)
                 return {"status": "ok", "observed": observed, "subscriptions": len(subscriptions)}
             except BrowserAdapterUnavailable as exc:
@@ -264,6 +263,17 @@ class ProxiwareBrowserRunner:
                     "subscriptions": len(subscriptions),
                     "error_code": "provider_error",
                 }
+            finally:
+                if heartbeat_stop is not None:
+                    heartbeat_stop.set()
+                if heartbeat_thread is not None:
+                    heartbeat_thread.join(timeout=max(1.0, self.heartbeat_interval_seconds * 2))
+                close = getattr(adapter, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:  # noqa: BLE001 - cleanup must not mask worker state
+                        logger.warning("proxiware browser adapter cleanup failed")
 
     def run_forever(self, *, max_cycles: int | None = None) -> int:
         cycles = 0

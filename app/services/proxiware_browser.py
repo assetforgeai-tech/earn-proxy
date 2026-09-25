@@ -118,6 +118,16 @@ def _safe_cookie_list(cookies: Any, *, url: str) -> list[dict[str, Any]]:
     return normalized
 
 
+def _dashboard_page_matches(page_url: str, dashboard_url: str) -> bool:
+    page = urlparse(str(page_url or ""))
+    dashboard = urlparse(str(dashboard_url or ""))
+    return (
+        page.scheme == dashboard.scheme
+        and page.netloc.lower() == dashboard.netloc.lower()
+        and page.path.rstrip("/") == dashboard.path.rstrip("/")
+    )
+
+
 class _PlaywrightCdpClient:
     """Small adapter around an already-running, loopback-only Chrome CDP."""
 
@@ -132,7 +142,13 @@ class _PlaywrightCdpClient:
             contexts = self._browser.contexts
             self._context = contexts[0] if contexts else self._browser.new_context()
             pages = self._context.pages
-            self._page = pages[0] if pages else self._context.new_page()
+            self._page = (
+                next(
+                    (page for page in pages if _dashboard_page_matches(str(page.url), dashboard_url)),
+                    None,
+                )
+                or self._context.new_page()
+            )
             self._dashboard_url = dashboard_url
         except Exception:
             self._playwright.stop()
@@ -173,6 +189,7 @@ class CdpProxiwareBrowser:
     dashboard_url: str = "https://app.proxiware.com/static/proxy/isp"
     client_factory: Callable[[], Any] | None = None
     allow_mutation: bool = False
+    _session_client: Any | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         parsed = urlparse(self.dashboard_url)
@@ -187,14 +204,18 @@ class CdpProxiwareBrowser:
 
     @contextmanager
     def _client(self) -> Iterator[Any]:
-        factory = self.client_factory or (lambda: _PlaywrightCdpClient(self.cdp_url, dashboard_url=self.dashboard_url))
-        client = factory()
-        try:
-            yield client
-        finally:
-            close = getattr(client, "close", None)
-            if callable(close):
-                close()
+        if self._session_client is None:
+            factory = self.client_factory or (
+                lambda: _PlaywrightCdpClient(self.cdp_url, dashboard_url=self.dashboard_url)
+            )
+            self._session_client = factory()
+        yield self._session_client
+
+    def close(self) -> None:
+        client, self._session_client = self._session_client, None
+        close = getattr(client, "close", None) if client is not None else None
+        if callable(close):
+            close()
 
     def _navigate(self, client: Any) -> None:
         navigate = getattr(client, "navigate", None)

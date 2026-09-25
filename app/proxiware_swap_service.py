@@ -144,10 +144,32 @@ class ProxiwareSwapRunner:
             raise RuntimeError("manual_action_required")
         return result
 
+    @staticmethod
+    def _close_adapter(adapter: Any | None) -> None:
+        close = getattr(adapter, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001 - cleanup must not mask swap state
+                logger.warning("proxiware swap adapter cleanup failed")
+
     def run_once(self) -> dict[str, Any]:
         return self._run_once_for_job(None, allow_manual=False)
 
     def _run_once_for_job(self, job_id: int | None, *, allow_manual: bool) -> dict[str, Any]:
+        adapter_holder: dict[str, Any | None] = {"adapter": None}
+        try:
+            return self._run_once_for_job_impl(job_id, allow_manual=allow_manual, adapter_holder=adapter_holder)
+        finally:
+            self._close_adapter(adapter_holder["adapter"])
+
+    def _run_once_for_job_impl(
+        self,
+        job_id: int | None,
+        *,
+        allow_manual: bool,
+        adapter_holder: dict[str, Any | None],
+    ) -> dict[str, Any]:
         if self.stopped:
             return {"status": "stopped"}
         with self.app.app_context():
@@ -178,6 +200,7 @@ class ProxiwareSwapRunner:
                     return {"status": "manual_action_required", "error_code": session_error}
                 try:
                     configured_adapter = self._adapter(None)
+                    adapter_holder["adapter"] = configured_adapter
                     restore = getattr(configured_adapter, "restore_session", None)
                     if not callable(restore):
                         raise RuntimeError("adapter_missing")
@@ -228,6 +251,7 @@ class ProxiwareSwapRunner:
                         "error_code": decision.reason,
                     }
                 adapter = configured_adapter or self._adapter(job)
+                adapter_holder["adapter"] = adapter
                 if adapter is None or not (getattr(adapter, "swap", None) or getattr(adapter, "execute_swap", None)):
                     raise RuntimeError("manual_action_required")
                 if getattr(adapter, "allow_mutation", True) is not True:

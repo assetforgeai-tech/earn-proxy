@@ -323,6 +323,36 @@ def test_configured_swap_runner_requires_an_active_unexpired_session_before_clai
     assert tuple(row) == ("pending", 0)
 
 
+def test_swap_runner_closes_configured_browser_adapter_after_attempt(app):
+    from app.proxiware_swap_service import ProxiwareSwapRunner
+    from app.services.proxiware_credentials import store_provider_session
+
+    _queue(app)
+    with app.app_context():
+        store_provider_session(
+            get_db(), [{"name": "session", "value": "opaque"}], expires_at=datetime.now(UTC) + timedelta(hours=1)
+        )
+    app.config.update(PROXIWARE_BROWSER_ENABLED=True, PROXIWARE_BROWSER_ALLOW_MUTATION=True)
+    closed = []
+
+    class Adapter:
+        allow_mutation = True
+
+        def restore_session(self, _cookies):
+            return None
+
+        def swap(self, _job):
+            return {"old_assignment_external_id": "old-worker", "new_assignment_external_id": "new-worker"}
+
+        def close(self):
+            closed.append(True)
+
+    result = ProxiwareSwapRunner(app=app, adapter_factory=lambda: Adapter()).run_once()
+
+    assert result["status"] == "reconciliation_required"
+    assert closed == [True]
+
+
 def test_swap_runner_revalidates_assignment_before_calling_adapter(app):
     from app.proxiware_swap_service import ProxiwareSwapRunner
 

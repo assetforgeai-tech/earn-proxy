@@ -8,6 +8,7 @@ from app.services.proxiware_browser import (
     CdpProxiwareBrowser,
     DryRunProxiwareBrowser,
     UnavailableProxiwareBrowser,
+    _dashboard_page_matches,
     build_browser_adapter,
 )
 
@@ -106,6 +107,7 @@ def test_enabled_loopback_browser_observes_typed_dashboard_rows_without_secrets(
     )
 
     rows = adapter.observe_dashboard(subscription_id="39277")
+    adapter.close()
 
     assert len(rows) == 1
     assert rows[0].assignment_id == "141943"
@@ -116,6 +118,79 @@ def test_enabled_loopback_browser_observes_typed_dashboard_rows_without_secrets(
     assert "must-not-leak" not in repr(rows)
     assert [call[0] for call in client.calls] == ["evaluate", "close"]
     assert "POST" not in str(client.calls)
+
+
+def test_cdp_browser_reuses_session_context_after_restore():
+    clients = []
+
+    class SessionClient(FakeCdp):
+        def __init__(self):
+            super().__init__(
+                {
+                    "status": 200,
+                    "origin": "https://app.proxiware.com",
+                    "response_origin": "https://app.proxiware.com",
+                    "path": "/static/proxy/isp",
+                    "response_path": "/api/static/networks/isp/proxies",
+                    "payload": {
+                        "proxies": [
+                            {
+                                "assignment_id": "dashboard-1",
+                                "subscription_id": "39277",
+                                "addr": "51.194.85.8:1337",
+                                "eligible": True,
+                                "connections": 1,
+                            }
+                        ]
+                    },
+                }
+            )
+            self.cookies = None
+            clients.append(self)
+
+        def add_cookies(self, cookies):
+            self.cookies = cookies
+
+        @property
+        def url(self):
+            return "https://app.proxiware.com/static/proxy/isp"
+
+        def navigate(self, _url):
+            return None
+
+    adapter = CdpProxiwareBrowser(
+        "http://127.0.0.1:9222",
+        client_factory=SessionClient,
+    )
+
+    adapter.restore_session([{"name": "session", "value": "opaque"}])
+    rows = adapter.observe_dashboard(subscription_id="39277")
+    adapter.close()
+
+    assert len(clients) == 1
+    assert clients[0].cookies == [
+        {
+            "name": "session",
+            "value": "opaque",
+            "url": "https://app.proxiware.com/static/proxy/isp",
+        }
+    ]
+    assert rows[0].assignment_id == "dashboard-1"
+
+
+def test_cdp_page_selection_ignores_unrelated_tabs():
+    assert _dashboard_page_matches(
+        "https://app.proxiware.com/static/proxy/isp",
+        "https://app.proxiware.com/static/proxy/isp",
+    )
+    assert not _dashboard_page_matches(
+        "https://cashpilot.example/dashboard",
+        "https://app.proxiware.com/static/proxy/isp",
+    )
+    assert not _dashboard_page_matches(
+        "https://app.proxiware.com/login",
+        "https://app.proxiware.com/static/proxy/isp",
+    )
 
 
 def test_cdp_browser_rejects_wrong_origin_and_mutation_by_default():
