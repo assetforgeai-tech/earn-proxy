@@ -33,7 +33,11 @@ services=(
   earn-proxy-earnapp
   earn-proxy-maintenance
   earn-proxy-payout-verifier
+  earn-proxy-proxiware
+  earn-proxy-proxiware-qualification
+  earn-proxy-proxiware-swap
 )
+previous_services=()
 
 cleanup() {
   rm -f -- "$archive" "$next_link"
@@ -83,6 +87,10 @@ destination.close()
 PY
 cp -a /etc/earn-proxy.env "$backup_dir/earn-proxy.env"
 cp -a /etc/systemd/system/earn-proxy-*.service "$backup_dir/systemd/"
+for unit_path in "$backup_dir"/systemd/earn-proxy-*.service; do
+  unit_name="$(basename "$unit_path")"
+  previous_services+=("${unit_name%.service}")
+done
 
 systemd-run --quiet --wait --pipe --collect \
   --uid=earnproxy --gid=earnproxy \
@@ -93,18 +101,26 @@ systemd-run --quiet --wait --pipe --collect \
 install -m 0644 "$release_dir"/deploy/earn-proxy-*.service /etc/systemd/system/
 systemctl daemon-reload
 systemd-analyze verify "$release_dir"/deploy/earn-proxy-*.service
+systemctl enable "${services[@]}"
 ln -s "$release_dir" "$next_link"
 mv -Tf "$next_link" /opt/earn-proxy
-if ! systemctl restart "${services[@]}" || ! timeout 30 bash -c '
+if ! systemctl restart "${services[@]}" || ! systemctl is-active --quiet "${services[@]}" || ! timeout 30 bash -c '
   until curl -fsS http://127.0.0.1:8100/healthz >/dev/null; do sleep 1; done
 '; then
   echo "new release failed health verification; restoring previous release" >&2
   if [[ -n "$previous_release" && -d "$previous_release" ]]; then
+    systemctl stop "${services[@]}" || true
+    systemctl disable "${services[@]}" || true
+    for service in "${services[@]}"; do
+      unit_name="${service}.service"
+      rm -f -- "/etc/systemd/system/$unit_name"
+    done
     ln -s "$previous_release" "$next_link"
     mv -Tf "$next_link" /opt/earn-proxy
     install -m 0644 "$backup_dir"/systemd/earn-proxy-*.service /etc/systemd/system/
     systemctl daemon-reload
-    systemctl restart "${services[@]}"
+    systemctl enable "${previous_services[@]}"
+    systemctl restart "${previous_services[@]}"
   fi
   rm -rf -- "$release_dir"
   exit 1
