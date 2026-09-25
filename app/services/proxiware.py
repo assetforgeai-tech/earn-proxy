@@ -168,7 +168,55 @@ class ProxiwareClient:
             raise ValueError("Subscription ID must be an integer") from None
         if identifier <= 0:
             raise ValueError("Subscription ID must be positive")
-        return self._list_payload(self._get(f"/static/subscriptions/{identifier}/proxies"))
+        payload = self._get(f"/static/subscriptions/{identifier}/proxies")
+        value = payload
+        if isinstance(payload, dict):
+            for key in ("data", "items", "results", "proxies"):
+                if key in payload:
+                    value = payload[key]
+                    break
+        if not isinstance(value, list):
+            raise ProxiwareAPIError("payload_error", "Proxiware returned an invalid proxy list")
+        normalized: list[dict[str, Any]] = []
+        for item in value:
+            if isinstance(item, dict):
+                normalized.append(item)
+                continue
+            if not isinstance(item, str):
+                raise ProxiwareAPIError("payload_error", "Proxiware returned an invalid proxy list")
+            parts = item.strip().split(":")
+            if len(parts) != 5 or not parts[0] or not parts[3] or not parts[4]:
+                raise ProxiwareAPIError("payload_error", "Proxiware returned an invalid proxy list")
+            try:
+                http_port = int(parts[1])
+                socks_port = int(parts[2])
+            except (TypeError, ValueError):
+                raise ProxiwareAPIError("payload_error", "Proxiware returned an invalid proxy list") from None
+            if not 1 <= http_port <= 65535 or not 1 <= socks_port <= 65535:
+                raise ProxiwareAPIError("payload_error", "Proxiware returned an invalid proxy list")
+            external_id = (
+                "proxy-"
+                + hashlib.sha256(
+                    f"{identifier}\0{parts[0]}\0{http_port}\0{socks_port}\0{parts[3]}".encode("utf-8")
+                ).hexdigest()[:32]
+            )
+            normalized.append(
+                {
+                    # The raw credential string is secret material; derive a
+                    # stable ID from the endpoint and username only.
+                    "id": external_id,
+                    "host": parts[0],
+                    # The provider exposes both ports in host:http:socks:user:pass
+                    # form; use SOCKS5 as the canonical assignment protocol.
+                    "port": socks_port,
+                    "http_port": http_port,
+                    "socks_port": socks_port,
+                    "username": parts[3],
+                    "password": parts[4],
+                    "protocol": "socks5",
+                }
+            )
+        return normalized
 
 
 def load_api_key_file(path: str | Path) -> str:
@@ -377,6 +425,7 @@ def ensure_proxiware_inventory_schema(db) -> None:
             qualification TEXT NOT NULL DEFAULT 'pending',
             provider_eligible INTEGER NOT NULL DEFAULT 0,
             live_status TEXT NOT NULL DEFAULT 'pending',
+            protocol TEXT NOT NULL DEFAULT 'unknown',
             exit_ip TEXT,
             assigned_at TEXT,
             last_seen_at TEXT,
@@ -421,6 +470,7 @@ def ensure_proxiware_inventory_schema(db) -> None:
             "last_seen_at": "TEXT NOT NULL DEFAULT ''",
         },
         "provider_assignments": {
+            "protocol": "TEXT NOT NULL DEFAULT 'unknown'",
             "missing_at": "TEXT",
             "last_seen_at": "TEXT",
             "exit_ip": "TEXT",
@@ -652,8 +702,8 @@ def sync_proxiware_inventory(db, client: ProxiwareClient, *, now: datetime | Non
                     ("proxiware", proxy_id),
                 ).fetchone()
                 country = (
-                    str(raw_proxy.get("country") or "").upper()[:8]
-                    if "country" in raw_proxy
+                    str(raw_proxy.get("country") or subscription.get("location") or "").upper()[:64]
+                    if "country" in raw_proxy or subscription.get("location")
                     else str(existing_proxy["country"] if existing_proxy else "")
                 )
                 status = (
@@ -677,6 +727,13 @@ def sync_proxiware_inventory(db, client: ProxiwareClient, *, now: datetime | Non
                     if "live_status" in raw_proxy
                     else str(existing_proxy["live_status"] if existing_proxy else "pending")
                 )
+                protocol = str(raw_proxy.get("protocol") or "unknown").strip().lower()
+                if protocol not in {"http", "socks5"}:
+                    protocol = str(
+                        existing_proxy["protocol"] if existing_proxy and "protocol" in existing_proxy else "unknown"
+                    )
+                if protocol not in {"http", "socks5"}:
+                    protocol = "unknown"
                 username_encrypted = (
                     encrypt_secret(str(raw_proxy.get("username") or ""))
                     if "username" in raw_proxy
@@ -726,6 +783,7 @@ def sync_proxiware_inventory(db, client: ProxiwareClient, *, now: datetime | Non
                     qualification,
                     provider_eligible,
                     live_status,
+                    protocol,
                     str(raw_proxy.get("exit_ip") or "") or None if "exit_ip" in raw_proxy else None,
                     now_iso,
                     now_iso,
@@ -741,10 +799,10 @@ def sync_proxiware_inventory(db, client: ProxiwareClient, *, now: datetime | Non
                         """
                         INSERT INTO provider_assignments(
                             provider, subscription_id, external_id, host, port, username_encrypted, password_encrypted,
-                            country, status, qualification, provider_eligible, live_status, exit_ip, assigned_at,
+                            country, status, qualification, provider_eligible, live_status, protocol, exit_ip, assigned_at,
                             last_seen_at, missing_at, replacement_ready_at, identity_fingerprint, identity_generation,
                             created_at, updated_at
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         proxy_values,
                     )
@@ -762,6 +820,7 @@ def sync_proxiware_inventory(db, client: ProxiwareClient, *, now: datetime | Non
                                 "qualification",
                                 "provider_eligible",
                                 "live_status",
+                                "protocol",
                             ),
                             (
                                 int(subscription_id),
@@ -772,6 +831,7 @@ def sync_proxiware_inventory(db, client: ProxiwareClient, *, now: datetime | Non
                                 qualification,
                                 provider_eligible,
                                 live_status,
+                                protocol,
                             ),
                             strict=True,
                         )
@@ -780,8 +840,7 @@ def sync_proxiware_inventory(db, client: ProxiwareClient, *, now: datetime | Non
                         """
                         UPDATE provider_assignments SET subscription_id=?, host=?, port=?, username_encrypted=?,
                             password_encrypted=?, country=?, status=?, qualification=?, provider_eligible=?,
-                            live_status=?, exit_ip=CASE WHEN ? THEN NULL ELSE exit_ip END,
-                            protocol=CASE WHEN ? THEN 'unknown' ELSE protocol END,
+                            live_status=?, protocol=?, exit_ip=CASE WHEN ? THEN NULL ELSE exit_ip END,
                             egress_verified_at=CASE WHEN ? THEN NULL ELSE egress_verified_at END,
                             last_checked_at=CASE WHEN ? THEN NULL ELSE last_checked_at END,
                             last_error_code=CASE WHEN ? THEN '' ELSE last_error_code END,
@@ -804,7 +863,8 @@ def sync_proxiware_inventory(db, client: ProxiwareClient, *, now: datetime | Non
                             qualification,
                             provider_eligible,
                             live_status,
-                            *([int(identity_changed)] * 10),
+                            protocol,
+                            *([int(identity_changed)] * 9),
                             identity_fingerprint,
                             identity_generation,
                             now_iso,

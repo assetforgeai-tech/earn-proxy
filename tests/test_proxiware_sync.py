@@ -8,6 +8,7 @@ import app.services.proxiware as proxiware_service
 from app.crypto import decrypt_secret
 from app.db import get_db
 from app.services.proxiware import (
+    ProxiwareClient,
     SyncAlreadyRunning,
     SyncCancelled,
     SyncLeaseLost,
@@ -59,7 +60,7 @@ def _client():
                     "port": 41000,
                     "username": "user",
                     "password": "pass",
-                    "country": "US",
+                    "protocol": "socks5",
                 }
             ]
         },
@@ -88,8 +89,41 @@ def test_first_sync_persists_subscription_assignment_and_run(app):
     assert subscription["eligible_count"] == 900
     assert assignment["external_id"] == "100"
     assert assignment["subscription_id"] == subscription["id"]
+    assert assignment["protocol"] == "socks5"
+    assert assignment["country"] == "US"
     assert run["status"] == "success"
     assert run["added_count"] == 2
+
+
+def test_sync_accepts_provider_string_payload_after_client_normalization(app):
+    class Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    class Session:
+        def get(self, url, **_kwargs):
+            if url.endswith("/static/networks/isp/subscriptions"):
+                return Response([{"id": 10, "network": "isp", "location": "us", "quantity": 1}])
+            if url.endswith("/static/subscriptions/10/proxies"):
+                return Response(["203.0.113.10:18080:19090:proxy-user:proxy-pass"])
+            raise AssertionError(url)
+
+    client = ProxiwareClient("key", base_url="https://api.example/v1", session=Session())
+
+    with app.app_context():
+        result = sync_proxiware_inventory(get_db(), client)
+        row = get_db().execute("SELECT host, port, protocol, country FROM provider_assignments").fetchone()
+
+    assert result.errors == 0
+    assert row["host"] == "203.0.113.10"
+    assert row["port"] == 19090
+    assert row["protocol"] == "socks5"
+    assert row["country"] == "US"
 
 
 def test_sync_records_elapsed_duration(app, monkeypatch):

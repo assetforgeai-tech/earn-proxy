@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from app.services.proxiware import ProxiwareAPIError, ProxiwareClient, load_api_key_file
@@ -54,6 +56,34 @@ def test_client_normalizes_account_and_proxy_list_payloads():
 
     assert client.get_account() == {"id": 1, "email": "owner@example.com"}
     assert client.list_subscription_proxies(7) == [{"id": 9, "host": "proxy.example"}]
+
+
+def test_client_normalizes_proxiware_proxy_strings_with_socks_port():
+    session = FakeSession(
+        {
+            "https://api.example/v1/static/subscriptions/7/proxies": FakeResponse(
+                200,
+                ["203.0.113.10:18080:19090:proxy-user:proxy-pass"],
+            )
+        }
+    )
+    client = ProxiwareClient("key", base_url="https://api.example/v1", session=session)
+
+    assert client.list_subscription_proxies(7) == [
+        {
+            "id": "proxy-"
+            + hashlib.sha256("\0".join(("7", "203.0.113.10", "18080", "19090", "proxy-user")).encode()).hexdigest()[
+                :32
+            ],
+            "host": "203.0.113.10",
+            "port": 19090,
+            "http_port": 18080,
+            "socks_port": 19090,
+            "username": "proxy-user",
+            "password": "proxy-pass",
+            "protocol": "socks5",
+        }
+    ]
 
 
 @pytest.mark.parametrize(
