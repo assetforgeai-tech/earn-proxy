@@ -1,5 +1,7 @@
 .env
 .venv/
+.tmp-proxiware-gate-venv/
+.tmp-proxiware-smoke/
 *.egg-info/
 build/
 __pycache__/

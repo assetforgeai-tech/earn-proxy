@@ -6,10 +6,13 @@ from urllib.parse import urlparse
 import requests
 from flask import Blueprint, Response, current_app, jsonify, request
 
+from app.crypto import decrypt_secret
 from app.db import get_db
+from app.proxy_parser import ParsedProxy
 from app.services.api_keys import authenticate_api_key
 from app.services.checks import checker_settings
 from app.services.proxies import reveal_proxy
+from app.services.proxiware_qualification import _ip as normalize_exit_ip
 from app.services.settings import get_setting
 
 bp = Blueprint("internal_api", __name__, url_prefix="/internal/api/v1")
@@ -51,6 +54,65 @@ def _raw_rows():
             distributable.append((row, reveal_proxy(row)))
         except ValueError:
             current_app.logger.error("Skipping proxy %s because its credential cannot be decrypted", row["id"])
+    if get_setting(db, "proxiware_distribution_enabled", "0") == "1":
+        provider_columns = {
+            str(row["name"]) for row in db.execute('PRAGMA table_info("provider_assignments")').fetchall()
+        }
+        required = {
+            "distribution_enabled",
+            "duplicate_egress",
+            "egress_verified_at",
+            "protocol",
+        }
+        if required.issubset(provider_columns):
+            provider_rows = db.execute(
+                """
+                SELECT * FROM provider_assignments
+                WHERE provider='proxiware' AND missing_at IS NULL
+                  AND status IN ('active','current') AND live_status='live'
+                  AND qualification='allow' AND provider_eligible=1
+                  AND distribution_enabled=1 AND duplicate_egress=0
+                  AND exit_ip IS NOT NULL AND trim(exit_ip)<>''
+                  AND egress_verified_at IS NOT NULL AND last_checked_at>=?
+                  AND (replacement_ready_at IS NULL OR replacement_ready_at<=?)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM swap_jobs sj
+                      WHERE sj.provider='proxiware' AND sj.subscription_id=provider_assignments.subscription_id
+                        AND sj.state IN ('pending','running')
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM proxies p
+                      WHERE p.archived_at IS NULL AND p.exit_ip=provider_assignments.exit_ip
+                        AND p.duplicate_of IS NULL
+                        AND p.egress_attestation_source IN ('https_quorum','earnapp_tls')
+                  )
+                  AND id = COALESCE(
+                      (SELECT MIN(pa2.id) FROM provider_assignments pa2
+                       WHERE pa2.provider='proxiware' AND pa2.missing_at IS NULL
+                         AND pa2.exit_ip=provider_assignments.exit_ip
+                         AND pa2.live_status='live' AND pa2.egress_verified_at IS NOT NULL), id
+                  )
+                ORDER BY id
+                """,
+                (stale_cutoff, datetime.now(UTC).isoformat()),
+            ).fetchall()
+            for row in provider_rows:
+                if not normalize_exit_ip(row["exit_ip"]):
+                    continue
+                try:
+                    parsed = ParsedProxy(
+                        str(row["protocol"] or "auto"),
+                        str(row["host"]),
+                        int(row["port"]),
+                        decrypt_secret(str(row["username_encrypted"] or "")) if row["username_encrypted"] else "",
+                        decrypt_secret(str(row["password_encrypted"] or "")) if row["password_encrypted"] else "",
+                    )
+                    distributable.append((row, parsed))
+                except (TypeError, ValueError):
+                    current_app.logger.error(
+                        "Skipping provider assignment %s because its credential cannot be decrypted",
+                        row["id"],
+                    )
     return distributable
 
 
@@ -59,10 +121,13 @@ def _raw_response(*, include_type: bool = False):
     if request.args.get("format", "").lower() == "json":
         payload = []
         for row, parsed in distributable:
+            row_keys = set(row.keys())
+            qualification = str(row["qualification"] if "qualification" in row_keys else row["eligibility"])
+            protocol = str(row["protocol"] if "protocol" in row_keys else row["detected_protocol"])
             item = {
                 "raw": parsed.raw,
-                "status": str(row["eligibility"]).capitalize(),
-                "protocol": row["detected_protocol"],
+                "status": qualification.capitalize(),
+                "protocol": protocol,
                 "endpoint": f"{row['host']}:{row['port']}",
             }
             if include_type:

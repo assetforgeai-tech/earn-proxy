@@ -59,6 +59,10 @@
         <a class="nav-item" data-nav="transfer_proxy"{% if current_nav == 'transfer_proxy' %} aria-current="page"{% endif %} href="{{ url_for('admin.transfer_proxy') }}">
           <svg viewBox="0 0 24 24" fill="none"><path d="M4 12h16M15 7l5 5-5 5M9 17l-5-5 5-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Transfer Proxy</span>
         </a>
+        <p class="nav-label">Providers</p>
+        <a class="nav-item" data-nav="proxiware"{% if current_nav == 'proxiware' %} aria-current="page"{% endif %} href="{{ url_for('admin.proxiware_workspace') }}" aria-label="Proxiware workspace">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M4 7.5h16v11H4v-11Zm3-3h10m-8 7h6m-6 3h4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Proxiware</span>
+        </a>
         {% else %}
         <p class="nav-label">Workspace</p>
         <a class="nav-item" data-nav="dashboard"{% if current_nav == 'dashboard' %} aria-current="page"{% endif %} href="{{ url_for('dashboard.dashboard') }}">

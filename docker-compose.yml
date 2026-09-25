@@ -40,6 +40,48 @@ services:
     volumes:
       - earn-proxy-data:/var/lib/earn-proxy
 
+  proxiware-sync:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "-m", "app.proxiware_sync_service"]
+    volumes:
+      - earn-proxy-data:/var/lib/earn-proxy
+    healthcheck:
+      test: ["CMD", "python", "-m", "scripts.proxiware_healthcheck", "sync_worker", "--max-age-seconds", "900"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 2m
+
+  proxiware-swap:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "-m", "app.proxiware_swap_service"]
+    volumes:
+      - earn-proxy-data:/var/lib/earn-proxy
+    healthcheck:
+      test: ["CMD", "python", "-m", "scripts.proxiware_healthcheck", "swap_worker", "--max-age-seconds", "900"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 2m
+
+  proxiware-qualification:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "-m", "app.services.proxiware_qualification_service"]
+    volumes:
+      - earn-proxy-data:/var/lib/earn-proxy
+    healthcheck:
+      test: ["CMD", "python", "-m", "scripts.proxiware_healthcheck", "qualification_worker", "--max-age-seconds", "4500"]
+      interval: 10m
+      timeout: 10s
+      retries: 3
+      start_period: 2m
+
   caddy:
     image: caddy:2.10-alpine
     restart: unless-stopped

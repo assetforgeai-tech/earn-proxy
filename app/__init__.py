@@ -68,6 +68,19 @@ def create_app(test_config: dict | None = None) -> Flask:
         ),
         BSC_USDT_DECIMALS=int(os.environ.get("EARN_PROXY_BSC_USDT_DECIMALS", "18")),
         BSC_MIN_CONFIRMATIONS=int(os.environ.get("EARN_PROXY_BSC_MIN_CONFIRMATIONS", "12")),
+        PROXIWARE_API_BASE_URL=os.environ.get("EARN_PROXY_PROXIWARE_API_BASE_URL", "https://api.proxiware.com/v1"),
+        PROXIWARE_API_KEY_FILE=os.environ.get("EARN_PROXY_PROXIWARE_API_KEY_FILE", ""),
+        PROXIWARE_SYNC_INTERVAL_SECONDS=int(os.environ.get("EARN_PROXY_PROXIWARE_SYNC_INTERVAL_SECONDS", "300")),
+        PROXIWARE_SYNC_RETRY_LIMIT=int(os.environ.get("EARN_PROXY_PROXIWARE_SYNC_RETRY_LIMIT", "3")),
+        PROXIWARE_SYNC_RETRY_BACKOFF_SECONDS=float(
+            os.environ.get("EARN_PROXY_PROXIWARE_SYNC_RETRY_BACKOFF_SECONDS", "5")
+        ),
+        PROXIWARE_ACTION_RATE_LIMIT=int(os.environ.get("EARN_PROXY_PROXIWARE_ACTION_RATE_LIMIT", "10")),
+        PROXIWARE_ACTION_RATE_WINDOW_SECONDS=int(
+            os.environ.get("EARN_PROXY_PROXIWARE_ACTION_RATE_WINDOW_SECONDS", "60")
+        ),
+        PROXIWARE_LOGIN_URL=os.environ.get("EARN_PROXY_PROXIWARE_LOGIN_URL", "https://app.proxiware.com/login"),
+        PROXIWARE_HCAPTCHA_SITE_KEY=os.environ.get("EARN_PROXY_PROXIWARE_HCAPTCHA_SITE_KEY", ""),
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=os.environ.get("EARN_PROXY_COOKIE_SECURE", "1") == "1",
@@ -132,6 +145,8 @@ def create_app(test_config: dict | None = None) -> Flask:
             "admin.integrations": ("integrations", "Distribution API"),
             "admin.api_keys_workspace": ("api_keys", "API keys"),
             "admin.transfer_proxy": ("transfer_proxy", "Transfer Proxy"),
+            "admin.proxiware_workspace": ("proxiware", "Proxiware"),
+            "admin.proxiware_swap_history": ("proxiware", "Proxiware"),
             "dashboard.dashboard": ("dashboard", "Overview"),
             "dashboard.proxies": ("proxy_pool", "Proxy pool"),
             "dashboard.earnings": ("earnings", "Earnings"),

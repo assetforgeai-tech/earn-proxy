@@ -28,6 +28,9 @@ dev = [
 earn-proxy-checker = "app.check_service:main"
 earn-proxy-maintenance = "app.maintenance_service:main"
 earn-proxy-payout-verifier = "app.payout_verifier_service:main"
+earn-proxy-proxiware-sync = "app.proxiware_sync_service:main"
+earn-proxy-proxiware-swap = "app.proxiware_swap_service:main"
+earn-proxy-proxiware-qualification = "app.services.proxiware_qualification_service:main"
 
 [tool.setuptools.packages.find]
 include = ["app*"]

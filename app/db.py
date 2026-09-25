@@ -205,6 +205,75 @@ CREATE INDEX IF NOT EXISTS payouts_verification_due_idx
     ON payouts(status, next_verification_at, verification_claimed_until);
 CREATE UNIQUE INDEX IF NOT EXISTS payouts_tx_hash_uidx
     ON payouts(lower(tx_hash)) WHERE tx_hash <> '' AND length(tx_hash)=66;
+
+CREATE TABLE IF NOT EXISTS provider_subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    network TEXT NOT NULL DEFAULT 'isp',
+    location TEXT NOT NULL DEFAULT '',
+    quantity INTEGER NOT NULL DEFAULT 0,
+    expires_at INTEGER,
+    auto_renew INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    eligible_count INTEGER,
+    connections INTEGER,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    first_seen_at TEXT NOT NULL DEFAULT '',
+    last_seen_at TEXT NOT NULL DEFAULT '',
+    missing_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(provider, external_id)
+);
+
+CREATE INDEX IF NOT EXISTS provider_subscriptions_state_idx
+    ON provider_subscriptions(provider, status, missing_at, updated_at);
+
+CREATE TABLE IF NOT EXISTS provider_assignments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subscription_id INTEGER NOT NULL REFERENCES provider_subscriptions(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    host TEXT NOT NULL,
+    port INTEGER NOT NULL,
+    username_encrypted TEXT NOT NULL DEFAULT '',
+    password_encrypted TEXT NOT NULL DEFAULT '',
+    country TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    qualification TEXT NOT NULL DEFAULT 'pending',
+    provider_eligible INTEGER,
+    live_status TEXT NOT NULL DEFAULT 'pending',
+    exit_ip TEXT,
+    assigned_at TEXT NOT NULL DEFAULT '',
+    last_seen_at TEXT NOT NULL DEFAULT '',
+    missing_at TEXT,
+    replacement_ready_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(provider, external_id)
+);
+
+CREATE INDEX IF NOT EXISTS provider_assignments_state_idx
+    ON provider_assignments(provider, subscription_id, status, live_status, qualification, missing_at);
+
+CREATE TABLE IF NOT EXISTS provider_sync_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    added_count INTEGER NOT NULL DEFAULT 0,
+    updated_count INTEGER NOT NULL DEFAULT 0,
+    missing_count INTEGER NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'running',
+    error_code TEXT NOT NULL DEFAULT '',
+    error_message TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS provider_sync_runs_provider_idx
+    ON provider_sync_runs(provider, started_at DESC);
 """
 
 
@@ -527,6 +596,18 @@ DEFAULT_SETTINGS = {
 }
 
 
+def _ensure_provider_schema(db) -> None:
+    """Bootstrap provider tables before any request or worker queries them."""
+    # Keep provider-specific DDL beside its state machine, but invoke it from
+    # the single application bootstrap path so a fresh install cannot expose a
+    # half-created provider workspace.
+    from app.services.proxiware import ensure_proxiware_inventory_schema
+    from app.services.proxiware_swap import ensure_proxiware_swap_schema
+
+    ensure_proxiware_swap_schema(db)
+    ensure_proxiware_inventory_schema(db)
+
+
 def get_db() -> sqlite3.Connection:
     if "db" not in g:
         database = Path(current_app.config["DATABASE"])
@@ -554,6 +635,7 @@ def init_db() -> None:
         "INSERT OR IGNORE INTO settings(key, value, updated_at) VALUES (?, ?, datetime('now'))",
         DEFAULT_SETTINGS.items(),
     )
+    _ensure_provider_schema(db)
     db.commit()
 
 

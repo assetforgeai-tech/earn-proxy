@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -434,6 +435,16 @@ def reconcile_exit_ip(
     _canonicalize_exit_group(db, normalized_exit, prefer_verified_order=had_verified_timestamp)
     if previous_exit and previous_exit != normalized_exit:
         _canonicalize_exit_group(db, previous_exit)
+    # Provider inventory shares the same global egress identity namespace.
+    # Reconcile it after a user proxy gains trusted evidence, including when
+    # the user record arrives after a provider qualification pass.
+    try:
+        from app.services.proxiware_qualification import reconcile_proxiware_duplicates
+
+        reconcile_proxiware_duplicates(db, commit=False)
+    except (ImportError, sqlite3.OperationalError):
+        # Older/migration-time databases may not have provider tables yet.
+        pass
     if commit:
         db.commit()
 
