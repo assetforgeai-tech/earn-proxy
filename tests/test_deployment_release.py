@@ -70,6 +70,25 @@ def test_release_installer_removes_an_unactivated_release_after_failure():
     assert health_check < activated
 
 
+def test_release_installer_manages_proxiware_workers_and_restores_previous_service_set():
+    installer = (ROOT / "deploy" / "release.sh").read_text()
+
+    for service in (
+        "earn-proxy-proxiware",
+        "earn-proxy-proxiware-qualification",
+        "earn-proxy-proxiware-swap",
+    ):
+        assert service in installer
+    assert 'systemctl enable "${services[@]}"' in installer
+    assert 'systemctl is-active --quiet "${services[@]}"' in installer
+    assert 'previous_services+=("${unit_name%.service}")' in installer
+    assert 'systemctl stop "${services[@]}" || true' in installer
+    assert 'systemctl disable "${services[@]}" || true' in installer
+    assert 'rm -f -- "/etc/systemd/system/$unit_name"' in installer
+    assert 'systemctl enable "${previous_services[@]}"' in installer
+    assert 'systemctl restart "${previous_services[@]}"' in installer
+
+
 def test_release_preflight_rejects_a_venv_created_for_another_release(tmp_path, monkeypatch):
     from deploy.release_preflight import validate_runtime_prefix
 

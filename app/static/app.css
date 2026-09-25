@@ -588,6 +588,44 @@ form[aria-busy="true"] .button {
   background: #f5f7ff;
 }
 
+/* Proxiware workspace: compact control-center surfaces, safe on narrow screens. */
+.proxiware-page-head { align-items: flex-start; }
+.proxiware-status-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 0 0 16px; }
+.proxiware-status-item { display: flex; align-items: center; gap: 8px; min-height: 56px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow-soft); }
+.proxiware-status-item strong { margin-left: auto; text-transform: capitalize; }
+.proxiware-status-item small { color: var(--muted); }
+.status-dot.is-good { background: var(--teal); }
+.status-dot.is-warn { background: var(--amber); }
+.proxiware-tabs { display: flex; gap: 6px; overflow-x: auto; margin: 0 0 16px; padding: 4px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+.proxiware-tab { min-height: 44px; display: inline-flex; align-items: center; padding: 8px 14px; border-radius: 10px; color: var(--muted); text-decoration: none; white-space: nowrap; }
+.proxiware-tab:hover, .proxiware-tab:focus-visible { background: var(--teal-soft); color: var(--teal-dark); }
+.proxiware-tab.is-active { background: var(--teal); color: #fff; }
+.proxiware-stat-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.proxiware-overview-grid { margin-top: 16px; }
+.proxiware-detail-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 0; }
+.proxiware-detail-list div { padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-strong); }
+.proxiware-detail-list dt { color: var(--muted); font-size: .82rem; }
+.proxiware-detail-list dd { margin: 3px 0 0; font-weight: 700; overflow-wrap: anywhere; }
+.proxiware-count-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; margin: 14px 0; }
+.proxiware-count-grid .inventory-count { min-height: 58px; }
+.proxiware-toolbar { margin: 0 0 16px; }
+.proxiware-table { min-width: 920px; }
+.proxiware-action-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.proxiware-action-row form { margin: 0; }
+@media (max-width: 900px) {
+  .proxiware-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .proxiware-count-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@media (max-width: 700px) {
+  .proxiware-status-strip, .proxiware-detail-list { grid-template-columns: 1fr; }
+  .proxiware-status-item { align-items: flex-start; flex-wrap: wrap; }
+  .proxiware-status-item strong { margin-left: 0; }
+  .proxiware-status-item small { flex-basis: 100%; }
+  .proxiware-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .proxiware-count-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .proxiware-tab { padding-inline: 12px; }
+}
+
 .format-guide summary {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);

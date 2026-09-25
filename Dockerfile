@@ -10,6 +10,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY pyproject.toml README.md LICENSE NOTICE.md ./
 COPY app ./app
+COPY scripts ./scripts
 RUN python -m pip install --no-cache-dir .
 
 RUN addgroup --system earnproxy \

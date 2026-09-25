@@ -118,6 +118,17 @@ GET https://proxy.acacondos.com/api/v1/proxy-transfer
 
 Administrators manage multiple revocable API keys at `/admin/integrations/api-keys`. A newly created or rotated token is revealed once; only its digest, prefix, and operational metadata are retained in SQLite.
 
+### Proxiware provider workspace
+
+Provider operations are isolated under the admin-only menu `Providers -> Proxiware`:
+`Overview`, `Inventory`, `Qualification`, `Sync`, `Swap queue`, `Swap history`,
+`Session`, `Credentials`, `Policy`, and `Audit`. All routes are direct-linkable
+and provider-scoped. The emergency pause stops Proxiware automation only; it does
+not pause distribution, contributor earnings, online hours, quota, or another
+provider. Official Proxiware API calls are read-only. Auto-swap and provider
+distribution default to `OFF`; an unverified browser adapter fails closed as
+`manual_action_required`.
+
 Example (keep the key in an environment variable):
 
 ```bash
