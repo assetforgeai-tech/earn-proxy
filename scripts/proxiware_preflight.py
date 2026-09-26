@@ -229,7 +229,7 @@ def collect_runtime_observation(
     backups = Path(backup_root)
     try:
         candidates = sorted(
-            (path for path in backups.iterdir() if path.is_dir()), key=lambda path: path.name, reverse=True
+            (path for path in backups.iterdir() if path.is_dir()), key=lambda path: path.stat().st_mtime, reverse=True
         )
         latest_backup = str(candidates[0].resolve()) if candidates else ""
     except OSError:

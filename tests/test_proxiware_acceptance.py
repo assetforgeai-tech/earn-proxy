@@ -110,6 +110,31 @@ def test_runtime_observation_validates_enabled_chrome_binary_and_ephemeral_profi
     assert observation["profile_isolated"] is True
 
 
+def test_runtime_observation_selects_backup_by_mtime_not_directory_name(tmp_path):
+    backup_root = tmp_path / "backups"
+    old = backup_root / "pre-f7b994f-20260905T030109Z"
+    newest = backup_root / "20260926T012017Z-82d5959"
+    old.mkdir(parents=True)
+    newest.mkdir()
+    old.touch()
+    newest.touch()
+    import os
+
+    os.utime(old, (100, 100))
+    os.utime(newest, (200, 200))
+
+    from scripts.proxiware_preflight import collect_runtime_observation
+
+    observation = collect_runtime_observation(
+        database_path=tmp_path / "missing.db",
+        backup_root=backup_root,
+        local_health_url="",
+        public_health_url="",
+    )
+
+    assert observation["backup"]["target"].endswith("20260926T012017Z-82d5959")
+
+
 def test_production_preflight_rejects_enabled_chrome_with_invalid_runtime(tmp_path, monkeypatch):
     from scripts import proxiware_preflight
 
