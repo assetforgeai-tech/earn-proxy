@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime, timedelta
 from threading import Event, Thread
 from time import sleep
@@ -376,3 +377,13 @@ def test_browser_runner_persists_bounded_retry_backoff_after_transport_failure(a
     assert timedelta(seconds=30) <= retry_at - now <= timedelta(seconds=300)
     assert row["dashboard_observation_failures"] == 1
     assert row["dashboard_last_error_code"] == "provider_timeout"
+
+
+def test_browser_service_disabled_does_not_initialize_application(monkeypatch):
+    import app.proxiware_browser_service as service
+
+    monkeypatch.delenv("EARN_PROXY_PROXIWARE_BROWSER_ENABLED", raising=False)
+    monkeypatch.setattr(service, "create_app", lambda: (_ for _ in ()).throw(AssertionError("app initialized")))
+    monkeypatch.setattr(sys, "argv", ["proxiware_browser_service", "--once"])
+
+    assert service.main() == 0

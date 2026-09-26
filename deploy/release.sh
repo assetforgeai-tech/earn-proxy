@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 0077
 
 if [[ $# -ne 1 ]]; then
   echo "usage: sudo deploy/release.sh <revision>" >&2
@@ -75,6 +76,18 @@ if [[ -z "$python_bin" ]] || ! "$python_bin" -c 'import sys; raise SystemExit(sy
   exit 69
 fi
 
+# The browser observer shares the runtime database through the earnproxy group.
+# Keep the directory private to that group; never broaden it to world access.
+install -d -o earnproxy -g earnproxy -m 0770 /var/lib/earn-proxy
+chown earnproxy:earnproxy "$database_path"
+chmod 0660 "$database_path"
+for sqlite_sidecar in "$database_path"-wal "$database_path"-shm; do
+  if [[ -e "$sqlite_sidecar" ]]; then
+    chown earnproxy:earnproxy "$sqlite_sidecar"
+    chmod 0660 "$sqlite_sidecar"
+  fi
+done
+
 git -C "$source_dir" archive --format=tar "$revision" -o "$archive"
 install -d -o root -g root -m 0755 "$release_dir"
 tar -xf "$archive" -C "$release_dir"
@@ -85,6 +98,8 @@ tar -xf "$archive" -C "$release_dir"
 chown -R root:root "$release_dir"
 chmod -R go-w "$release_dir"
 
+install -d -o root -g earnproxy -m 0750 /var/backups/earn-proxy
+install -d -o root -g earnproxy -m 0750 "$backup_dir"
 install -d -o root -g root -m 0700 "$backup_dir/systemd"
 "$release_dir/.venv/bin/python" - "$database_path" "$backup_dir/earn-proxy.db" <<'PY'
 import sqlite3
@@ -98,6 +113,7 @@ source.close()
 destination.close()
 PY
 cp -a /etc/earn-proxy.env "$backup_dir/earn-proxy.env"
+chmod 0600 "$backup_dir/earn-proxy.db" "$backup_dir/earn-proxy.env"
 cp -a /etc/systemd/system/earn-proxy-*.service "$backup_dir/systemd/"
 for unit_path in "$backup_dir"/systemd/earn-proxy-*.service; do
   unit_name="$(basename "$unit_path")"

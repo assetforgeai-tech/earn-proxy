@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 User=earnproxy
 Group=earnproxy
+UMask=0007
 WorkingDirectory=/opt/earn-proxy
 EnvironmentFile=/etc/earn-proxy.env
 ExecStart=/opt/earn-proxy/.venv/bin/python -m app.payout_verifier_service

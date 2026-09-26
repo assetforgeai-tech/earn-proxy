@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 from datetime import UTC, datetime, timedelta
 from threading import Event, Thread
@@ -291,6 +292,18 @@ def main() -> int:
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--interval-seconds", type=float, default=DEFAULT_INTERVAL_SECONDS)
     args = parser.parse_args()
+
+    # Keep the disabled unit alive without opening the application or database.
+    # This avoids a restart loop and keeps the fail-closed default cheap.
+    if os.environ.get("EARN_PROXY_PROXIWARE_BROWSER_ENABLED", "0") != "1":
+        if args.once:
+            return 0
+        stopped = Event()
+        signal.signal(signal.SIGTERM, lambda *_: stopped.set())
+        signal.signal(signal.SIGINT, lambda *_: stopped.set())
+        stopped.wait()
+        return 0
+
     app = create_app()
     runner = ProxiwareBrowserRunner(
         app=app,

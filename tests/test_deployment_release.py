@@ -162,6 +162,40 @@ def test_release_installer_does_not_persist_browser_profile():
     assert "useradd --system --gid earnproxy-chrome" in installer
 
 
+def test_release_installer_grants_browser_observer_group_access_to_runtime_database():
+    installer = (ROOT / "deploy" / "release.sh").read_text()
+    unit = (ROOT / "deploy" / "earn-proxy-proxiware-browser.service").read_text()
+
+    assert "install -d -o earnproxy -g earnproxy -m 0770 /var/lib/earn-proxy" in installer
+    assert 'chmod 0660 "$database_path"' in installer
+    assert "UMask=0007" in unit
+
+
+def test_database_writers_preserve_group_write_access_for_sqlite_sidecars():
+    units = [
+        path
+        for path in (ROOT / "deploy").glob("earn-proxy-*.service")
+        if "ReadWritePaths=/var/lib/earn-proxy" in path.read_text()
+    ]
+
+    assert units
+    assert all("UMask=0007" in path.read_text() for path in units)
+
+
+def test_browser_observer_loads_its_optional_isolated_environment():
+    unit = (ROOT / "deploy" / "earn-proxy-proxiware-browser.service").read_text()
+
+    assert "EnvironmentFile=-/etc/earn-proxy-browser.env" in unit
+
+
+def test_release_backup_listing_is_group_visible_but_backup_files_stay_private():
+    installer = (ROOT / "deploy" / "release.sh").read_text()
+
+    assert "install -d -o root -g earnproxy -m 0750 /var/backups/earn-proxy" in installer
+    assert 'install -d -o root -g earnproxy -m 0750 "$backup_dir"' in installer
+    assert 'chmod 0600 "$backup_dir/earn-proxy.db" "$backup_dir/earn-proxy.env"' in installer
+
+
 def test_release_preflight_loads_optional_browser_environment():
     installer = (ROOT / "deploy" / "release.sh").read_text()
 
