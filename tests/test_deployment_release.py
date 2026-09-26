@@ -191,8 +191,11 @@ def test_browser_observer_loads_its_optional_isolated_environment():
 def test_release_backup_listing_is_group_visible_but_backup_files_stay_private():
     installer = (ROOT / "deploy" / "release.sh").read_text()
 
+    assert "umask 0077" in installer
+    assert installer.index('chmod -R go-w "$release_dir"') < installer.index("umask 0077")
     assert "install -d -o root -g earnproxy -m 0750 /var/backups/earn-proxy" in installer
     assert 'install -d -o root -g earnproxy -m 0750 "$backup_dir"' in installer
+    assert 'install -o root -g root -m 0600 /dev/null "$backup_dir/earn-proxy.db"' in installer
     assert 'chmod 0600 "$backup_dir/earn-proxy.db" "$backup_dir/earn-proxy.env"' in installer
 
 

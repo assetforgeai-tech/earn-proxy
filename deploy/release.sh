@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-umask 0077
 
 if [[ $# -ne 1 ]]; then
   echo "usage: sudo deploy/release.sh <revision>" >&2
@@ -97,10 +96,12 @@ tar -xf "$archive" -C "$release_dir"
 "$release_dir/.venv/bin/python" -m pip check
 chown -R root:root "$release_dir"
 chmod -R go-w "$release_dir"
+umask 0077
 
 install -d -o root -g earnproxy -m 0750 /var/backups/earn-proxy
 install -d -o root -g earnproxy -m 0750 "$backup_dir"
 install -d -o root -g root -m 0700 "$backup_dir/systemd"
+install -o root -g root -m 0600 /dev/null "$backup_dir/earn-proxy.db"
 "$release_dir/.venv/bin/python" - "$database_path" "$backup_dir/earn-proxy.db" <<'PY'
 import sqlite3
 import sys
