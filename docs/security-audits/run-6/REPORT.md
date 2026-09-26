@@ -10,8 +10,8 @@ ownership and mode, creating a symlink/TOCTOU path to root file metadata
 changes. Both issues are fixed in the current worktree: CDP access is limited
 by a nftables owner ACL and dedicated systemd identities; DB permission and
 backup reads use descriptor-safe `O_NOFOLLOW` operations from the immutable
-release, with the production database path fixed to a direct child of the
-root-owned parent. The
+release, with the production database path fixed under `/var/lib/earn-proxy`.
+The
 stored browser session was invalidated before remediation. Legacy world/group
 readable backup DB files were tightened to `root:root 0600`.
 

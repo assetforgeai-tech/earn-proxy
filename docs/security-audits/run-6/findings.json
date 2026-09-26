@@ -42,7 +42,7 @@
       "attacker_perspective": "An unrelated local Unix user on the VPS.",
       "payloads": [
         "GET http://127.0.0.1:9222/json/version",
-        "Open the returned DevTools WebSocket and issue Runtime.evaluate(document.cookie)"
+        "Open the returned DevTools WebSocket and issue Network.getAllCookies or Runtime.evaluate(document.cookie)"
       ],
       "instructions": [
         "Run the requests as nobody while the pre-fix Chrome service is active.",
