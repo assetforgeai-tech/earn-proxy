@@ -1,6 +1,8 @@
 [Unit]
 Description=Earn Proxy isolated Proxiware Chromium CDP
-After=network-online.target
+Requires=earn-proxy-proxiware-cdp-acl.service
+BindsTo=earn-proxy-proxiware-cdp-acl.service
+After=network-online.target earn-proxy-proxiware-cdp-acl.service
 Wants=network-online.target
 
 [Service]

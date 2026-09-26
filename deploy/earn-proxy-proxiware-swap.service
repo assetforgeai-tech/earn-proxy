@@ -1,15 +1,18 @@
 [Unit]
 Description=Earn Proxy Proxiware guarded swap worker
-After=network-online.target
+Requires=earn-proxy-proxiware-chrome.service
+BindsTo=earn-proxy-proxiware-chrome.service
+After=network-online.target earn-proxy-proxiware-chrome.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=earnproxy
+User=earnproxy-browser
 Group=earnproxy
 UMask=0007
 WorkingDirectory=/opt/earn-proxy
 EnvironmentFile=/etc/earn-proxy.env
+EnvironmentFile=-/etc/earn-proxy-browser.env
 ExecStart=/opt/earn-proxy/.venv/bin/python -m app.proxiware_swap_service
 Restart=always
 RestartSec=5
@@ -17,6 +20,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ReadWritePaths=/var/lib/earn-proxy
 
 [Install]

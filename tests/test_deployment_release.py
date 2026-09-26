@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).parents[1]
 
@@ -91,6 +94,52 @@ def test_release_installer_manages_proxiware_workers_and_restores_previous_servi
     assert 'systemctl restart "${previous_services[@]}"' in installer
 
 
+def test_release_installer_uses_descriptor_safe_runtime_permission_helper():
+    installer = (ROOT / "deploy" / "release.sh").read_text()
+
+    assert "secure_runtime_permissions.py" in installer
+    assert '"$release_dir/deploy/secure_runtime_permissions.py"' in installer
+    assert '"$source_dir/deploy/secure_runtime_permissions.py"' not in installer
+    assert 'database_path" != "/var/lib/earn-proxy/earn-proxy.db"' in installer
+    assert "os.O_NOFOLLOW" in installer
+    assert "file:/proc/self/fd/{source_fd}?mode=ro" in installer
+    assert 'chown earnproxy:earnproxy "$database_path"' not in installer
+    assert 'chmod 0660 "$database_path"' not in installer
+    assert 'chown earnproxy:earnproxy "$sqlite_sidecar"' not in installer
+    assert 'chmod 0660 "$sqlite_sidecar"' not in installer
+
+
+def test_runtime_permission_helper_rejects_symlink_targets_and_accepts_regular_files(tmp_path):
+    if os.name != "posix":
+        pytest.skip("descriptor ownership APIs are POSIX-only")
+
+    from deploy.secure_runtime_permissions import secure_runtime_permissions
+
+    database = tmp_path / "earn-proxy.db"
+    database.write_bytes(b"database")
+    secure_runtime_permissions(database, uid=os.getuid(), gid=os.getgid(), mode=0o660)
+
+    assert database.stat().st_mode & 0o777 == 0o660
+
+    target = tmp_path / "root-owned"
+    target.write_bytes(b"do not touch")
+    target.chmod(0o640)
+    database.unlink()
+    main_link = tmp_path / "earn-proxy.db"
+    main_link.symlink_to(target)
+
+    with pytest.raises((OSError, RuntimeError, ValueError)):
+        secure_runtime_permissions(main_link, uid=os.getuid(), gid=os.getgid(), mode=0o660)
+
+    link = tmp_path / "earn-proxy.db-wal"
+    link.symlink_to(target)
+
+    with pytest.raises((OSError, RuntimeError, ValueError)):
+        secure_runtime_permissions(link, uid=os.getuid(), gid=os.getgid(), mode=0o660)
+    assert target.read_bytes() == b"do not touch"
+    assert target.stat().st_mode & 0o777 == 0o640
+
+
 def test_browser_worker_is_isolated_and_mutation_is_disabled_by_default():
     unit = (ROOT / "deploy" / "earn-proxy-proxiware-browser.service").read_text()
     chrome_unit = (ROOT / "deploy" / "earn-proxy-proxiware-chrome.service").read_text()
@@ -122,6 +171,42 @@ def test_browser_worker_is_isolated_and_mutation_is_disabled_by_default():
     assert "RuntimeDirectory=earn-proxy-browser" in chrome_unit
     assert "ReadWritePaths=/run/earn-proxy-browser" in chrome_unit
     assert "EARN_PROXY_PROXIWARE_BROWSER_ALLOW_MUTATION=0" in env
+
+
+def test_cdp_acl_is_required_before_chrome_and_stops_with_it():
+    acl_unit = (ROOT / "deploy" / "earn-proxy-proxiware-cdp-acl.service").read_text()
+    chrome_unit = (ROOT / "deploy" / "earn-proxy-proxiware-chrome.service").read_text()
+    browser_unit = (ROOT / "deploy" / "earn-proxy-proxiware-browser.service").read_text()
+    swap_unit = (ROOT / "deploy" / "earn-proxy-proxiware-swap.service").read_text()
+    installer = (ROOT / "deploy" / "release.sh").read_text()
+
+    assert "earn-proxy-proxiware-cdp-acl" in installer
+    assert "Requires=earn-proxy-proxiware-cdp-acl.service" in chrome_unit
+    assert any(
+        line.startswith("After=") and "earn-proxy-proxiware-cdp-acl.service" in line
+        for line in chrome_unit.splitlines()
+    )
+    assert "BindsTo=earn-proxy-proxiware-cdp-acl.service" in chrome_unit
+    assert "Before=earn-proxy-proxiware-chrome.service" in acl_unit
+    assert "PartOf=earn-proxy-proxiware-chrome.service" in acl_unit
+    assert "Type=oneshot" in acl_unit
+    assert "RemainAfterExit=yes" in acl_unit
+    assert "--user earnproxy-browser" in acl_unit
+    assert "Requires=earn-proxy-proxiware-chrome.service" in browser_unit
+    assert "User=earnproxy-browser" in swap_unit
+    assert "Requires=earn-proxy-proxiware-chrome.service" in swap_unit
+
+
+def test_cdp_acl_only_allows_the_browser_uid():
+    from app.proxiware_cdp_acl import nft_ruleset
+
+    rendered = nft_ruleset(table="earn_proxy_cdp", port=9222, uid=123)
+
+    assert "meta skuid 123 accept" in rendered
+    assert "127.0.0.1" in rendered
+    assert "9222" in rendered
+    assert "priority -200" in rendered
+    assert "reject" in rendered
 
 
 def test_release_preflight_rejects_a_venv_created_for_another_release(tmp_path, monkeypatch):
@@ -167,7 +252,8 @@ def test_release_installer_grants_browser_observer_group_access_to_runtime_datab
     unit = (ROOT / "deploy" / "earn-proxy-proxiware-browser.service").read_text()
 
     assert "install -d -o earnproxy -g earnproxy -m 0770 /var/lib/earn-proxy" in installer
-    assert 'chmod 0660 "$database_path"' in installer
+    assert "secure_runtime_permissions.py" in installer
+    assert "--user earnproxy --group earnproxy --mode 0660" in installer
     assert "UMask=0007" in unit
 
 

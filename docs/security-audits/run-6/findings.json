@@ -1,0 +1,167 @@
+[
+  {
+    "verdict": "confirmed",
+    "title": "Local users can take over loopback Proxiware CDP",
+    "description": "Before remediation, Chrome exposed an unauthenticated TCP CDP listener on 127.0.0.1:9222. The Playwright adapter connected to that listener, so a local unprivileged process could request the CDP WebSocket, read provider cookies, and evaluate JavaScript in the authenticated browser context. A dynamic proof succeeded as nobody. The current worktree adds an owner-based nftables ACL and dedicated systemd identity; production verification remains required.",
+    "root_cause": "The Chrome service and CdpProxiwareBrowser in deploy/earn-proxy-proxiware-chrome.service and app/services/proxiware_browser.py did not add OS-level authentication to the loopback CDP TCP listener, allowing any local user to attach.",
+    "intended_behavior": "Only the isolated browser observer and explicitly guarded swap worker may access the Proxiware browser session; unrelated local users must be denied.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "app/proxiware_chrome_service.py",
+        "line": 63,
+        "scope": "build_chrome_command",
+        "description": "Starts Chromium with a TCP remote-debugging listener bound to 127.0.0.1."
+      },
+      {
+        "kind": "propagation",
+        "file": "app/services/proxiware_browser.py",
+        "line": 141,
+        "scope": "__init__",
+        "description": "Connects Playwright to the loopback CDP endpoint without an OS-user authentication layer."
+      },
+      {
+        "kind": "sink",
+        "file": "app/services/proxiware_browser.py",
+        "line": 167,
+        "scope": "evaluate",
+        "description": "Exposes page JavaScript evaluation through the attached authenticated browser context."
+      }
+    ],
+    "conditions": [
+      {
+        "kind": "authentication_level",
+        "description": "The attacker only needs local code execution as an unrelated unprivileged account."
+      },
+      {
+        "kind": "system_configuration",
+        "description": "The pre-fix Chrome unit is enabled and the browser has an authenticated provider session."
+      }
+    ],
+    "execution": {
+      "attacker_perspective": "An unrelated local Unix user on the VPS.",
+      "payloads": [
+        "GET http://127.0.0.1:9222/json/version",
+        "Open the returned DevTools WebSocket and issue Runtime.evaluate(document.cookie)"
+      ],
+      "instructions": [
+        "Run the requests as nobody while the pre-fix Chrome service is active.",
+        "Attach to an existing provider page through the returned WebSocket.",
+        "Read cookies or execute JavaScript in the authenticated page."
+      ],
+      "expected_result": "The pre-fix local user obtains CDP access and session data; the remediated owner ACL rejects the connection unless the process UID is earnproxy-browser."
+    },
+    "remediation": {
+      "strategy": "Keep CDP loopback-only and add a kernel-enforced owner ACL, dedicated browser identities, and systemd lifecycle coupling.",
+      "code_changes": [
+        {
+          "file_name": "app/proxiware_cdp_acl.py",
+          "fixed_code": "Install a nftables output rule accepting TCP 9222 only for the earnproxy-browser UID and rejecting other UIDs."
+        },
+        {
+          "file_name": "deploy/earn-proxy-proxiware-cdp-acl.service",
+          "fixed_code": "Install the ACL before Chrome and remove it when Chrome stops."
+        },
+        {
+          "file_name": "deploy/earn-proxy-proxiware-swap.service",
+          "fixed_code": "Run the guarded swap worker as earnproxy-browser."
+        }
+      ]
+    },
+    "severity": {
+      "likelihood": {
+        "score": "medium",
+        "reason": "Any local account or compromised local service could connect without credentials; remote network users cannot reach the loopback bind directly."
+      },
+      "impact": {
+        "score": "high",
+        "reason": "CDP grants authenticated provider cookies and arbitrary page JavaScript, enabling provider session takeover."
+      },
+      "overall_severity": "medium"
+    },
+    "confidence": {
+      "score": "high",
+      "reason": "The listener and Playwright path are explicit in source and the attack was dynamically reproduced as nobody."
+    }
+  },
+  {
+    "verdict": "confirmed",
+    "title": "Root release follows a raceable database path",
+    "description": "Release 3082daf used root chown and chmod on the database path and SQLite sidecars after the path came from configuration. The database directory is writable by the earnproxy service account. A compromised process could leave the final path as a symlink before deployment, redirecting root metadata changes to a selected target; the later SQLite backup also reopened the path by name. The current worktree fixes both permission changes and backup reads with no-follow descriptors, pins the backup source FD, and restricts production to the direct database path; deployment verification remains required.",
+    "root_cause": "The release permission step in deploy/release.sh used path-based chown and chmod instead of no-follow descriptor operations, allowing a compromised earnproxy process to race a replaceable database pathname.",
+    "intended_behavior": "Root deployment must change permissions only on the configured regular SQLite files and must fail closed on symlinks or non-regular paths.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "deploy/release.sh",
+        "line": 87,
+        "scope": "release",
+        "description": "Invokes the descriptor-safe runtime permission helper for the configured database path."
+      },
+      {
+        "kind": "propagation",
+        "file": "deploy/secure_runtime_permissions.py",
+        "line": 23,
+        "scope": "secure_runtime_permissions",
+        "description": "Opens the runtime path with O_NOFOLLOW and a close-on-exec descriptor."
+      },
+      {
+        "kind": "sink",
+        "file": "deploy/secure_runtime_permissions.py",
+        "line": 34,
+        "scope": "secure_runtime_permissions",
+        "description": "Applies fchown and fchmod only to the validated regular-file descriptor."
+      }
+    ],
+    "conditions": [
+      {
+        "kind": "authentication_level",
+        "description": "The attacker must first compromise or execute code as the earnproxy service account."
+      },
+      {
+        "kind": "timing_dependency",
+        "description": "The path replacement must occur while a root release is running and before the root metadata operation completes."
+      }
+    ],
+    "execution": {
+      "attacker_perspective": "A compromised earnproxy process with write access to /var/lib/earn-proxy.",
+      "payloads": [
+        "Replace /var/lib/earn-proxy/earn-proxy.db with a symlink to a root-readable target during release.sh"
+      ],
+      "instructions": [
+        "Wait for a root release to enter the database permission step.",
+        "Swap the configured database pathname for a symlink immediately before root chown/chmod in the pre-fix release.",
+        "Observe the target ownership or mode change."
+      ],
+      "expected_result": "The pre-fix path-based operation follows the replacement; the remediated helper rejects the symlink with O_NOFOLLOW and changes no target metadata."
+    },
+    "remediation": {
+      "strategy": "Use no-follow descriptor operations from the immutable archived release and require regular files.",
+      "code_changes": [
+        {
+          "file_name": "deploy/secure_runtime_permissions.py",
+          "fixed_code": "Open with O_NOFOLLOW, fstat for a regular file, then fchown/fchmod the descriptor."
+        },
+        {
+          "file_name": "deploy/release.sh",
+          "fixed_code": "Invoke the helper from $release_dir/deploy after extracting the selected Git revision; pin the SQLite backup source through /proc/self/fd; remove direct path-based chown/chmod and reject custom nested database paths."
+        }
+      ]
+    },
+    "severity": {
+      "likelihood": {
+        "score": "medium",
+        "reason": "A compromised earnproxy process can replace the final pathname in its writable runtime directory before a known release; a precise timing race is not required."
+      },
+      "impact": {
+        "score": "high",
+        "reason": "Root metadata changes could expose or alter permissions on a root-owned target and undermine deployment isolation."
+      },
+      "overall_severity": "high"
+    },
+    "confidence": {
+      "score": "high",
+      "reason": "The pre-fix root operations and writable runtime directory are explicit; the no-follow regression test reproduces the dangerous symlink case and verifies the target remains unchanged."
+    }
+  }
+]

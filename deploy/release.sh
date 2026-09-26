@@ -26,6 +26,12 @@ backup_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 backup_dir="/var/backups/earn-proxy/${backup_stamp}-${revision}"
 database_path="$(awk -F= '$1 == "EARN_PROXY_DATABASE" { sub(/^[[:space:]]+/, "", $2); gsub(/^"|"$/, "", $2); print $2; exit }' /etc/earn-proxy.env)"
 database_path="${database_path:-/var/lib/earn-proxy/earn-proxy.db}"
+# ponytail: keep production DB at the fixed direct path; support custom paths
+# only after adding dirfd/openat2 validation for every parent component.
+if [[ "$database_path" != "/var/lib/earn-proxy/earn-proxy.db" ]]; then
+  echo "EARN_PROXY_DATABASE must be /var/lib/earn-proxy/earn-proxy.db" >&2
+  exit 78
+fi
 activated=0
 services=(
   earn-proxy-web
@@ -36,6 +42,7 @@ services=(
   earn-proxy-proxiware
   earn-proxy-proxiware-qualification
   earn-proxy-proxiware-swap
+  earn-proxy-proxiware-cdp-acl
   earn-proxy-proxiware-chrome
   earn-proxy-proxiware-browser
 )
@@ -75,21 +82,21 @@ if [[ -z "$python_bin" ]] || ! "$python_bin" -c 'import sys; raise SystemExit(sy
   exit 69
 fi
 
-# The browser observer shares the runtime database through the earnproxy group.
-# Keep the directory private to that group; never broaden it to world access.
-install -d -o earnproxy -g earnproxy -m 0770 /var/lib/earn-proxy
-chown earnproxy:earnproxy "$database_path"
-chmod 0660 "$database_path"
-for sqlite_sidecar in "$database_path"-wal "$database_path"-shm; do
-  if [[ -e "$sqlite_sidecar" ]]; then
-    chown earnproxy:earnproxy "$sqlite_sidecar"
-    chmod 0660 "$sqlite_sidecar"
-  fi
-done
-
 git -C "$source_dir" archive --format=tar "$revision" -o "$archive"
 install -d -o root -g root -m 0755 "$release_dir"
 tar -xf "$archive" -C "$release_dir"
+
+# The browser observer shares the runtime database through the earnproxy group.
+# Run the descriptor-safe helper from the immutable archived revision, never
+# from the mutable source checkout used to invoke this release.
+install -d -o earnproxy -g earnproxy -m 0770 /var/lib/earn-proxy
+"$python_bin" "$release_dir/deploy/secure_runtime_permissions.py" \
+  --user earnproxy --group earnproxy --mode 0660 "$database_path"
+for sqlite_sidecar in "$database_path"-wal "$database_path"-shm; do
+  "$python_bin" "$release_dir/deploy/secure_runtime_permissions.py" \
+    --user earnproxy --group earnproxy --mode 0660 --optional "$sqlite_sidecar"
+done
+
 "$python_bin" -m venv "$release_dir/.venv"
 "$release_dir/.venv/bin/python" -m pip install --disable-pip-version-check --upgrade "pip>=25.3" "setuptools>=83"
 "$release_dir/.venv/bin/python" -m pip install --disable-pip-version-check "$release_dir"
@@ -103,15 +110,25 @@ install -d -o root -g earnproxy -m 0750 "$backup_dir"
 install -d -o root -g root -m 0700 "$backup_dir/systemd"
 install -o root -g root -m 0600 /dev/null "$backup_dir/earn-proxy.db"
 "$release_dir/.venv/bin/python" - "$database_path" "$backup_dir/earn-proxy.db" <<'PY'
+import os
 import sqlite3
+import stat
 import sys
 
-source = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
-destination = sqlite3.connect(sys.argv[2])
-with destination:
-    source.backup(destination)
-source.close()
-destination.close()
+source_fd = os.open(sys.argv[1], os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+try:
+    if not stat.S_ISREG(os.fstat(source_fd).st_mode):
+        raise RuntimeError("database source is not a regular file")
+    source = sqlite3.connect(f"file:/proc/self/fd/{source_fd}?mode=ro", uri=True)
+    destination = sqlite3.connect(sys.argv[2])
+    try:
+        with destination:
+            source.backup(destination)
+    finally:
+        source.close()
+        destination.close()
+finally:
+    os.close(source_fd)
 PY
 cp -a /etc/earn-proxy.env "$backup_dir/earn-proxy.env"
 chmod 0600 "$backup_dir/earn-proxy.db" "$backup_dir/earn-proxy.env"

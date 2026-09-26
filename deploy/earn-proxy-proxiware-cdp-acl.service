@@ -1,0 +1,27 @@
+[Unit]
+Description=Earn Proxy Proxiware CDP owner ACL
+Before=earn-proxy-proxiware-chrome.service
+PartOf=earn-proxy-proxiware-chrome.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/earn-proxy
+Environment=EARN_PROXY_PROXIWARE_CDP_URL=http://127.0.0.1:9222
+EnvironmentFile=-/etc/earn-proxy-browser.env
+ExecStart=/opt/earn-proxy/.venv/bin/python -m app.proxiware_cdp_acl install --user earnproxy-browser --cdp-url=${EARN_PROXY_PROXIWARE_CDP_URL}
+ExecStop=/opt/earn-proxy/.venv/bin/python -m app.proxiware_cdp_acl remove
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

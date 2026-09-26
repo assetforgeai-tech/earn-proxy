@@ -1,7 +1,9 @@
 [Unit]
 Description=Earn Proxy Proxiware dashboard observer
+Requires=earn-proxy-proxiware-chrome.service
+BindsTo=earn-proxy-proxiware-chrome.service
 After=network-online.target earn-proxy-proxiware-chrome.service
-Wants=network-online.target earn-proxy-proxiware-chrome.service
+Wants=network-online.target
 
 [Service]
 Type=simple
