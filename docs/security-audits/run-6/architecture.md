@@ -46,3 +46,13 @@ The remediation adds a nftables owner ACL before the CDP service, moves the
 swap client to the dedicated browser identity, uses `O_NOFOLLOW` plus file
 descriptor ownership/mode operations, and runs the helper from the archived
 revision rather than the mutable checkout.
+
+## Deployment verification
+
+On 2026-09-26, release `/opt/earn-proxy-4970e92` was verified active with
+`/opt/earn-proxy-96547a2` available for rollback. All 11 services were enabled
+and active, local/public health checks returned HTTP 200, SQLite `quick_check`
+returned `ok`, and the owner ACL rejected `nobody`/`root` while allowing only
+`earnproxy-browser` to connect to a temporary 9222 listener. Auto-swap,
+distribution, browser mutation, and the provider session remain disabled or
+manual-action-required; no provider mutation was performed.

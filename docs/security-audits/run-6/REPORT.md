@@ -19,8 +19,8 @@ readable backup DB files were tightened to `root:root 0600`.
 
 | Severity | Finding | State |
 |---|---|---|
-| MEDIUM | Local users can take over loopback CDP | Fixed in worktree; deployment verification pending |
-| HIGH | Root release follows a raceable DB path | Fixed in worktree; deployment verification pending |
+| MEDIUM | Local users can take over loopback CDP | Fixed and verified in production |
+| HIGH | Root release follows a raceable DB path | Fixed and verified in production |
 
 ### MEDIUM — Local users can take over loopback CDP
 
@@ -51,6 +51,23 @@ the already-open descriptor. The SQLite backup also keeps a pinned source FD
 through `/proc/self/fd`; missing WAL/SHM sidecars remain optional; the main DB
 is required. Regression tests prove symlink targets are not changed.
 
+## Production verification (2026-09-26)
+
+- Release `/opt/earn-proxy-4970e92` is active; rollback `/opt/earn-proxy-96547a2`
+  is present.
+- All 11 Earn Proxy units are enabled and active with no current restart loop;
+  local and public `/healthz` both returned HTTP 200.
+- The live owner ACL allowed `earnproxy-browser` to reach a temporary loopback
+  9222 listener and rejected `nobody` and `root`; the listener and probe files
+  were removed afterward.
+- The production database passed SQLite `quick_check`; the latest DB/env backup
+  is root-owned with mode `0600`.
+- `proxiware_auto_swap=0`, `proxiware_distribution_enabled=0`, browser mutation
+  is disabled, and the stored provider session is `manual_action_required`.
+
+Fresh manual session provisioning and the read-only browser observation soak are
+still intentionally pending. No provider mutation was performed.
+
 ## Hardening notes
 
 - Keep `proxiware_auto_swap=0` and `proxiware_distribution_enabled=0` until a
@@ -73,7 +90,7 @@ is required. Regression tests prove symlink targets are not changed.
 
 ## Conclusion
 
-The two confirmed run-6 findings have minimal code/configuration remediations
-implemented. Production readiness still requires commit/push, release-script
-deployment, systemd/nft validation, fresh session provisioning, and a new
-read-only observation soak. No provider mutation is authorized by this audit.
+The two confirmed run-6 findings are fixed and deployment-verified. The safe
+production state remains paused for Proxiware browser automation until an
+operator provisions a fresh manual session and approves a read-only observation
+soak. No provider mutation is authorized by this audit.

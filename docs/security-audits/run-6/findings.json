@@ -2,7 +2,7 @@
   {
     "verdict": "confirmed",
     "title": "Local users can take over loopback Proxiware CDP",
-    "description": "Before remediation, Chrome exposed an unauthenticated TCP CDP listener on 127.0.0.1:9222. The Playwright adapter connected to that listener, so a local unprivileged process could request the CDP WebSocket, read provider cookies, and evaluate JavaScript in the authenticated browser context. A dynamic proof succeeded as nobody. The current worktree adds an owner-based nftables ACL and dedicated systemd identity; production verification remains required.",
+    "description": "Before remediation, Chrome exposed an unauthenticated TCP CDP listener on 127.0.0.1:9222. The Playwright adapter connected to that listener, so a local unprivileged process could request the CDP WebSocket, read provider cookies, and evaluate JavaScript in the authenticated browser context. A dynamic proof succeeded as nobody. The deployed release now adds an owner-based nftables ACL and dedicated systemd identities; a fresh production probe rejected nobody and root while allowing earnproxy-browser.",
     "root_cause": "The Chrome service and CdpProxiwareBrowser in deploy/earn-proxy-proxiware-chrome.service and app/services/proxiware_browser.py did not add OS-level authentication to the loopback CDP TCP listener, allowing any local user to attach.",
     "intended_behavior": "Only the isolated browser observer and explicitly guarded swap worker may access the Proxiware browser session; unrelated local users must be denied.",
     "trace": [
@@ -87,7 +87,7 @@
   {
     "verdict": "confirmed",
     "title": "Root release follows a raceable database path",
-    "description": "Release 3082daf used root chown and chmod on the database path and SQLite sidecars after the path came from configuration. The database directory is writable by the earnproxy service account. A compromised process could leave the final path as a symlink before deployment, redirecting root metadata changes to a selected target; the later SQLite backup also reopened the path by name. The current worktree fixes both permission changes and backup reads with no-follow descriptors, pins the backup source FD, and restricts production to the direct database path; deployment verification remains required.",
+    "description": "Release 3082daf used root chown and chmod on the database path and SQLite sidecars after the path came from configuration. The database directory is writable by the earnproxy service account. A compromised process could leave the final path as a symlink before deployment, redirecting root metadata changes to a selected target; the later SQLite backup also reopened the path by name. The deployed release fixes both permission changes and backup reads with no-follow descriptors, pins the backup source FD, restricts production to the direct database path, and passed a live symlink rejection probe.",
     "root_cause": "The release permission step in deploy/release.sh used path-based chown and chmod instead of no-follow descriptor operations, allowing a compromised earnproxy process to race a replaceable database pathname.",
     "intended_behavior": "Root deployment must change permissions only on the configured regular SQLite files and must fail closed on symlinks or non-regular paths.",
     "trace": [
