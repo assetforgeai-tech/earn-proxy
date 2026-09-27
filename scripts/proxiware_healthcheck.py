@@ -16,10 +16,19 @@ class WorkerHealth:
     age_seconds: float | None = None
 
 
-def check_worker_health(db, worker: str, *, max_age_seconds: int = 600, now: datetime | None = None) -> WorkerHealth:
+def check_worker_health(
+    db,
+    worker: str,
+    *,
+    max_age_seconds: int = 600,
+    now: datetime | None = None,
+    configured_enabled: bool | None = None,
+) -> WorkerHealth:
     name = str(worker or "").strip().lower().replace("-", "_")
     if name not in {"sync_worker", "qualification_worker", "browser_worker", "swap_worker"}:
         return WorkerHealth(False, "invalid_worker")
+    if name == "browser_worker" and configured_enabled is False:
+        return WorkerHealth(False, "disabled", status="disabled")
     status_row = db.execute("SELECT value FROM settings WHERE key=?", (f"proxiware_{name}_status",)).fetchone()
     heartbeat_row = db.execute("SELECT value FROM settings WHERE key=?", (f"proxiware_{name}_heartbeat_at",)).fetchone()
     status = str(status_row["value"] if status_row else "unknown")
@@ -55,7 +64,16 @@ def main() -> int:
     args = parser.parse_args()
     app = create_app()
     with app.app_context():
-        result = check_worker_health(get_db(), args.worker, max_age_seconds=args.max_age_seconds)
+        result = check_worker_health(
+            get_db(),
+            args.worker,
+            max_age_seconds=args.max_age_seconds,
+            configured_enabled=(
+                bool(app.config.get("PROXIWARE_BROWSER_ENABLED", False))
+                if str(args.worker).strip().lower().replace("-", "_") == "browser_worker"
+                else None
+            ),
+        )
     print(result.reason)
     return 0 if result.ok else 1
 

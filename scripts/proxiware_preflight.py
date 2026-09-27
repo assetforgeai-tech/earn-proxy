@@ -132,8 +132,12 @@ def _database_observation(database: Path, *, now: datetime) -> dict[str, object]
             age = round((now - parsed).total_seconds(), 3) if parsed else None
             if status == "disabled":
                 reason = "disabled"
+            elif not parsed or age is None or not -60 <= age <= 900:
+                reason = "stale_or_missing"
+            elif status in {"error", "degraded", "stopped", "blocked", "manual_action_required", "paused"}:
+                reason = status
             else:
-                reason = "ok" if parsed and age is not None and -60 <= age <= 900 else "stale_or_missing"
+                reason = "ok"
             heartbeats[worker] = {
                 "status": status,
                 "heartbeat_at": heartbeat_at,
@@ -229,7 +233,13 @@ def collect_runtime_observation(
 
     current = now or datetime.now(UTC)
     current = current.astimezone(UTC) if current.tzinfo else current.replace(tzinfo=UTC)
+    adapter = _adapter_state()
     database = _database_observation(Path(database_path), now=current)
+    if adapter.get("state") == "disabled":
+        browser = database["heartbeats"].get("browser_worker")
+        if isinstance(browser, dict):
+            browser["status"] = "disabled"
+            browser["reason"] = "disabled"
     backups = Path(backup_root)
     try:
         candidates = sorted(
@@ -248,7 +258,7 @@ def collect_runtime_observation(
         "settings": database["settings"],
         "session": database["session"],
         "database": database["database"],
-        "adapter": _adapter_state(),
+        "adapter": adapter,
         "health": {
             "local": _health_state(local_health_url),
             "public": _health_state(public_url),
@@ -337,6 +347,8 @@ def run_preflight(database_path: str | Path, *, production: bool = False, **runt
     health = observation.get("health", {})
     database_state = observation.get("database", {})
     release = observation.get("release", {})
+    heartbeats = observation.get("heartbeats", {})
+    heartbeat_reasons = {str(value.get("reason", "")) for value in heartbeats.values() if isinstance(value, dict)}
     checks = {
         "runtime_observation": bool(observation),
         "database_readable": database_state.get("readable") is True,
@@ -352,6 +364,8 @@ def run_preflight(database_path: str | Path, *, production: bool = False, **runt
         "chrome_binary_ready": adapter.get("chrome_enabled") is not True or adapter.get("binary_executable") is True,
         "chrome_profile_isolated": adapter.get("chrome_enabled") is not True or adapter.get("profile_isolated") is True,
         "no_provider_mutation": True,
+        "worker_heartbeats_ready": bool(heartbeats)
+        and all(reason in {"ok", "disabled"} for reason in heartbeat_reasons),
     }
     return {
         "ok": all(checks.values()),

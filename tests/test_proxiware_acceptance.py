@@ -30,6 +30,58 @@ def test_runtime_observation_reports_disabled_browser_without_stale_reason(tmp_p
     assert observation["heartbeats"]["browser_worker"]["reason"] == "disabled"
 
 
+def test_runtime_observation_reports_recent_degraded_worker_as_degraded(tmp_path):
+    from scripts.proxiware_preflight import _database_observation
+
+    database = tmp_path / "runtime.db"
+    now = datetime.now(UTC)
+    current = now.isoformat()
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
+    connection.executemany(
+        "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?)",
+        [
+            ("proxiware_qualification_worker_status", "degraded", current),
+            ("proxiware_qualification_worker_heartbeat_at", current, current),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+    observation = _database_observation(database, now=now)
+
+    assert observation["heartbeats"]["qualification_worker"]["reason"] == "degraded"
+
+
+def test_runtime_observation_uses_disabled_adapter_over_old_browser_heartbeat(tmp_path, monkeypatch):
+    from scripts import proxiware_preflight
+
+    database = tmp_path / "runtime.db"
+    old = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
+    connection.executemany(
+        "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?)",
+        [
+            ("proxiware_browser_worker_status", "sleeping", old),
+            ("proxiware_browser_worker_heartbeat_at", old, old),
+        ],
+    )
+    connection.commit()
+    connection.close()
+    monkeypatch.setenv("EARN_PROXY_PROXIWARE_BROWSER_ENABLED", "0")
+
+    observation = proxiware_preflight.collect_runtime_observation(
+        database_path=database,
+        backup_root=tmp_path / "backups",
+        local_health_url="",
+        public_health_url="",
+    )
+
+    assert observation["heartbeats"]["browser_worker"]["status"] == "disabled"
+    assert observation["heartbeats"]["browser_worker"]["reason"] == "disabled"
+
+
 def test_preflight_is_redacted_and_keeps_mutations_disabled(tmp_path):
     report = run_preflight(tmp_path / "preflight.db")
 
@@ -187,3 +239,37 @@ def test_production_preflight_rejects_enabled_chrome_with_invalid_runtime(tmp_pa
     assert report["ok"] is False
     assert report["checks"]["chrome_binary_ready"] is False
     assert report["checks"]["chrome_profile_isolated"] is False
+
+
+def test_production_preflight_rejects_stale_required_worker_heartbeat(tmp_path, monkeypatch):
+    from scripts import proxiware_preflight
+
+    monkeypatch.setattr(
+        proxiware_preflight,
+        "collect_runtime_observation",
+        lambda **_kwargs: {
+            "release": {"current_exists": True},
+            "services": {name: {"enabled": True, "active": True} for name in proxiware_preflight.PROVIDER_SERVICES},
+            "database": {"readable": True},
+            "settings": {"auto_swap": "0", "distribution": "0"},
+            "heartbeats": {
+                "sync_worker": {"reason": "ok"},
+                "qualification_worker": {"reason": "stale_or_missing"},
+                "swap_worker": {"reason": "disabled"},
+                "browser_worker": {"reason": "disabled"},
+            },
+            "adapter": {
+                "cdp_loopback": True,
+                "mutation_allowed": False,
+                "chrome_enabled": False,
+                "binary_executable": True,
+                "profile_isolated": True,
+            },
+            "health": {"local": {"ok": True}, "public": {"ok": True}},
+        },
+    )
+
+    report = proxiware_preflight.run_preflight(tmp_path / "db", production=True)
+
+    assert report["ok"] is False
+    assert report["checks"]["worker_heartbeats_ready"] is False
