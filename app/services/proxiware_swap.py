@@ -540,6 +540,7 @@ class SwapDecision:
         now: datetime | None = None,
         threshold: int = DEFAULT_ELIGIBLE_THRESHOLD,
         cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS,
+        assignment_id: int | None = None,
     ) -> "SwapDecision":
         current = _now(now)
         subscription = db.execute(
@@ -553,11 +554,18 @@ class SwapDecision:
             return cls(False, "manual_action_required", int(subscription_id))
         if _expiry_is_past(subscription["expires_at"], current):
             return cls(False, "manual_action_required", int(subscription_id))
-        assignment = db.execute(
-            "SELECT * FROM provider_assignments WHERE subscription_id=? AND provider=? "
-            "AND status IN ('active','current') ORDER BY id DESC LIMIT 1",
-            (int(subscription_id), PROVIDER),
-        ).fetchone()
+        if assignment_id is None:
+            assignment = db.execute(
+                "SELECT * FROM provider_assignments WHERE subscription_id=? AND provider=? "
+                "AND status IN ('active','current') ORDER BY id DESC LIMIT 1",
+                (int(subscription_id), PROVIDER),
+            ).fetchone()
+        else:
+            assignment = db.execute(
+                "SELECT * FROM provider_assignments WHERE id=? AND subscription_id=? AND provider=? "
+                "AND status IN ('active','current') AND missing_at IS NULL",
+                (int(assignment_id), int(subscription_id), PROVIDER),
+            ).fetchone()
         if assignment is None:
             return cls(False, "manual_action_required", int(subscription_id))
         assignment_id = int(assignment["id"])
@@ -606,11 +614,32 @@ class SwapDecision:
         if connections >= 1000:
             return cls(False, "connections_limit", int(subscription_id), assignment_id)
         try:
-            if subscription["eligible_count"] is None:
-                raise ValueError
             eligible_count = int(subscription["eligible_count"])
         except (TypeError, ValueError):
-            return cls(False, "manual_action_required", int(subscription_id), assignment_id)
+            # The official API omits aggregate eligibility for some active
+            # subscriptions. Fresh dashboard rows are the authoritative
+            # bounded fallback; never infer eligibility from stale inventory.
+            cutoff = current - timedelta(seconds=max(60, max_age))
+            try:
+                eligible_count = int(
+                    db.execute(
+                        "SELECT COUNT(*) FROM provider_assignments "
+                        "WHERE subscription_id=? AND provider=? AND status IN ('active','current') "
+                        "AND missing_at IS NULL AND dashboard_eligible=1 "
+                        "AND dashboard_observed_at IS NOT NULL "
+                        "AND dashboard_observed_at>=? AND dashboard_observed_at<=?",
+                        (
+                            int(subscription_id),
+                            PROVIDER,
+                            cutoff.isoformat(),
+                            (current + timedelta(seconds=60)).isoformat(),
+                        ),
+                    ).fetchone()[0]
+                )
+            except (TypeError, ValueError, sqlite3.Error):
+                return cls(False, "manual_action_required", int(subscription_id), assignment_id)
+            if eligible_count <= 0:
+                return cls(False, "manual_action_required", int(subscription_id), assignment_id)
         if eligible_count >= max(1, int(threshold)):
             return cls(False, "provider_ineligible", int(subscription_id), assignment_id)
         try:
@@ -835,6 +864,7 @@ def revalidate_swap_job(
                 now=current,
                 threshold=max(1, threshold),
                 cooldown_seconds=cooldown_seconds,
+                assignment_id=(int(job["old_assignment_id"]) if job["old_assignment_id"] is not None else None),
             )
         if decision.allowed and decision.assignment_id == job["old_assignment_id"]:
             if enter_mutation:
@@ -1425,6 +1455,7 @@ def request_manual_swap(db, job_id: int, *, now: datetime | None = None) -> None
             now=current,
             threshold=max(1, threshold),
             cooldown_seconds=cooldown_seconds,
+            assignment_id=(int(row["old_assignment_id"]) if row["old_assignment_id"] is not None else None),
         )
         if not decision.allowed or decision.assignment_id != row["old_assignment_id"]:
             raise ValueError(f"Swap guards no longer pass: {decision.reason}")

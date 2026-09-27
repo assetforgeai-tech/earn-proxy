@@ -193,6 +193,51 @@ def test_queue_requires_all_guards_and_creates_one_durable_job(app):
     assert job["reason"] == "queued"
 
 
+def test_explicit_assignment_guard_does_not_drift_to_latest_assignment(app):
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db)
+        approved_id = db.execute("SELECT id FROM provider_assignments WHERE external_id='assignment-1'").fetchone()[
+            "id"
+        ]
+        db.execute(
+            """
+            INSERT INTO provider_assignments(
+                subscription_id,provider,external_id,host,port,status,qualification,
+                provider_eligible,live_status,dashboard_assignment_id,dashboard_eligible,
+                dashboard_connections,dashboard_observed_at,dashboard_source,
+                assigned_at,last_seen_at,created_at,updated_at
+            ) VALUES(?, 'proxiware','assignment-newer','newer.example',8080,'active','risk',
+                     1,'live','dashboard-newer',1,10,?,'provider_dashboard',?,?,?,?)
+            """,
+            (sub_id, now.isoformat(), *tuple([now.isoformat()] * 4)),
+        )
+        db.commit()
+
+        decision = SwapDecision.for_subscription(db, sub_id, now=now, assignment_id=approved_id)
+
+    assert decision.allowed is True
+    assert decision.assignment_id == approved_id
+
+
+def test_dashboard_evidence_is_authoritative_when_subscription_counts_are_absent(app):
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db)
+        db.execute(
+            "UPDATE provider_subscriptions SET eligible_count=NULL,connections=NULL WHERE id=?",
+            (sub_id,),
+        )
+        db.commit()
+
+        decision = SwapDecision.for_subscription(db, sub_id, now=now)
+
+    assert decision.allowed is True
+    assert decision.reason == "ready"
+
+
 @pytest.mark.parametrize(
     ("field", "value", "reason"),
     [
