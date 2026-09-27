@@ -235,6 +235,7 @@ class CdpProxiwareBrowser:
           const headers = {Accept: 'application/json'};
           if (body !== null) {
             headers['Content-Type'] = 'application/json';
+            headers['X-Requested-With'] = 'XMLHttpRequest';
             const csrf = document.cookie.match(/(?:^|;\\s*)csrf=([^;]*)/);
             if (csrf) headers['X-CSRF-Token'] = decodeURIComponent(csrf[1]);
           }

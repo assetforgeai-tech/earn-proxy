@@ -290,6 +290,30 @@ def test_cdp_swap_returns_provider_address_evidence_without_inventing_external_i
     assert "assignment_ids" in str(client.calls)
 
 
+def test_cdp_swap_request_uses_provider_xhr_header():
+    client = FakeCdp(
+        {
+            "status": 200,
+            "origin": "https://app.proxiware.com",
+            "response_origin": "https://app.proxiware.com",
+            "path": "/static/proxy/isp",
+            "response_path": "/api/static/networks/isp/proxies/swap",
+            "payload": {"swaps": [{"assignment_id": 141943, "new_addr": "51.194.85.9"}]},
+        }
+    )
+    adapter = CdpProxiwareBrowser(
+        "http://127.0.0.1:9222",
+        client_factory=lambda: client,
+        allow_mutation=True,
+    )
+
+    adapter.swap_assignment({"dashboard_assignment_id": "141943", "old_assignment_external_id": "old-external-id"})
+
+    expression = client.calls[0][1]
+    assert "X-Requested-With" in expression
+    assert "XMLHttpRequest" in expression
+
+
 def test_cdp_observation_maps_auth_failure_to_session_expiry():
     client = FakeCdp(
         {
