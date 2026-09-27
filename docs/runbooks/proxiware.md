@@ -37,6 +37,26 @@ keeps the observer `manual_action_required` or disabled.
 Browser/session credentials are entered from the admin provider workspace and
 are encrypted at rest. They are write-only in the UI.
 
+### Operator-assisted session import
+
+When the provider requires hCaptcha, do not automate or bypass the challenge.
+Open the provider in the approved operator Chrome profile, complete the login
+and challenge manually, then pipe only the current Proxiware cookie JSON over
+the existing SSH channel. The importer validates the `app.proxiware.com`
+origin, encrypts the cookie blob immediately, stores only safe expiry metadata,
+and prints no cookie value:
+
+```powershell
+agent-browser --cdp 9222 cookies get --json |
+  powershell -NoProfile -Command '$x = $input | ConvertFrom-Json; $c = if ($x.cookies) { $x.cookies } else { $x }; @($c | Where-Object { $_.domain -and ($_.domain -eq "app.proxiware.com" -or $_.domain -eq ".proxiware.com" -or $_.domain -like "*.proxiware.com") }) | ConvertTo-Json -Compress' |
+  ssh -p 26266 kalinh@42.96.12.142 "sudo -n bash -lc 'set -a; . /etc/earn-proxy.env; set +a; cd /opt/earn-proxy; /opt/earn-proxy/.venv/bin/python scripts/proxiware_session_import.py --database /var/lib/earn-proxy/earn-proxy.db'"
+```
+
+Verify the admin Session page reports `active`, then enable only the isolated
+Chrome and browser observer units for a read-only soak. Keep swap mutation and
+provider distribution disabled. If the session is rejected, the worker returns
+`manual_action_required`; clear the session and repeat the manual login.
+
 ## Preflight
 
 1. Run migrations against a disposable database.
