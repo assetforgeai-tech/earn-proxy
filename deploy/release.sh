@@ -85,6 +85,15 @@ fi
 git -C "$source_dir" archive --format=tar "$revision" -o "$archive"
 install -d -o root -g root -m 0755 "$release_dir"
 tar -xf "$archive" -C "$release_dir"
+source_branch="$(git -C "$source_dir" branch --show-current 2>/dev/null || true)"
+source_origin_main="$(git -C "$source_dir" rev-parse origin/main 2>/dev/null || true)"
+if [[ -z "$source_branch" && -n "$source_origin_main" ]]; then
+  source_branch="main"
+fi
+printf 'revision=%s\nbranch=%s\norigin_main=%s\n' \
+  "$revision" "$source_branch" "$source_origin_main" > "$release_dir/.release-metadata"
+chown root:root "$release_dir/.release-metadata"
+chmod 0644 "$release_dir/.release-metadata"
 
 # The browser observer shares the runtime database through the earnproxy group.
 # Run the descriptor-safe helper from the immutable archived revision, never

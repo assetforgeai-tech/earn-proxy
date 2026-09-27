@@ -25,9 +25,14 @@ from app.services.settings import get_setting
 ROOT = Path(__file__).resolve().parents[1]
 PROVIDER_SERVICES = (
     "earn-proxy-web",
+    "earn-proxy-checker",
+    "earn-proxy-earnapp",
+    "earn-proxy-maintenance",
+    "earn-proxy-payout-verifier",
     "earn-proxy-proxiware",
     "earn-proxy-proxiware-qualification",
     "earn-proxy-proxiware-swap",
+    "earn-proxy-proxiware-cdp-acl",
     "earn-proxy-proxiware-chrome",
     "earn-proxy-proxiware-browser",
 )
@@ -51,7 +56,23 @@ def _safe_command(args: list[str]) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def _git_state() -> dict[str, str]:
+def _git_state(release_dir: Path | None = None) -> dict[str, str]:
+    if release_dir is not None:
+        metadata = release_dir / ".release-metadata"
+        try:
+            values: dict[str, str] = {}
+            for line in metadata.read_text(encoding="utf-8").splitlines():
+                key, separator, value = line.partition("=")
+                if separator and key in {"revision", "branch", "origin_main"}:
+                    values[key] = value.strip()
+            if values.get("revision"):
+                return {
+                    "branch": values.get("branch", ""),
+                    "head": values["revision"],
+                    "origin_main": values.get("origin_main", ""),
+                }
+        except OSError:
+            pass
     return {
         "branch": _safe_command(["git", "-C", str(ROOT), "branch", "--show-current"]),
         "head": _safe_command(["git", "-C", str(ROOT), "rev-parse", "HEAD"]),
@@ -250,9 +271,11 @@ def collect_runtime_observation(
         latest_backup = ""
     domain = str(os.environ.get("EARN_PROXY_DOMAIN") or "").strip()
     public_url = public_health_url or (f"https://{domain}/healthz" if domain else "")
+    release = _release_state(Path(release_link))
+    source = _git_state(Path(str(release["current_path"]))) if release.get("current_path") else _git_state()
     return {
-        "source": _git_state(),
-        "release": _release_state(Path(release_link)),
+        "source": source,
+        "release": release,
         "services": {name: _service_state(name) for name in PROVIDER_SERVICES},
         "heartbeats": database["heartbeats"],
         "settings": database["settings"],

@@ -302,3 +302,38 @@ def test_production_preflight_rejects_missing_required_worker_heartbeat(tmp_path
 
     assert report["ok"] is False
     assert report["checks"]["worker_heartbeats_ready"] is False
+
+
+def test_production_preflight_checks_every_production_unit(tmp_path, monkeypatch):
+    from scripts import proxiware_preflight
+
+    assert {
+        "earn-proxy-web",
+        "earn-proxy-checker",
+        "earn-proxy-earnapp",
+        "earn-proxy-maintenance",
+        "earn-proxy-payout-verifier",
+        "earn-proxy-proxiware",
+        "earn-proxy-proxiware-qualification",
+        "earn-proxy-proxiware-swap",
+        "earn-proxy-proxiware-cdp-acl",
+        "earn-proxy-proxiware-chrome",
+        "earn-proxy-proxiware-browser",
+    } == set(proxiware_preflight.PROVIDER_SERVICES)
+
+
+def test_release_metadata_is_used_when_preflight_runs_from_archived_release(tmp_path, monkeypatch):
+    from scripts import proxiware_preflight
+
+    release = tmp_path / "earn-proxy-abc1234"
+    release.mkdir()
+    (release / ".release-metadata").write_text(
+        "revision=abc1234\nbranch=main\norigin_main=abc1234\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(proxiware_preflight, "ROOT", tmp_path / "no-git-checkout")
+
+    state = proxiware_preflight._git_state(release)
+
+    assert state == {"branch": "main", "head": "abc1234", "origin_main": "abc1234"}
