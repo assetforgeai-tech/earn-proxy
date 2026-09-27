@@ -273,3 +273,32 @@ def test_production_preflight_rejects_stale_required_worker_heartbeat(tmp_path, 
 
     assert report["ok"] is False
     assert report["checks"]["worker_heartbeats_ready"] is False
+
+
+def test_production_preflight_rejects_missing_required_worker_heartbeat(tmp_path, monkeypatch):
+    from scripts import proxiware_preflight
+
+    monkeypatch.setattr(
+        proxiware_preflight,
+        "collect_runtime_observation",
+        lambda **_kwargs: {
+            "release": {"current_exists": True},
+            "services": {name: {"enabled": True, "active": True} for name in proxiware_preflight.PROVIDER_SERVICES},
+            "database": {"readable": True},
+            "settings": {"auto_swap": "0", "distribution": "0"},
+            "heartbeats": {"sync_worker": {"reason": "ok"}},
+            "adapter": {
+                "cdp_loopback": True,
+                "mutation_allowed": False,
+                "chrome_enabled": False,
+                "binary_executable": True,
+                "profile_isolated": True,
+            },
+            "health": {"local": {"ok": True}, "public": {"ok": True}},
+        },
+    )
+
+    report = proxiware_preflight.run_preflight(tmp_path / "db", production=True)
+
+    assert report["ok"] is False
+    assert report["checks"]["worker_heartbeats_ready"] is False

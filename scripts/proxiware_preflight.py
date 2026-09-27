@@ -348,7 +348,10 @@ def run_preflight(database_path: str | Path, *, production: bool = False, **runt
     database_state = observation.get("database", {})
     release = observation.get("release", {})
     heartbeats = observation.get("heartbeats", {})
-    heartbeat_reasons = {str(value.get("reason", "")) for value in heartbeats.values() if isinstance(value, dict)}
+    worker_heartbeats_ready = set(heartbeats) == set(WORKERS) and all(
+        isinstance(heartbeats.get(worker), dict) and str(heartbeats[worker].get("reason", "")) in {"ok", "disabled"}
+        for worker in WORKERS
+    )
     checks = {
         "runtime_observation": bool(observation),
         "database_readable": database_state.get("readable") is True,
@@ -364,8 +367,7 @@ def run_preflight(database_path: str | Path, *, production: bool = False, **runt
         "chrome_binary_ready": adapter.get("chrome_enabled") is not True or adapter.get("binary_executable") is True,
         "chrome_profile_isolated": adapter.get("chrome_enabled") is not True or adapter.get("profile_isolated") is True,
         "no_provider_mutation": True,
-        "worker_heartbeats_ready": bool(heartbeats)
-        and all(reason in {"ok", "disabled"} for reason in heartbeat_reasons),
+        "worker_heartbeats_ready": worker_heartbeats_ready,
     }
     return {
         "ok": all(checks.values()),
