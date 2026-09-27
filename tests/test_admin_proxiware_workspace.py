@@ -18,8 +18,31 @@ def test_proxiware_workspace_is_admin_only_and_never_caches(client):
     assert "Credentials" in page
     assert "API key" in page
     assert "Sync now" not in page
-    assert "Browser-backed swap adapter unavailable" in page
-    assert "manual_action_required" in page
+    assert "Mutation adapter disabled" in page
+    assert "manual_action_required" not in page
+
+
+def test_proxiware_overview_shows_each_worker_state(client, db):
+    from datetime import UTC, datetime
+
+    from app.services.settings import set_setting
+
+    now = datetime.now(UTC).isoformat()
+    for worker, status in (
+        ("sync_worker", "ok"),
+        ("browser_worker", "sleeping"),
+        ("qualification_worker", "sleeping"),
+        ("swap_worker", "disabled"),
+    ):
+        set_setting(db, f"proxiware_{worker}_status", status)
+        set_setting(db, f"proxiware_{worker}_heartbeat_at", now)
+    login_admin(client)
+
+    page = client.get("/admin/providers/proxiware").get_data(as_text=True)
+
+    for label in ("API sync", "Dashboard observer", "Qualification", "Swap worker", "Distribution"):
+        assert label in page
+    assert "Stopped" not in page
 
 
 def test_proxiware_overview_marks_stale_worker_heartbeat(client, db):

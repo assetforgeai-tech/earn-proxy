@@ -290,7 +290,7 @@ def _proxiware_snapshot(db, area: str, args) -> dict[str, object]:
     }
     heartbeat_states: dict[str, str] = {}
     now_utc = datetime.now(UTC)
-    for worker_name in ("sync_worker", "qualification_worker", "swap_worker"):
+    for worker_name in ("sync_worker", "browser_worker", "qualification_worker", "swap_worker"):
         status = get_setting(db, f"proxiware_{worker_name}_status", "unknown")
         heartbeat = get_setting(db, f"proxiware_{worker_name}_heartbeat_at", "")
         if automation_paused:
@@ -753,6 +753,12 @@ def _proxiware_snapshot(db, area: str, args) -> dict[str, object]:
         "session_status": session_status,
         "worker_status": worker_status,
         "worker_heartbeats": heartbeat_states,
+        "worker_status_labels": {
+            "sync_worker": "API sync",
+            "browser_worker": "Dashboard observer",
+            "qualification_worker": "Qualification",
+            "swap_worker": "Swap worker",
+        },
         "worker_paused": worker_paused,
         "automation_paused": automation_paused,
         "auto_swap_enabled": auto_swap_enabled,

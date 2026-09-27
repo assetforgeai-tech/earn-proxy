@@ -23,8 +23,9 @@
 
 <section class="proxiware-status-strip" aria-label="Proxiware status" aria-live="polite">
   <div class="proxiware-status-item"><span class="status-dot {{ 'is-good' if session_status|lower in ('healthy', 'active', 'ready') else 'is-warn' }}" aria-hidden="true"></span><span>Session</span><strong>{{ session_status|replace('_', ' ')|title }}</strong></div>
-  <div class="proxiware-status-item"><span class="status-dot {{ 'is-good' if worker_status|lower in ('healthy', 'running', 'ready') else 'is-warn' }}" aria-hidden="true"></span><span>Worker</span><strong>{{ worker_status|replace('_', ' ')|title }}</strong></div>
+  {% for worker_name in ('sync_worker', 'browser_worker', 'qualification_worker', 'swap_worker') %}<div class="proxiware-status-item"><span class="status-dot {{ 'is-good' if worker_heartbeats.get(worker_name, 'unknown')|lower in ('healthy', 'running', 'ready', 'ok', 'sleeping', 'idle') else 'is-warn' }}" aria-hidden="true"></span><span>{{ worker_status_labels.get(worker_name, worker_name) }}</span><strong>{{ worker_heartbeats.get(worker_name, 'unknown')|replace('_', ' ')|title }}</strong></div>{% endfor %}
   <div class="proxiware-status-item"><span>Auto-swap</span><strong>{{ 'On' if auto_swap_enabled else 'Off' }}</strong><small>{{ 'Guarded by policy' if auto_swap_enabled else 'Manual approval required' }}</small></div>
+  <div class="proxiware-status-item"><span>Distribution</span><strong>{{ 'On' if distribution_enabled else 'Off' }}</strong><small>Internal API output</small></div>
   <div class="proxiware-status-item"><span>Automation</span><strong>{{ 'Paused' if automation_paused|default(false) else 'Running' }}</strong><small>{{ 'Workers stopped' if automation_paused|default(false) else 'Provider-scoped' }}</small></div>
 </section>
 
@@ -42,7 +43,7 @@
 {% endif %}
 {% if summary.session_alert_url|default('') %}<div class="notice warning" role="status"><strong><a href="{{ summary.session_alert_url }}">Session needs attention</a></strong><span>Renew or reconfigure the provider session before enabling automatic actions.</span></div>{% endif %}
 {% if not swap_adapter_available|default(false) %}
-<div class="notice warning" role="status"><strong>Browser-backed swap adapter unavailable.</strong><span>Automatic swap remains fail-closed. Resolve the adapter and renew the provider session before enabling auto-swap. State: <code>manual_action_required</code>.</span></div>
+<div class="notice warning" role="status"><strong>Mutation adapter disabled.</strong><span>Dashboard observation is read-only. Automatic swap remains fail-closed until a separately approved adapter is enabled.</span></div>
 {% endif %}
 
 {% if area == 'overview' %}
