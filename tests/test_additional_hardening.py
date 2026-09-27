@@ -37,6 +37,33 @@ def test_stale_health_claim_can_be_reclaimed_even_if_next_check_was_reserved(app
     assert [row["id"] for row in claimed] == [proxy_id]
 
 
+def test_expired_health_claims_are_recovered_before_unclaimed_backlog(app):
+    now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "claim-priority@example.com", "password", status="active")
+        backlog_id = add_proxy(db, user_id, "backlog.example:9000:u:p")
+        abandoned_id = add_proxy(db, user_id, "abandoned.example:9001:u:p")
+        db.execute(
+            "UPDATE proxies SET next_check_at=? WHERE id=?",
+            ((now - timedelta(minutes=1)).isoformat(), backlog_id),
+        )
+        db.execute(
+            "UPDATE proxies SET next_check_at=?, check_claimed_until=?, check_claim_token=? WHERE id=?",
+            (
+                (now + timedelta(hours=1)).isoformat(),
+                (now - timedelta(minutes=1)).isoformat(),
+                "abandoned-claim",
+                abandoned_id,
+            ),
+        )
+        db.commit()
+
+        claimed = claim_due_proxies(db, now=now, limit=1)
+
+    assert [row["id"] for row in claimed] == [abandoned_id]
+
+
 def test_earnapp_claim_ignores_an_active_claim(app):
     now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
     with app.app_context():

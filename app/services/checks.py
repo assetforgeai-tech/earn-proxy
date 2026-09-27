@@ -166,10 +166,11 @@ def claim_due_proxies(db, *, now: datetime | None = None, limit: int | None = No
                 WHERE p.archived_at IS NULL AND u.status='active'
                   AND ((p.next_check_at IS NULL OR p.next_check_at <= ?) OR (p.check_claimed_until IS NOT NULL AND p.check_claimed_until <= ?))
                   AND (p.check_claimed_until IS NULL OR p.check_claimed_until <= ?)
-                ORDER BY COALESCE(p.next_check_at, p.created_at), p.id
+                ORDER BY CASE WHEN p.check_claimed_until IS NOT NULL AND p.check_claimed_until <= ? THEN 0 ELSE 1 END,
+                         COALESCE(p.next_check_at, p.created_at), p.id
                 LIMIT ?
                 """,
-                (*due_args, batch_size),
+                (*due_args, current.isoformat(), batch_size),
             ).fetchall()
         else:
             # Interleave provider hosts for fairness while leaving simultaneous
@@ -179,6 +180,7 @@ def claim_due_proxies(db, *, now: datetime | None = None, limit: int | None = No
                 """
                 WITH ranked AS (
                     SELECT p.*,
+                           CASE WHEN p.check_claimed_until IS NOT NULL AND p.check_claimed_until <= ? THEN 0 ELSE 1 END AS claim_priority,
                            ROW_NUMBER() OVER (
                                PARTITION BY lower(trim(COALESCE(p.host, '')))
                                ORDER BY COALESCE(p.next_check_at, p.created_at), p.id
@@ -191,10 +193,10 @@ def claim_due_proxies(db, *, now: datetime | None = None, limit: int | None = No
                       AND (p.check_claimed_until IS NULL OR p.check_claimed_until <= ?)
                 )
                 SELECT * FROM ranked
-                ORDER BY host_rank, COALESCE(next_check_at, created_at), id
+                ORDER BY claim_priority, host_rank, COALESCE(next_check_at, created_at), id
                 LIMIT ?
                 """,
-                (*due_args, batch_size),
+                (current.isoformat(), *due_args, batch_size),
             ).fetchall()
         if not rows:
             db.commit()
