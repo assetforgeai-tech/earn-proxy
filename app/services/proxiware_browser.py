@@ -304,13 +304,15 @@ class CdpProxiwareBrowser:
         old_external = str(job.get("old_assignment_external_id") or "").strip()
         if not assignment_id or not old_external:
             raise BrowserAdapterUnavailable("swap_identity_missing")
+        provider_assignment_id = assignment_id if assignment_id.startswith("ip:") else f"ip:{assignment_id}"
+        response_assignment_id = assignment_id.removeprefix("ip:")
         with self._client() as client:
             self._navigate(client)
             result = self._fetch(
                 client,
                 path="/api/static/networks/isp/proxies/swap",
                 method="POST",
-                body={"assignment_ids": [assignment_id]},
+                body={"assignment_ids": [provider_assignment_id]},
             )
             if int(result.get("status") or 0) not in {200, 201, 202}:
                 raise BrowserProviderResponseError("provider_mutation_rejected")
@@ -327,7 +329,7 @@ class CdpProxiwareBrowser:
             # The dashboard response exposes the replacement address, not a
             # durable inventory ID.  Never manufacture an ID from that value;
             # official read-only sync resolves the ID during reconciliation.
-            if returned_id != assignment_id or not new_address:
+            if returned_id != response_assignment_id or not new_address:
                 raise BrowserProviderResponseError("provider_response_unconfirmed")
             evidence = {
                 "old_assignment_external_id": old_external,

@@ -314,6 +314,29 @@ def test_cdp_swap_request_uses_provider_xhr_header():
     assert "XMLHttpRequest" in expression
 
 
+def test_cdp_swap_request_uses_static_isp_row_id_prefix():
+    client = FakeCdp(
+        {
+            "status": 200,
+            "origin": "https://app.proxiware.com",
+            "response_origin": "https://app.proxiware.com",
+            "path": "/static/proxy/isp",
+            "response_path": "/api/static/networks/isp/proxies/swap",
+            "payload": {"swaps": [{"assignment_id": 141943, "new_addr": "51.194.85.9"}]},
+        }
+    )
+    adapter = CdpProxiwareBrowser(
+        "http://127.0.0.1:9222",
+        client_factory=lambda: client,
+        allow_mutation=True,
+    )
+
+    adapter.swap_assignment({"dashboard_assignment_id": "141943", "old_assignment_external_id": "old-external-id"})
+
+    request = client.calls[0][2]
+    assert request["body"]["assignment_ids"] == ["ip:141943"]
+
+
 def test_cdp_observation_maps_auth_failure_to_session_expiry():
     client = FakeCdp(
         {
