@@ -54,6 +54,25 @@ def test_worker_healthcheck_accepts_browser_worker(app):
     assert result.reason == "manual_action_required"
 
 
+def test_worker_healthcheck_reports_disabled_even_when_disabled_heartbeat_is_old(app):
+    with app.app_context():
+        db = get_db()
+        old = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        db.execute(
+            "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?)",
+            ("proxiware_browser_worker_status", "disabled", old),
+        )
+        db.execute(
+            "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?)",
+            ("proxiware_browser_worker_heartbeat_at", old, old),
+        )
+        db.commit()
+        result = check_worker_health(db, "browser_worker", max_age_seconds=60)
+
+    assert result.ok is False
+    assert result.reason == "disabled"
+
+
 def test_worker_healthcheck_rejects_degraded_worker(app):
     with app.app_context():
         db = get_db()

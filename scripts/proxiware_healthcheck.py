@@ -24,6 +24,8 @@ def check_worker_health(db, worker: str, *, max_age_seconds: int = 600, now: dat
     heartbeat_row = db.execute("SELECT value FROM settings WHERE key=?", (f"proxiware_{name}_heartbeat_at",)).fetchone()
     status = str(status_row["value"] if status_row else "unknown")
     heartbeat = str(heartbeat_row["value"] if heartbeat_row else "")
+    if status == "disabled":
+        return WorkerHealth(False, "disabled", status=status, heartbeat_at=heartbeat)
     if not heartbeat:
         return WorkerHealth(False, "missing", status=status)
     try:

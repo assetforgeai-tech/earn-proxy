@@ -130,11 +130,15 @@ def _database_observation(database: Path, *, now: datetime) -> dict[str, object]
             heartbeat_at = str(settings.get(f"proxiware_{worker}_heartbeat_at", ""))
             parsed = _parse_timestamp(heartbeat_at)
             age = round((now - parsed).total_seconds(), 3) if parsed else None
+            if status == "disabled":
+                reason = "disabled"
+            else:
+                reason = "ok" if parsed and age is not None and -60 <= age <= 900 else "stale_or_missing"
             heartbeats[worker] = {
                 "status": status,
                 "heartbeat_at": heartbeat_at,
                 "age_seconds": age,
-                "reason": "ok" if parsed and age is not None and -60 <= age <= 900 else "stale_or_missing",
+                "reason": reason,
             }
         session = {"state": "missing", "expires_at": "", "updated_at": ""}
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_sessions'").fetchone():

@@ -1,8 +1,33 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from datetime import UTC, datetime, timedelta
 
 from scripts.proxiware_preflight import run_preflight
+
+
+def test_runtime_observation_reports_disabled_browser_without_stale_reason(tmp_path):
+    from scripts.proxiware_preflight import _database_observation
+
+    database = tmp_path / "runtime.db"
+    old = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
+    connection.executemany(
+        "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?)",
+        [
+            ("proxiware_browser_worker_status", "disabled", old),
+            ("proxiware_browser_worker_heartbeat_at", old, old),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+    observation = _database_observation(database, now=datetime.now(UTC))
+
+    assert observation["heartbeats"]["browser_worker"]["status"] == "disabled"
+    assert observation["heartbeats"]["browser_worker"]["reason"] == "disabled"
 
 
 def test_preflight_is_redacted_and_keeps_mutations_disabled(tmp_path):
