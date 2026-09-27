@@ -48,7 +48,7 @@ and prints no cookie value:
 
 ```powershell
 agent-browser --cdp 9222 cookies get --json |
-  powershell -NoProfile -Command '$x = $input | ConvertFrom-Json; $c = if ($x.cookies) { $x.cookies } else { $x }; @($c | Where-Object { $_.domain -and ($_.domain -eq "app.proxiware.com" -or $_.domain -eq ".proxiware.com" -or $_.domain -like "*.proxiware.com") }) | ConvertTo-Json -Compress' |
+  powershell -NoProfile -Command '$x = $input | ConvertFrom-Json; $c = if ($x.data.cookies) { $x.data.cookies } elseif ($x.cookies) { $x.cookies } else { $x }; @($c | Where-Object { $_.domain -and ($_.domain -eq "app.proxiware.com" -or $_.domain -eq ".proxiware.com" -or $_.domain -like "*.proxiware.com") }) | ConvertTo-Json -Compress' |
   ssh -p 26266 kalinh@42.96.12.142 "sudo -n bash -lc 'set -a; . /etc/earn-proxy.env; set +a; cd /opt/earn-proxy; /opt/earn-proxy/.venv/bin/python scripts/proxiware_session_import.py --database /var/lib/earn-proxy/earn-proxy.db'"
 ```
 

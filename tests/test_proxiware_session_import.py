@@ -42,6 +42,39 @@ def test_import_session_validates_and_encrypts_proxiware_cookies(app):
     assert restored[0]["value"] == raw_cookie
 
 
+def test_import_session_expiry_is_not_shortened_by_auxiliary_cookie(app):
+    payload = json.dumps(
+        [
+            {
+                "name": "_iidt",
+                "value": "opaque-session-secret",
+                "domain": ".proxiware.com",
+                "path": "/",
+                "expires": 1_800_000_000,
+            },
+            {
+                "name": "csrf",
+                "value": "csrf-cookie",
+                "domain": "app.proxiware.com",
+                "path": "/",
+                "expires": 1_790_086_400,
+            },
+            {
+                "name": "_hjSession_3292139",
+                "value": "analytics-cookie",
+                "domain": ".proxiware.com",
+                "path": "/",
+                "expires": 1_790_000_300,
+            },
+        ]
+    )
+
+    with app.app_context():
+        result = import_session(get_db(), io.StringIO(payload), now=datetime.fromtimestamp(1_790_000_000, UTC))
+
+    assert result["expires_at"] == "2027-01-15T08:00:00+00:00"
+
+
 def test_import_session_rejects_cookie_outside_proxiware_origin(app):
     payload = json.dumps([{"name": "session", "value": "secret", "domain": ".example.com", "path": "/"}])
 

@@ -17,20 +17,30 @@ from app.services.proxiware_credentials import record_provider_audit, store_prov
 MAX_INPUT_BYTES = 64 * 1024
 MAX_COOKIES = 100
 DASHBOARD_URL = "https://app.proxiware.com/static/proxy/isp"
+AUXILIARY_COOKIE_PREFIXES = ("_ga", "_gcl", "_hj", "_uet", "_vid", "intercom-")
+AUTH_COOKIE_NAMES = {"session", "sessionid", "auth", "auth_token", "access_token", "refresh_token", "_iidt"}
 
 
 def _expiry(cookies: list[dict[str, object]], current: datetime) -> datetime:
     candidates: list[datetime] = []
+    fallback: list[datetime] = []
     for cookie in cookies:
+        name = str(cookie.get("name") or "").lower()
+        if name.startswith(AUXILIARY_COOKIE_PREFIXES) or name == "csrf":
+            continue
         try:
             timestamp = float(cookie.get("expires") or 0)
         except (TypeError, ValueError):
             continue
         if timestamp > current.timestamp():
-            candidates.append(datetime.fromtimestamp(timestamp, UTC))
+            expiry = datetime.fromtimestamp(timestamp, UTC)
+            if name in AUTH_COOKIE_NAMES:
+                candidates.append(expiry)
+            else:
+                fallback.append(expiry)
     # ponytail: session-only cookies get a one-hour lease; add a manual
     # revalidation endpoint if the provider exposes authoritative expiry.
-    return min(candidates) if candidates else current + timedelta(hours=1)
+    return min(candidates or fallback) if candidates or fallback else current + timedelta(hours=1)
 
 
 def import_session(db, stream: TextIO, *, now: datetime | None = None) -> dict[str, object]:

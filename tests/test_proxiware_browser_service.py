@@ -162,7 +162,8 @@ def test_browser_runner_marks_corrupt_session_as_manual_action_required(app):
 
 
 def test_browser_runner_idle_sleep_refreshes_heartbeat(app):
-    runner = ProxiwareBrowserRunner(app=app, interval_seconds=120)
+    now = datetime(2026, 9, 25, 8, 0, tzinfo=UTC)
+    runner = ProxiwareBrowserRunner(app=app, interval_seconds=120, now=lambda: now)
     runner._stop.wait = lambda _seconds: True
 
     runner._wait_with_heartbeat(120)
@@ -173,6 +174,7 @@ def test_browser_runner_idle_sleep_refreshes_heartbeat(app):
         )
     assert values["proxiware_browser_worker_status"] == "sleeping"
     assert values["proxiware_browser_worker_heartbeat_at"]
+    assert values["proxiware_browser_worker_next_wake_at"] == (now + timedelta(seconds=120)).isoformat()
 
 
 def test_browser_runner_rejects_cross_subscription_snapshot(app, monkeypatch):

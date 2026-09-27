@@ -90,7 +90,14 @@ class ProxiwareBrowserRunner:
         remaining = max(0.0, float(seconds))
         while remaining > 0 and not self.stopped:
             with self.app.app_context():
-                record_worker_heartbeat(get_db(), "browser_worker", "sleeping")
+                current = _utc(self.now())
+                record_worker_heartbeat(
+                    get_db(),
+                    "browser_worker",
+                    "sleeping",
+                    now=current,
+                    next_wake_at=current + timedelta(seconds=remaining),
+                )
             step = min(60.0, remaining)
             if self._stop.wait(step):
                 break
