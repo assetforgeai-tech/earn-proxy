@@ -74,13 +74,21 @@ class ProxiwareSwapRunner:
         adapter_factory: Callable[..., Any] | None = None,
         interval_seconds: float = 5.0,
         claim_seconds: int = 300,
+        mutation_timeout_seconds: float | None = None,
     ) -> None:
         self.app = app or create_worker_app()
         self._uses_configured_adapter = adapter_factory is None
         self.adapter_factory = adapter_factory or self._configured_adapter
         self.interval_seconds = max(1.0, float(interval_seconds))
         self.claim_seconds = max(30, int(claim_seconds))
+        configured_timeout = (
+            mutation_timeout_seconds
+            if mutation_timeout_seconds is not None
+            else self.app.config.get("PROXIWARE_SWAP_MUTATION_TIMEOUT_SECONDS", 60.0)
+        )
+        self.mutation_timeout_seconds = max(0.01, min(300.0, float(configured_timeout)))
         self._stop = threading.Event()
+        self._adapter_call_timed_out = False
 
     def _configured_adapter(self):
         return build_browser_adapter(
@@ -129,13 +137,7 @@ class ProxiwareSwapRunner:
         return self.adapter_factory()
 
     @staticmethod
-    def _execute(adapter, job) -> dict[str, Any]:
-        if adapter is None:
-            raise RuntimeError("manual_action_required")
-        method = getattr(adapter, "swap", None) or getattr(adapter, "execute_swap", None)
-        if method is None:
-            raise RuntimeError("manual_action_required")
-        result = method(job)
+    def _validate_execution_result(result: Any) -> dict[str, Any]:
         if not isinstance(result, dict):
             raise RuntimeError("manual_action_required")
         old_external = str(result.get("old_assignment_external_id") or "").strip()
@@ -144,6 +146,56 @@ class ProxiwareSwapRunner:
         if not old_external or not (new_external or new_address):
             raise RuntimeError("manual_action_required")
         return result
+
+    @classmethod
+    def _execute(cls, adapter, job) -> dict[str, Any]:
+        if adapter is None:
+            raise RuntimeError("manual_action_required")
+        method = getattr(adapter, "swap", None) or getattr(adapter, "execute_swap", None)
+        if method is None:
+            raise RuntimeError("manual_action_required")
+        return cls._validate_execution_result(method(job))
+
+    def _execute_with_timeout(self, adapter, job) -> dict[str, Any]:
+        """Bound provider I/O; a timeout is an unknown outcome, never a retry."""
+
+        native = getattr(adapter, "swap_with_timeout", None)
+        if callable(native):
+            # Keep browser objects on their owning thread; the adapter applies
+            # the deadline inside the page's AbortController.
+            return self._validate_execution_result(native(job, timeout_seconds=self.mutation_timeout_seconds))
+
+        result: list[dict[str, Any]] = []
+        failure: list[BaseException] = []
+        finished = threading.Event()
+        timed_out = threading.Event()
+
+        def invoke() -> None:
+            try:
+                native = getattr(adapter, "swap_with_timeout", None)
+                raw = (
+                    native(job, timeout_seconds=self.mutation_timeout_seconds)
+                    if callable(native)
+                    else self._execute(adapter, job)
+                )
+                result.append(self._validate_execution_result(raw))
+            except BaseException as exc:  # noqa: BLE001 - propagate adapter failures to the worker
+                failure.append(exc)
+            finally:
+                finished.set()
+                if timed_out.is_set():
+                    self._close_adapter(adapter)
+
+        threading.Thread(target=invoke, name="proxiware-swap-provider", daemon=True).start()
+        if not finished.wait(self.mutation_timeout_seconds):
+            timed_out.set()
+            self._adapter_call_timed_out = True
+            raise TimeoutError("provider timeout")
+        if failure:
+            raise failure[0]
+        if not result:
+            raise RuntimeError("provider response missing")
+        return result[0]
 
     @staticmethod
     def _close_adapter(adapter: Any | None) -> None:
@@ -159,10 +211,12 @@ class ProxiwareSwapRunner:
 
     def _run_once_for_job(self, job_id: int | None, *, allow_manual: bool) -> dict[str, Any]:
         adapter_holder: dict[str, Any | None] = {"adapter": None}
+        self._adapter_call_timed_out = False
         try:
             return self._run_once_for_job_impl(job_id, allow_manual=allow_manual, adapter_holder=adapter_holder)
         finally:
-            self._close_adapter(adapter_holder["adapter"])
+            if not self._adapter_call_timed_out:
+                self._close_adapter(adapter_holder["adapter"])
 
     def _run_once_for_job_impl(
         self,
@@ -282,7 +336,7 @@ class ProxiwareSwapRunner:
                 job["old_assignment_external_id"] = job["mutation_old_assignment_external_id"]
                 job["dashboard_assignment_id"] = job["mutation_dashboard_assignment_id"]
                 job["subscription_external_id"] = job["mutation_subscription_external_id"]
-                result = self._execute(adapter, job)
+                result = self._execute_with_timeout(adapter, job)
                 mark_provider_applied(
                     db,
                     int(job["id"]),

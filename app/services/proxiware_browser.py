@@ -37,6 +37,7 @@ class BrowserAdapterUnavailable(RuntimeError):
                 "origin_mismatch",
                 "session_expired",
                 "subscription_scope_missing",
+                "subscription_scope_mismatch",
                 "swap_identity_missing",
             }
             else "manual_action_required"
@@ -231,7 +232,7 @@ class CdpProxiwareBrowser:
 
     @staticmethod
     def _fetch_expression(_arg: Any) -> str:
-        return """async ({path, method, body}) => {
+        return """async ({path, method, body, timeout_ms}) => {
           const headers = {Accept: 'application/json'};
           if (body !== null) {
             headers['Content-Type'] = 'application/json';
@@ -239,28 +240,54 @@ class CdpProxiwareBrowser:
             const csrf = document.cookie.match(/(?:^|;\\s*)csrf=([^;]*)/);
             if (csrf) headers['X-CSRF-Token'] = decodeURIComponent(csrf[1]);
           }
-          const response = await fetch(path, {
-            method, credentials: 'include', headers,
-            body: body === null ? undefined : JSON.stringify(body)
-          });
-          let payload = null;
-          try { payload = await response.json(); } catch (_) {}
-          const responseUrl = new URL(response.url);
-          return {status: response.status, origin: location.origin,
-                  response_origin: responseUrl.origin, path: location.pathname,
-                  response_path: responseUrl.pathname, payload};
+          const controller = new AbortController();
+          const timeout = Number.isFinite(timeout_ms) && timeout_ms > 0
+            ? setTimeout(() => controller.abort(), timeout_ms)
+            : null;
+          try {
+            const response = await fetch(path, {
+              method, credentials: 'include', headers, signal: controller.signal,
+              body: body === null ? undefined : JSON.stringify(body)
+            });
+            let payload = null;
+            try { payload = await response.json(); } catch (_) {}
+            const responseUrl = new URL(response.url);
+            return {status: response.status, origin: location.origin,
+                    response_origin: responseUrl.origin, path: location.pathname,
+                    response_path: responseUrl.pathname, payload};
+          } catch (error) {
+            if (error && error.name === 'AbortError') return {timed_out: true};
+            throw error;
+          } finally {
+            if (timeout !== null) clearTimeout(timeout);
+          }
         }"""
 
-    def _fetch(self, client: Any, *, path: str, method: str = "GET", body: Any = None) -> dict[str, Any]:
+    def _fetch(
+        self,
+        client: Any,
+        *,
+        path: str,
+        method: str = "GET",
+        body: Any = None,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
         evaluate = getattr(client, "evaluate", None)
         if not callable(evaluate):
             raise BrowserAdapterUnavailable("browser_transport_missing")
         result = evaluate(
             self._fetch_expression(None),
-            {"path": path, "method": method, "body": body},
+            {
+                "path": path,
+                "method": method,
+                "body": body,
+                "timeout_ms": None if timeout_seconds is None else max(1, round(float(timeout_seconds) * 1000)),
+            },
         )
         if not isinstance(result, dict):
             raise BrowserProviderResponseError("provider_response_invalid")
+        if result.get("timed_out") is True:
+            raise TimeoutError("provider timeout")
         if str(result.get("origin") or "").rstrip("/") != self._origin:
             raise BrowserAdapterUnavailable("origin_mismatch")
         if str(result.get("response_origin") or "").rstrip("/") != self._origin:
@@ -295,28 +322,44 @@ class CdpProxiwareBrowser:
             ).observe(subscription_id=requested)
             return rows
 
-    def swap_assignment(self, job: Any) -> dict[str, Any]:
+    def swap_assignment(self, job: Any, *, timeout_seconds: float | None = None) -> dict[str, Any]:
         if not self.allow_mutation:
             raise BrowserAdapterUnavailable("manual_action_required")
         if not isinstance(job, dict):
             job = dict(job)
         assignment_id = str(job.get("dashboard_assignment_id") or "").strip()
         old_external = str(job.get("old_assignment_external_id") or "").strip()
+        subscription_external = str(job.get("subscription_external_id") or "").strip()
         if not assignment_id or not old_external:
             raise BrowserAdapterUnavailable("swap_identity_missing")
         response_assignment_id = assignment_id.removeprefix("ip:")
         if not response_assignment_id.isdigit():
             raise BrowserAdapterUnavailable("swap_identity_missing")
+        if not subscription_external:
+            raise BrowserAdapterUnavailable("subscription_scope_missing")
         # The static ISP UI posts numeric assignment IDs; ``ip:`` is only our
         # internal row key and must never cross the provider boundary.
         provider_assignment_id = int(response_assignment_id)
         with self._client() as client:
             self._navigate(client)
+            scope_result = self._fetch(client, path="/api/static/networks/isp/proxies", timeout_seconds=timeout_seconds)
+            scope_status = int(scope_result.get("status") or 0)
+            if scope_status in {401, 403}:
+                raise BrowserAdapterUnavailable("session_expired")
+            if scope_status != 200:
+                raise BrowserProviderResponseError("provider_read_failed")
+            scoped_rows = ProxiwareDashboardObserver(_PayloadTransport(scope_result.get("payload"))).observe(
+                subscription_id=subscription_external
+            )
+            matching = [row for row in scoped_rows if str(row.assignment_id) == response_assignment_id]
+            if len(matching) != 1:
+                raise BrowserAdapterUnavailable("subscription_scope_mismatch")
             result = self._fetch(
                 client,
                 path="/api/static/networks/isp/proxies/swap",
                 method="POST",
                 body={"assignment_ids": [provider_assignment_id]},
+                timeout_seconds=timeout_seconds,
             )
             if int(result.get("status") or 0) not in {200, 201, 202}:
                 raise BrowserProviderResponseError("provider_mutation_rejected")
@@ -346,6 +389,9 @@ class CdpProxiwareBrowser:
 
     def swap(self, job: Any) -> dict[str, Any]:
         return self.swap_assignment(job)
+
+    def swap_with_timeout(self, job: Any, *, timeout_seconds: float) -> dict[str, Any]:
+        return self.swap_assignment(job, timeout_seconds=timeout_seconds)
 
 
 @dataclass

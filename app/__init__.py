@@ -94,6 +94,9 @@ def create_app(test_config: dict | None = None) -> Flask:
         PROXIWARE_BROWSER_HEARTBEAT_INTERVAL_SECONDS=float(
             os.environ.get("EARN_PROXY_PROXIWARE_BROWSER_HEARTBEAT_INTERVAL_SECONDS", "30")
         ),
+        PROXIWARE_SWAP_MUTATION_TIMEOUT_SECONDS=float(
+            os.environ.get("EARN_PROXY_PROXIWARE_SWAP_MUTATION_TIMEOUT_SECONDS", "60")
+        ),
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=os.environ.get("EARN_PROXY_COOKIE_SECURE", "1") == "1",

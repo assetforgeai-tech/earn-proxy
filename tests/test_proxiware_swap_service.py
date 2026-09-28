@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from threading import Event
+from time import monotonic
 
 from app.db import get_db
 from app.services.proxiware_swap import ensure_proxiware_swap_schema, queue_eligible_swaps
@@ -166,6 +168,43 @@ def test_swap_runner_freezes_unknown_outcome_after_mutation_starts(app):
     assert row["state"] == "reconciliation_required"
     assert row["error_code"] == "captcha_required"
     assert setting["value"] == "0"
+
+
+def test_swap_runner_hard_times_out_provider_io_and_freezes_reconciliation(app):
+    from app.proxiware_swap_service import ProxiwareSwapRunner
+
+    _queue(app)
+    entered = Event()
+    release = Event()
+
+    class HangingAdapter:
+        def swap(self, _job):
+            entered.set()
+            release.wait(5)
+            return {
+                "old_assignment_external_id": "old-worker",
+                "new_assignment_external_id": "late-worker",
+            }
+
+    runner = ProxiwareSwapRunner(
+        app=app,
+        adapter_factory=lambda: HangingAdapter(),
+        mutation_timeout_seconds=0.05,
+    )
+    started = monotonic()
+    result = runner.run_once()
+    elapsed = monotonic() - started
+
+    assert entered.is_set()
+    assert elapsed < 1.0
+    assert result == {"status": "reconciliation_required", "job_id": 1, "error_code": "provider_timeout"}
+    with app.app_context():
+        db = get_db()
+        row = db.execute("SELECT state,error_code FROM swap_jobs").fetchone()
+        setting = db.execute("SELECT value FROM settings WHERE key='proxiware_auto_swap'").fetchone()
+    assert tuple(row) == ("reconciliation_required", "provider_timeout")
+    assert setting["value"] == "0"
+    release.set()
 
 
 def test_swap_runner_reports_disabled_without_busy_loop_when_auto_swap_is_off(app):

@@ -110,6 +110,9 @@ render_worker_env() {
   printf '%s\n' 'EARN_PROXY_RUNTIME_PROFILE=proxiware_worker' >> "$worker_env_tmp"
   while IFS= read -r key; do
     line="$(awk -F= -v wanted="$key" '$1 == wanted { print; exit }' /etc/earn-proxy-browser.env /etc/earn-proxy.env 2>/dev/null || true)"
+    if [[ -z "$line" && "$key" == "EARN_PROXY_PROXIWARE_SWAP_MUTATION_TIMEOUT_SECONDS" ]]; then
+      line="$key=60"
+    fi
     if [[ -z "$line" ]]; then
       echo "missing worker environment key: $key" >&2
       return 1
@@ -125,6 +128,7 @@ EARN_PROXY_PROXIWARE_CDP_URL
 EARN_PROXY_PROXIWARE_BROWSER_DASHBOARD_URL
 EARN_PROXY_PROXIWARE_BROWSER_INTERVAL_SECONDS
 EARN_PROXY_PROXIWARE_BROWSER_HEARTBEAT_INTERVAL_SECONDS
+EARN_PROXY_PROXIWARE_SWAP_MUTATION_TIMEOUT_SECONDS
 EOF
 }
 if [[ ! -x "$python_bin" ]]; then

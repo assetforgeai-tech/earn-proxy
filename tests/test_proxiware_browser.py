@@ -78,6 +78,31 @@ class FakeCdp:
         self.calls.append(("close",))
 
 
+class ScopedSwapCdp(FakeCdp):
+    def evaluate(self, expression, arg=None):
+        self.calls.append(("evaluate", expression, arg))
+        if arg["path"] == "/api/static/networks/isp/proxies":
+            return {
+                "status": 200,
+                "origin": "https://app.proxiware.com",
+                "response_origin": "https://app.proxiware.com",
+                "path": "/static/proxy/isp",
+                "response_path": "/api/static/networks/isp/proxies",
+                "payload": {
+                    "proxies": [
+                        {
+                            "assignment_id": 141943,
+                            "subscription_id": 39277,
+                            "addr": "51.194.85.8:1337",
+                            "eligible": True,
+                            "connections": 2,
+                        }
+                    ]
+                },
+            }
+        return self.result
+
+
 def test_enabled_loopback_browser_observes_typed_dashboard_rows_without_secrets():
     client = FakeCdp(
         {
@@ -253,7 +278,7 @@ def test_enabled_builder_requires_loopback_and_returns_cdp_adapter():
 
 
 def test_cdp_swap_returns_provider_address_evidence_without_inventing_external_id():
-    client = FakeCdp(
+    client = ScopedSwapCdp(
         {
             "status": 200,
             "origin": "https://app.proxiware.com",
@@ -280,6 +305,7 @@ def test_cdp_swap_returns_provider_address_evidence_without_inventing_external_i
         {
             "dashboard_assignment_id": "141943",
             "old_assignment_external_id": "old-external-id",
+            "subscription_external_id": "39277",
         }
     )
 
@@ -291,7 +317,7 @@ def test_cdp_swap_returns_provider_address_evidence_without_inventing_external_i
 
 
 def test_cdp_swap_request_uses_provider_xhr_header():
-    client = FakeCdp(
+    client = ScopedSwapCdp(
         {
             "status": 200,
             "origin": "https://app.proxiware.com",
@@ -307,7 +333,13 @@ def test_cdp_swap_request_uses_provider_xhr_header():
         allow_mutation=True,
     )
 
-    adapter.swap_assignment({"dashboard_assignment_id": "141943", "old_assignment_external_id": "old-external-id"})
+    adapter.swap_assignment(
+        {
+            "dashboard_assignment_id": "141943",
+            "old_assignment_external_id": "old-external-id",
+            "subscription_external_id": "39277",
+        }
+    )
 
     expression = client.calls[0][1]
     assert "X-Requested-With" in expression
@@ -315,7 +347,7 @@ def test_cdp_swap_request_uses_provider_xhr_header():
 
 
 def test_cdp_swap_request_matches_selected_dashboard_row_payload():
-    client = FakeCdp(
+    client = ScopedSwapCdp(
         {
             "status": 200,
             "origin": "https://app.proxiware.com",
@@ -331,10 +363,46 @@ def test_cdp_swap_request_matches_selected_dashboard_row_payload():
         allow_mutation=True,
     )
 
-    adapter.swap_assignment({"dashboard_assignment_id": "141943", "old_assignment_external_id": "old-external-id"})
+    adapter.swap_assignment(
+        {
+            "dashboard_assignment_id": "141943",
+            "old_assignment_external_id": "old-external-id",
+            "subscription_external_id": "39277",
+        }
+    )
 
-    request = client.calls[0][2]
+    request = client.calls[1][2]
     assert request["body"]["assignment_ids"] == [141943]
+
+
+def test_cdp_swap_native_timeout_is_passed_to_provider_fetch():
+    client = ScopedSwapCdp(
+        {
+            "status": 200,
+            "origin": "https://app.proxiware.com",
+            "response_origin": "https://app.proxiware.com",
+            "path": "/static/proxy/isp",
+            "response_path": "/api/static/networks/isp/proxies/swap",
+            "payload": {"swaps": [{"assignment_id": 141943, "new_addr": "51.194.85.9"}]},
+        }
+    )
+    adapter = CdpProxiwareBrowser(
+        "http://127.0.0.1:9222",
+        client_factory=lambda: client,
+        allow_mutation=True,
+    )
+
+    adapter.swap_with_timeout(
+        {
+            "dashboard_assignment_id": "141943",
+            "old_assignment_external_id": "old-external-id",
+            "subscription_external_id": "39277",
+        },
+        timeout_seconds=7,
+    )
+
+    request = client.calls[1][2]
+    assert request["timeout_ms"] == 7000
 
 
 def test_cdp_swap_rejects_non_numeric_dashboard_assignment_id_before_provider_call():
@@ -351,6 +419,80 @@ def test_cdp_swap_rejects_non_numeric_dashboard_assignment_id_before_provider_ca
         )
 
     assert client.calls == []
+
+
+def test_cdp_swap_requires_frozen_subscription_scope_before_provider_call():
+    client = FakeCdp(
+        {
+            "status": 200,
+            "origin": "https://app.proxiware.com",
+            "response_origin": "https://app.proxiware.com",
+            "path": "/static/proxy/isp",
+            "response_path": "/api/static/networks/isp/proxies/swap",
+            "payload": {"swaps": [{"assignment_id": 141943, "new_addr": "51.194.85.9"}]},
+        }
+    )
+    adapter = CdpProxiwareBrowser(
+        "http://127.0.0.1:9222",
+        client_factory=lambda: client,
+        allow_mutation=True,
+    )
+
+    with pytest.raises(BrowserAdapterUnavailable, match="subscription_scope_missing"):
+        adapter.swap_assignment({"dashboard_assignment_id": "141943", "old_assignment_external_id": "old-external-id"})
+
+    assert client.calls == []
+
+
+def test_cdp_swap_rejects_assignment_outside_frozen_subscription_scope_before_post():
+    class ScopeClient(FakeCdp):
+        def evaluate(self, expression, arg=None):
+            self.calls.append(("evaluate", expression, arg))
+            if arg["path"] == "/api/static/networks/isp/proxies":
+                return {
+                    "status": 200,
+                    "origin": "https://app.proxiware.com",
+                    "response_origin": "https://app.proxiware.com",
+                    "path": "/static/proxy/isp",
+                    "response_path": "/api/static/networks/isp/proxies",
+                    "payload": {
+                        "proxies": [
+                            {
+                                "assignment_id": 141943,
+                                "subscription_id": 99999,
+                                "addr": "51.194.85.8:1337",
+                                "eligible": True,
+                                "connections": 2,
+                            }
+                        ]
+                    },
+                }
+            return {
+                "status": 200,
+                "origin": "https://app.proxiware.com",
+                "response_origin": "https://app.proxiware.com",
+                "path": "/static/proxy/isp",
+                "response_path": "/api/static/networks/isp/proxies/swap",
+                "payload": {"swaps": [{"assignment_id": 141943, "new_addr": "51.194.85.9"}]},
+            }
+
+    client = ScopeClient({})
+    adapter = CdpProxiwareBrowser(
+        "http://127.0.0.1:9222",
+        client_factory=lambda: client,
+        allow_mutation=True,
+    )
+
+    with pytest.raises(BrowserAdapterUnavailable, match="subscription_scope_mismatch"):
+        adapter.swap_assignment(
+            {
+                "dashboard_assignment_id": "141943",
+                "old_assignment_external_id": "old-external-id",
+                "subscription_external_id": "39277",
+            }
+        )
+
+    assert [call[2]["path"] for call in client.calls] == ["/api/static/networks/isp/proxies"]
 
 
 def test_cdp_observation_maps_auth_failure_to_session_expiry():
@@ -371,7 +513,7 @@ def test_cdp_observation_maps_auth_failure_to_session_expiry():
 
 
 def test_cdp_swap_rejects_provider_error_without_claiming_success():
-    client = FakeCdp(
+    client = ScopedSwapCdp(
         {
             "status": 503,
             "origin": "https://app.proxiware.com",
@@ -388,4 +530,10 @@ def test_cdp_swap_rejects_provider_error_without_claiming_success():
     )
 
     with pytest.raises(BrowserProviderResponseError, match="provider_mutation_rejected"):
-        adapter.swap_assignment({"dashboard_assignment_id": "141943", "old_assignment_external_id": "old"})
+        adapter.swap_assignment(
+            {
+                "dashboard_assignment_id": "141943",
+                "old_assignment_external_id": "old",
+                "subscription_external_id": "39277",
+            }
+        )

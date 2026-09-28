@@ -171,6 +171,7 @@ def test_browser_worker_is_isolated_and_mutation_is_disabled_by_default():
     assert "RuntimeDirectory=earn-proxy-browser" in chrome_unit
     assert "ReadWritePaths=/run/earn-proxy-browser" in chrome_unit
     assert "EARN_PROXY_PROXIWARE_BROWSER_ALLOW_MUTATION=0" in env
+    assert "EARN_PROXY_PROXIWARE_SWAP_MUTATION_TIMEOUT_SECONDS=60" in env
 
 
 def test_cdp_acl_is_required_before_chrome_and_stops_with_it():
@@ -314,10 +315,11 @@ def test_release_backs_up_and_requires_worker_environment():
     assert "render_worker_env()" in installer
     assert "EARN_PROXY_RUNTIME_PROFILE=proxiware_worker" in installer
     assert "EARN_PROXY_PROXIWARE_WORKER_FERNET_KEY" in installer
-    worker_keys = installer[
-        installer.index("EARN_PROXY_DATABASE") : installer.index("EOF", installer.index("EARN_PROXY_DATABASE"))
-    ]
+    worker_env_start = installer.index("render_worker_env()")
+    worker_keys_start = installer.index("EARN_PROXY_DATABASE", worker_env_start)
+    worker_keys = installer[worker_keys_start : installer.index("EOF", worker_keys_start)]
     assert "EARN_PROXY_FERNET_KEY" not in worker_keys
+    assert "EARN_PROXY_PROXIWARE_SWAP_MUTATION_TIMEOUT_SECONDS" in worker_keys
     assert 'cp -a "$worker_env" "$backup_dir/earn-proxy-proxiware-worker.env"' in installer
     assert 'install -o root -g root -m 0600 "$worker_env_tmp" "$worker_env"' in installer
     assert 'install -o root -g root -m 0600 "$backup_dir/earn-proxy-proxiware-worker.env" "$worker_env"' in installer
