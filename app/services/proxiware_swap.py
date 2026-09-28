@@ -48,6 +48,7 @@ SAFE_ERROR_CODES = frozenset(
         "provider_error",
         "dashboard_stale",
         "reconciliation_required",
+        "reconciled_no_provider_change",
     }
 )
 GUARD_ERROR_CODES = frozenset(
@@ -230,6 +231,7 @@ def ensure_proxiware_swap_schema(db) -> None:
             provider_applied_at TEXT,
             reconciliation_required_at TEXT,
             mutation_old_assignment_external_id TEXT,
+            mutation_old_assignment_address TEXT,
             mutation_dashboard_assignment_id TEXT,
             mutation_subscription_external_id TEXT,
             mutation_new_assignment_external_id TEXT,
@@ -352,6 +354,7 @@ def ensure_proxiware_swap_schema(db) -> None:
                 "provider_applied_at": "TEXT",
                 "reconciliation_required_at": "TEXT",
                 "mutation_old_assignment_external_id": "TEXT",
+                "mutation_old_assignment_address": "TEXT",
                 "mutation_dashboard_assignment_id": "TEXT",
                 "mutation_subscription_external_id": "TEXT",
                 "mutation_new_assignment_external_id": "TEXT",
@@ -878,6 +881,7 @@ def revalidate_swap_job(
                     raise ValueError("Swap mutation requires a claim token")
                 identity = db.execute(
                     "SELECT pa.external_id AS old_external_id,pa.dashboard_assignment_id,"
+                    "pa.host,pa.port,"
                     "ps.external_id AS subscription_external_id "
                     "FROM provider_assignments pa JOIN provider_subscriptions ps ON ps.id=pa.subscription_id "
                     "WHERE pa.id=? AND pa.provider=? AND ps.id=? AND ps.provider=?",
@@ -893,11 +897,13 @@ def revalidate_swap_job(
                 cursor = db.execute(
                     "UPDATE swap_jobs SET state='mutating', mutation_started_at=?, claimed_until=NULL, "
                     "reason='provider_mutation', mutation_old_assignment_external_id=?, "
-                    "mutation_dashboard_assignment_id=?, mutation_subscription_external_id=?, updated_at=? "
+                    "mutation_old_assignment_address=?, mutation_dashboard_assignment_id=?, "
+                    "mutation_subscription_external_id=?, updated_at=? "
                     "WHERE id=? AND provider=? AND state='running' AND claim_token=?",
                     (
                         current.isoformat(),
                         str(identity["old_external_id"]),
+                        f"{str(identity['host'] or '').strip()}:{int(identity['port'] or 0)}",
                         str(identity["dashboard_assignment_id"]),
                         str(identity["subscription_external_id"]),
                         current.isoformat(),
@@ -908,6 +914,13 @@ def revalidate_swap_job(
                 )
                 if cursor.rowcount != 1:
                     raise ValueError("Swap job claim is stale")
+                db.execute(
+                    "UPDATE provider_assignments SET dashboard_assignment_id=NULL, dashboard_eligible=NULL, "
+                    "dashboard_connections=NULL, dashboard_observed_at=NULL, dashboard_source='', "
+                    "dashboard_error_code='reconciliation_required', distribution_enabled=0, updated_at=? "
+                    "WHERE id=? AND provider=? AND subscription_id=?",
+                    (current.isoformat(), int(job["old_assignment_id"]), PROVIDER, int(job["subscription_id"])),
+                )
             return decision
         reason = decision.reason if decision.allowed is False else "manual_action_required"
         db.execute(
@@ -1133,7 +1146,7 @@ def mark_swap_success(
         ).fetchone()
         if job is None:
             raise LookupError("Swap job not found")
-        if str(job["state"] or "") != "provider_applied":
+        if str(job["state"] or "") not in {"provider_applied", "reconciliation_required"}:
             raise ValueError("Swap job is not awaiting reconciliation")
         _require_claim(job, claim_token)
         expected_old = str(job["mutation_old_assignment_external_id"] or "").strip()
@@ -1257,42 +1270,207 @@ def mark_swap_success(
         )
 
 
+def _reconcile_no_provider_change(db, job, *, now: datetime) -> bool:
+    """Close an uncertain job only when later read-only evidence proves no swap."""
+
+    mutation_at = _parse_timestamp(job["provider_applied_at"] or job["mutation_started_at"])
+    old_external = str(job["mutation_old_assignment_external_id"] or "").strip()
+    old_address = str(job["mutation_old_assignment_address"] or "").strip()
+    old_dashboard_id = str(job["mutation_dashboard_assignment_id"] or "").strip()
+    if mutation_at is None or not old_external or not old_address or not old_dashboard_id:
+        return False
+    try:
+        old_host, old_port, _ = _validated_address(old_address)
+    except ValueError:
+        return False
+    old = _resolve_assignment(db, old_external)
+    if old is None or old["missing_at"] is not None or str(old["status"] or "").lower() == "replaced":
+        return False
+    if str(old["host"] or "").strip().lower() != old_host or int(old["port"] or 0) != old_port:
+        return False
+    synced_at = _parse_timestamp(old["last_seen_at"])
+    observed_at = _parse_timestamp(old["dashboard_observed_at"])
+    if synced_at is None or observed_at is None or synced_at <= mutation_at or observed_at <= mutation_at:
+        return False
+    try:
+        max_age = max(
+            60,
+            int(get_setting(db, "proxiware_dashboard_max_age_seconds", str(DEFAULT_DASHBOARD_MAX_AGE_SECONDS))),
+        )
+    except (TypeError, ValueError):
+        max_age = DEFAULT_DASHBOARD_MAX_AGE_SECONDS
+    if (
+        now - observed_at > timedelta(seconds=max_age)
+        or observed_at - now > timedelta(seconds=60)
+        or now - synced_at > timedelta(seconds=max_age)
+        or synced_at - now > timedelta(seconds=60)
+    ):
+        return False
+    if str(old["dashboard_assignment_id"] or "").strip() != old_dashboard_id:
+        return False
+    if str(old["dashboard_source"] or "") != "provider_dashboard":
+        return False
+    subscription = db.execute(
+        "SELECT quantity FROM provider_subscriptions WHERE id=? AND provider=?",
+        (int(job["subscription_id"]), PROVIDER),
+    ).fetchone()
+    # With multiple provider slots, an unchanged old row cannot prove which
+    # slot the provider may have replaced during the uncertain mutation.
+    if subscription is None or int(subscription["quantity"] or 0) != 1:
+        return False
+    fresh_other = db.execute(
+        "SELECT last_seen_at,dashboard_observed_at FROM provider_assignments "
+        "WHERE provider=? AND subscription_id=? AND external_id<>? AND missing_at IS NULL "
+        "AND status IN ('active','current')",
+        (PROVIDER, int(job["subscription_id"]), old_external),
+    ).fetchall()
+    for candidate in fresh_other:
+        candidate_times = (
+            _parse_timestamp(candidate["last_seen_at"]),
+            _parse_timestamp(candidate["dashboard_observed_at"]),
+        )
+        # Any second identity refreshed after the fence keeps the outcome
+        # ambiguous; it may be a replacement or a pre-existing assignment.
+        if all(value is not None and value > mutation_at for value in candidate_times):
+            return False
+    with _write_transaction(db):
+        cursor = db.execute(
+            "UPDATE swap_jobs SET state='blocked', reason='reconciled_no_provider_change', "
+            "claim_token=NULL, claimed_until=NULL, blocked_at=?, updated_at=? "
+            "WHERE id=? AND provider=? AND state='reconciliation_required'",
+            (now.isoformat(), now.isoformat(), int(job["id"]), PROVIDER),
+        )
+        if cursor.rowcount != 1:
+            return False
+        db.execute(
+            "UPDATE provider_subscriptions SET last_swap_reason=?, last_swap_checked_at=?, updated_at=? "
+            "WHERE id=? AND provider=?",
+            (
+                "reconciled_no_provider_change",
+                now.isoformat(),
+                now.isoformat(),
+                int(job["subscription_id"]),
+                PROVIDER,
+            ),
+        )
+    return True
+
+
+def _record_inferred_replacement(db, job) -> bool:
+    """Persist one unambiguous post-mutation assignment discovered read-only."""
+
+    mutation_at = _parse_timestamp(job["provider_applied_at"] or job["mutation_started_at"])
+    old_external = str(job["mutation_old_assignment_external_id"] or "").strip()
+    if mutation_at is None or not old_external:
+        return False
+    old = _resolve_assignment(db, old_external)
+    if old is not None and old["missing_at"] is None and str(old["status"] or "").lower() != "replaced":
+        return False
+    subscription = db.execute(
+        "SELECT quantity,last_seen_at FROM provider_subscriptions WHERE id=? AND provider=?",
+        (int(job["subscription_id"]), PROVIDER),
+    ).fetchone()
+    if subscription is None or int(subscription["quantity"] or 0) != 1:
+        return False
+    subscription_seen_at = _parse_timestamp(subscription["last_seen_at"])
+    if subscription_seen_at is None or subscription_seen_at <= mutation_at:
+        return False
+    rows = db.execute(
+        "SELECT * FROM provider_assignments WHERE provider=? AND subscription_id=? "
+        "AND external_id<>? AND missing_at IS NULL AND status IN ('active','current') ORDER BY id",
+        (PROVIDER, int(job["subscription_id"]), old_external),
+    ).fetchall()
+    candidates = []
+    for row in rows:
+        created_at = _parse_timestamp(row["created_at"])
+        synced_at = _parse_timestamp(row["last_seen_at"])
+        observed_at = _parse_timestamp(row["dashboard_observed_at"])
+        if (
+            created_at is not None
+            and created_at > mutation_at
+            and synced_at is not None
+            and observed_at is not None
+            and synced_at > mutation_at
+            and observed_at > mutation_at
+            and str(row["dashboard_source"] or "") == "provider_dashboard"
+            and str(row["dashboard_assignment_id"] or "").strip()
+        ):
+            candidates.append(row)
+    if len(candidates) != 1:
+        return False
+    with _write_transaction(db):
+        cursor = db.execute(
+            "UPDATE swap_jobs SET mutation_new_assignment_external_id=?, updated_at=? "
+            "WHERE id=? AND provider=? AND state='reconciliation_required' "
+            "AND mutation_new_assignment_external_id IS NULL AND mutation_new_assignment_address IS NULL",
+            (str(candidates[0]["external_id"]), _iso(), int(job["id"]), PROVIDER),
+        )
+    return cursor.rowcount == 1
+
+
 def reconcile_provider_applied_swaps(db, *, now: datetime | None = None, limit: int = 20) -> dict[str, int]:
-    """Finalize only jobs proven by post-mutation API and dashboard evidence."""
+    """Finalize or safely close jobs using only post-mutation read-only evidence."""
 
     ensure_proxiware_swap_schema(db)
     current = _now(now)
     rows = db.execute(
-        "SELECT id,claim_token,mutation_old_assignment_external_id,mutation_new_assignment_external_id,"
-        "mutation_new_assignment_address "
-        "FROM swap_jobs WHERE provider=? AND state='provider_applied' ORDER BY updated_at,id LIMIT ?",
+        "SELECT id,subscription_id,state,claim_token,mutation_started_at,provider_applied_at,"
+        "mutation_old_assignment_external_id,mutation_old_assignment_address,mutation_dashboard_assignment_id,"
+        "mutation_new_assignment_external_id,mutation_new_assignment_address "
+        "FROM swap_jobs WHERE provider=? AND state IN ('provider_applied','reconciliation_required') "
+        "ORDER BY updated_at,id LIMIT ?",
         (PROVIDER, max(0, int(limit))),
     ).fetchall()
-    result = {"success": 0, "pending": 0, "reconciliation_required": 0}
+    result = {"success": 0, "pending": 0, "reconciliation_required": 0, "reconciled_no_provider_change": 0}
     for row in rows:
+        state = str(row["state"] or "")
+        if state == "reconciliation_required" and not (
+            str(row["mutation_new_assignment_external_id"] or "").strip()
+            or str(row["mutation_new_assignment_address"] or "").strip()
+        ):
+            if _reconcile_no_provider_change(db, row, now=current):
+                result["reconciled_no_provider_change"] += 1
+                continue
+            if not _record_inferred_replacement(db, row):
+                result["pending"] += 1
+                continue
         try:
+            fresh = db.execute(
+                "SELECT claim_token,mutation_old_assignment_external_id,mutation_new_assignment_external_id,"
+                "mutation_new_assignment_address FROM swap_jobs WHERE id=? AND provider=?",
+                (int(row["id"]), PROVIDER),
+            ).fetchone()
             mark_swap_success(
                 db,
                 int(row["id"]),
-                old_assignment_external_id=str(row["mutation_old_assignment_external_id"] or ""),
+                old_assignment_external_id=str(fresh["mutation_old_assignment_external_id"] or ""),
                 # The provider may expose only the replacement address.  The
                 # success path resolves the official external ID after sync.
-                new_assignment_external_id=(str(row["mutation_new_assignment_external_id"] or "") or None),
-                new_assignment_address=str(row["mutation_new_assignment_address"] or "") or None,
+                new_assignment_external_id=(str(fresh["mutation_new_assignment_external_id"] or "") or None),
+                new_assignment_address=str(fresh["mutation_new_assignment_address"] or "") or None,
                 success_at=current,
-                claim_token=str(row["claim_token"] or "") or None,
+                claim_token=str(fresh["claim_token"] or "") or None,
             )
         except SwapReconciliationPending:
-            result["pending"] += 1
+            if state == "reconciliation_required" and _reconcile_no_provider_change(db, row, now=current):
+                result["reconciled_no_provider_change"] += 1
+            else:
+                result["pending"] += 1
         except (LookupError, ValueError):
-            mark_reconciliation_required(
-                db,
-                int(row["id"]),
-                error_code="reconciliation_required",
-                required_at=current,
-                claim_token=str(row["claim_token"] or "") or None,
-            )
-            result["reconciliation_required"] += 1
+            if state == "reconciliation_required":
+                if _reconcile_no_provider_change(db, row, now=current):
+                    result["reconciled_no_provider_change"] += 1
+                else:
+                    result["pending"] += 1
+            else:
+                mark_reconciliation_required(
+                    db,
+                    int(row["id"]),
+                    error_code="reconciliation_required",
+                    required_at=current,
+                    claim_token=str(row["claim_token"] or "") or None,
+                )
+                result["reconciliation_required"] += 1
         else:
             result["success"] += 1
     return result

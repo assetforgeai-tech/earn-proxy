@@ -275,6 +275,7 @@ def _proxiware_snapshot(db, area: str, args) -> dict[str, object]:
         "duplicate": 0,
         "swaps_pending": 0,
         "swaps_blocked": 0,
+        "swaps_reconciliation_required": 0,
         "eligible_count": 0,
         "connections": "—",
         "last_sync": last_sync,
@@ -397,6 +398,12 @@ def _proxiware_snapshot(db, area: str, args) -> dict[str, object]:
         summary["swaps_blocked"] = int(
             db.execute(
                 f"SELECT COUNT(*) AS count FROM swap_jobs WHERE {provider_clause} AND state='blocked'",
+                provider_params,
+            ).fetchone()["count"]
+        )
+        summary["swaps_reconciliation_required"] = int(
+            db.execute(
+                f"SELECT COUNT(*) AS count FROM swap_jobs WHERE {provider_clause} AND state='reconciliation_required'",
                 provider_params,
             ).fetchone()["count"]
         )
@@ -581,6 +588,7 @@ def _proxiware_snapshot(db, area: str, args) -> dict[str, object]:
                     "state",
                     "attempts",
                     "error_code",
+                    "reason",
                     "created_at",
                     "updated_at",
                 ),
@@ -636,6 +644,8 @@ def _proxiware_snapshot(db, area: str, args) -> dict[str, object]:
                                 "attempts": value.get("attempts", 0),
                                 "ready_at": value.get("updated_at", "—"),
                                 "error_code": value.get("error_code", "—"),
+                                "reason": value.get("reason", "—"),
+                                "reconciliation_required": value.get("state") == "reconciliation_required",
                                 "retryable": value.get("state") in {"failed", "blocked", "canceled"},
                                 "cancelable": value.get("state") in {"pending", "running"},
                                 "manual_available": value.get("state") in {"pending", "failed", "blocked", "canceled"},

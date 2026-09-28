@@ -21,6 +21,7 @@ from app.services.proxiware_swap import (
     mark_swap_failed,
     mark_swap_success,
     queue_eligible_swaps,
+    reconcile_provider_applied_swaps,
     request_manual_swap,
     revalidate_swap_job,
     save_provider_secret,
@@ -497,6 +498,36 @@ def test_mutation_fence_is_not_reclaimed_or_canceled(app):
         assert db.execute("SELECT state FROM swap_jobs WHERE id=?", (job["id"],)).fetchone()["state"] == "mutating"
 
 
+def test_mutation_fence_invalidates_pre_mutation_dashboard_evidence(app):
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db)
+        db.execute(
+            "UPDATE provider_assignments SET distribution_enabled=1 WHERE subscription_id=?",
+            (sub_id,),
+        )
+        db.commit()
+        set_setting(db, "proxiware_auto_swap", "1")
+        assert queue_eligible_swaps(db, now=now) == 1
+        job = claim_next_swap(db, now=now)
+        revalidate_swap_job(
+            db,
+            job["id"],
+            now=now,
+            claim_token=job["claim_token"],
+            enter_mutation=True,
+        )
+        row = db.execute(
+            "SELECT dashboard_assignment_id,dashboard_eligible,dashboard_connections,"
+            "dashboard_observed_at,dashboard_source,distribution_enabled FROM provider_assignments "
+            "WHERE subscription_id=?",
+            (sub_id,),
+        ).fetchone()
+
+    assert tuple(row) == (None, None, None, None, "", 0)
+
+
 def test_provider_response_requires_reconciliation_before_success(app):
     now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
     with app.app_context():
@@ -541,6 +572,341 @@ def test_unknown_provider_outcome_requires_reconciliation_and_disables_auto_swap
         setting = db.execute("SELECT value FROM settings WHERE key='proxiware_auto_swap'").fetchone()
     assert tuple(stored) == ("reconciliation_required", "provider_timeout")
     assert setting["value"] == "0"
+
+
+def test_reconciliation_required_with_fresh_unchanged_identity_releases_subscription(app):
+    mutation_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    observed_at = mutation_at + timedelta(minutes=1)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db)
+        set_setting(db, "proxiware_auto_swap", "1")
+        assert queue_eligible_swaps(db, now=mutation_at) == 1
+        job = claim_next_swap(db, now=mutation_at)
+        revalidate_swap_job(
+            db,
+            job["id"],
+            now=mutation_at,
+            claim_token=job["claim_token"],
+            enter_mutation=True,
+        )
+        mark_reconciliation_required(
+            db,
+            job["id"],
+            error_code="provider_timeout",
+            required_at=mutation_at,
+            claim_token=job["claim_token"],
+        )
+        # A later read-only sync and dashboard observation prove the original
+        # assignment is still present with the same dashboard identity.
+        db.execute(
+            "UPDATE provider_assignments SET last_seen_at=?, dashboard_observed_at=?, "
+            "dashboard_assignment_id='dashboard-1', dashboard_eligible=1, dashboard_connections=10, "
+            "dashboard_source='provider_dashboard' WHERE subscription_id=?",
+            (observed_at.isoformat(), observed_at.isoformat(), sub_id),
+        )
+        db.commit()
+
+        result = reconcile_provider_applied_swaps(db, now=observed_at)
+        stored = db.execute(
+            "SELECT state,reason,error_code,claim_token,claimed_until FROM swap_jobs WHERE id=?",
+            (job["id"],),
+        ).fetchone()
+
+    assert result["reconciled_no_provider_change"] == 1
+    assert tuple(stored) == ("blocked", "reconciled_no_provider_change", "provider_timeout", None, None)
+
+
+def test_reconciliation_required_keeps_job_pending_when_new_candidate_coexists_with_old(app):
+    mutation_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    observed_at = mutation_at + timedelta(minutes=1)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db)
+        set_setting(db, "proxiware_auto_swap", "1")
+        assert queue_eligible_swaps(db, now=mutation_at) == 1
+        job = claim_next_swap(db, now=mutation_at)
+        revalidate_swap_job(
+            db,
+            job["id"],
+            now=mutation_at,
+            claim_token=job["claim_token"],
+            enter_mutation=True,
+        )
+        mark_reconciliation_required(
+            db,
+            job["id"],
+            error_code="provider_timeout",
+            required_at=mutation_at,
+            claim_token=job["claim_token"],
+        )
+        db.execute(
+            "UPDATE provider_assignments SET dashboard_assignment_id='dashboard-1', dashboard_eligible=1, "
+            "dashboard_connections=10, dashboard_observed_at=?, dashboard_source='provider_dashboard', "
+            "last_seen_at=? WHERE subscription_id=? AND external_id='assignment-1'",
+            (observed_at.isoformat(), observed_at.isoformat(), sub_id),
+        )
+        _seed_replacement_evidence(db, sub_id, observed_at=observed_at)
+        db.commit()
+
+        result = reconcile_provider_applied_swaps(db, now=observed_at)
+        stored = db.execute("SELECT state FROM swap_jobs WHERE id=?", (job["id"],)).fetchone()
+
+    assert result["pending"] == 1
+    assert stored["state"] == "reconciliation_required"
+
+
+def test_reconciliation_required_keeps_job_pending_when_existing_other_assignment_is_refreshed(app):
+    mutation_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    observed_at = mutation_at + timedelta(minutes=1)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db)
+        db.execute("UPDATE provider_subscriptions SET quantity=2 WHERE id=?", (sub_id,))
+        set_setting(db, "proxiware_auto_swap", "1")
+        assert queue_eligible_swaps(db, now=mutation_at) == 1
+        job = claim_next_swap(db, now=mutation_at)
+        revalidate_swap_job(
+            db,
+            job["id"],
+            now=mutation_at,
+            claim_token=job["claim_token"],
+            enter_mutation=True,
+        )
+        mark_reconciliation_required(
+            db,
+            job["id"],
+            error_code="provider_timeout",
+            required_at=mutation_at,
+            claim_token=job["claim_token"],
+        )
+        db.execute(
+            "UPDATE provider_assignments SET dashboard_assignment_id='dashboard-1', dashboard_eligible=1, "
+            "dashboard_connections=10, dashboard_observed_at=?, dashboard_source='provider_dashboard', "
+            "last_seen_at=? WHERE subscription_id=? AND external_id='assignment-1'",
+            (observed_at.isoformat(), observed_at.isoformat(), sub_id),
+        )
+        _seed_replacement_evidence(db, sub_id, observed_at=observed_at)
+        db.execute(
+            "UPDATE provider_assignments SET created_at=? WHERE external_id='assignment-2'",
+            ((mutation_at - timedelta(days=1)).isoformat(),),
+        )
+        db.commit()
+
+        result = reconcile_provider_applied_swaps(db, now=observed_at)
+        stored = db.execute("SELECT state FROM swap_jobs WHERE id=?", (job["id"],)).fetchone()
+
+    assert result["pending"] == 1
+    assert stored["state"] == "reconciliation_required"
+
+
+def test_reconciliation_required_does_not_close_unchanged_multi_assignment_subscription(app):
+    mutation_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    observed_at = mutation_at + timedelta(minutes=1)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db)
+        db.execute("UPDATE provider_subscriptions SET quantity=2 WHERE id=?", (sub_id,))
+        set_setting(db, "proxiware_auto_swap", "1")
+        assert queue_eligible_swaps(db, now=mutation_at) == 1
+        job = claim_next_swap(db, now=mutation_at)
+        revalidate_swap_job(
+            db,
+            job["id"],
+            now=mutation_at,
+            claim_token=job["claim_token"],
+            enter_mutation=True,
+        )
+        mark_reconciliation_required(
+            db,
+            job["id"],
+            error_code="provider_timeout",
+            required_at=mutation_at,
+            claim_token=job["claim_token"],
+        )
+        db.execute(
+            "UPDATE provider_assignments SET dashboard_assignment_id='dashboard-1', dashboard_eligible=1, "
+            "dashboard_connections=10, dashboard_observed_at=?, dashboard_source='provider_dashboard', "
+            "last_seen_at=? WHERE subscription_id=?",
+            (observed_at.isoformat(), observed_at.isoformat(), sub_id),
+        )
+        db.commit()
+
+        result = reconcile_provider_applied_swaps(db, now=observed_at)
+        stored = db.execute("SELECT state FROM swap_jobs WHERE id=?", (job["id"],)).fetchone()
+
+    assert result["pending"] == 1
+    assert stored["state"] == "reconciliation_required"
+
+
+def test_reconciliation_required_does_not_release_on_stale_no_change_evidence(app):
+    mutation_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    evidence_at = mutation_at + timedelta(minutes=1)
+    reconciled_at = mutation_at + timedelta(hours=1)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db)
+        set_setting(db, "proxiware_dashboard_max_age_seconds", "300")
+        set_setting(db, "proxiware_auto_swap", "1")
+        assert queue_eligible_swaps(db, now=mutation_at) == 1
+        job = claim_next_swap(db, now=mutation_at)
+        revalidate_swap_job(
+            db,
+            job["id"],
+            now=mutation_at,
+            claim_token=job["claim_token"],
+            enter_mutation=True,
+        )
+        mark_reconciliation_required(
+            db,
+            job["id"],
+            error_code="provider_timeout",
+            required_at=mutation_at,
+            claim_token=job["claim_token"],
+        )
+        db.execute(
+            "UPDATE provider_assignments SET dashboard_assignment_id='dashboard-1', dashboard_eligible=1, "
+            "dashboard_connections=10, dashboard_observed_at=?, dashboard_source='provider_dashboard', "
+            "last_seen_at=? WHERE subscription_id=?",
+            (evidence_at.isoformat(), evidence_at.isoformat(), sub_id),
+        )
+        db.commit()
+
+        result = reconcile_provider_applied_swaps(db, now=reconciled_at)
+        stored = db.execute("SELECT state FROM swap_jobs WHERE id=?", (job["id"],)).fetchone()
+
+    assert result["pending"] == 1
+    assert stored["state"] == "reconciliation_required"
+
+
+def test_reconciliation_required_can_finalize_after_fresh_replacement_evidence(app):
+    mutation_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    observed_at = mutation_at + timedelta(minutes=1)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db)
+        set_setting(db, "proxiware_auto_swap", "1")
+        assert queue_eligible_swaps(db, now=mutation_at) == 1
+        job = claim_next_swap(db, now=mutation_at)
+        revalidate_swap_job(
+            db,
+            job["id"],
+            now=mutation_at,
+            claim_token=job["claim_token"],
+            enter_mutation=True,
+        )
+        mark_reconciliation_required(
+            db,
+            job["id"],
+            error_code="provider_timeout",
+            required_at=mutation_at,
+            claim_token=job["claim_token"],
+        )
+        db.execute(
+            "UPDATE provider_assignments SET missing_at=?, status='missing' WHERE external_id='assignment-1'",
+            (observed_at.isoformat(),),
+        )
+        db.execute(
+            "UPDATE swap_jobs SET mutation_new_assignment_external_id='assignment-2' WHERE id=?",
+            (job["id"],),
+        )
+        _seed_replacement_evidence(db, sub_id, observed_at=observed_at)
+        db.commit()
+
+        result = reconcile_provider_applied_swaps(db, now=observed_at)
+        stored = db.execute("SELECT state,new_assignment_id FROM swap_jobs WHERE id=?", (job["id"],)).fetchone()
+
+    assert result["success"] == 1
+    assert tuple(stored) == ("success", stored["new_assignment_id"])
+    assert stored["new_assignment_id"] is not None
+
+
+def test_reconciliation_required_resolves_single_fresh_replacement_without_provider_response(app):
+    mutation_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    observed_at = mutation_at + timedelta(minutes=1)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db)
+        set_setting(db, "proxiware_auto_swap", "1")
+        assert queue_eligible_swaps(db, now=mutation_at) == 1
+        job = claim_next_swap(db, now=mutation_at)
+        revalidate_swap_job(
+            db,
+            job["id"],
+            now=mutation_at,
+            claim_token=job["claim_token"],
+            enter_mutation=True,
+        )
+        mark_reconciliation_required(
+            db,
+            job["id"],
+            error_code="provider_timeout",
+            required_at=mutation_at,
+            claim_token=job["claim_token"],
+        )
+        db.execute(
+            "UPDATE provider_assignments SET missing_at=?, status='missing' WHERE external_id='assignment-1'",
+            (observed_at.isoformat(),),
+        )
+        db.execute(
+            "UPDATE provider_subscriptions SET last_seen_at=? WHERE id=?",
+            (observed_at.isoformat(), sub_id),
+        )
+        _seed_replacement_evidence(db, sub_id, observed_at=observed_at)
+        db.commit()
+
+        result = reconcile_provider_applied_swaps(db, now=observed_at)
+        stored = db.execute("SELECT state,new_assignment_id FROM swap_jobs WHERE id=?", (job["id"],)).fetchone()
+
+    assert result["success"] == 1
+    assert stored["state"] == "success"
+    assert stored["new_assignment_id"] is not None
+
+
+def test_reconciliation_required_does_not_infer_refreshed_old_candidate_as_replacement(app):
+    mutation_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    observed_at = mutation_at + timedelta(minutes=1)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db)
+        set_setting(db, "proxiware_auto_swap", "1")
+        assert queue_eligible_swaps(db, now=mutation_at) == 1
+        job = claim_next_swap(db, now=mutation_at)
+        revalidate_swap_job(
+            db,
+            job["id"],
+            now=mutation_at,
+            claim_token=job["claim_token"],
+            enter_mutation=True,
+        )
+        mark_reconciliation_required(
+            db,
+            job["id"],
+            error_code="provider_timeout",
+            required_at=mutation_at,
+            claim_token=job["claim_token"],
+        )
+        db.execute(
+            "UPDATE provider_assignments SET missing_at=?, status='missing' WHERE external_id='assignment-1'",
+            (observed_at.isoformat(),),
+        )
+        db.execute(
+            "UPDATE provider_subscriptions SET last_seen_at=? WHERE id=?",
+            (observed_at.isoformat(), sub_id),
+        )
+        _seed_replacement_evidence(db, sub_id, observed_at=observed_at)
+        db.execute(
+            "UPDATE provider_assignments SET created_at=? WHERE external_id='assignment-2'",
+            ((mutation_at - timedelta(days=1)).isoformat(),),
+        )
+        db.commit()
+
+        result = reconcile_provider_applied_swaps(db, now=observed_at)
+        stored = db.execute("SELECT state,new_assignment_id FROM swap_jobs WHERE id=?", (job["id"],)).fetchone()
+
+    assert result["pending"] == 1
+    assert stored["state"] == "reconciliation_required"
+    assert stored["new_assignment_id"] is None
 
 
 def test_auto_swap_is_disabled_by_default(app):

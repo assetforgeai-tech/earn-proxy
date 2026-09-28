@@ -152,6 +152,31 @@ def test_proxiware_swap_history_is_separate_from_actionable_queue(client, db):
     assert "Retry" not in page
 
 
+def test_proxiware_swap_workspace_exposes_reconciliation_required_count(client, db):
+    from datetime import UTC, datetime
+
+    ensure_proxiware_swap_schema(db)
+    now = datetime.now(UTC).isoformat()
+    db.execute(
+        "INSERT INTO provider_subscriptions(provider,external_id,status,created_at,updated_at) "
+        "VALUES('proxiware','reconciliation-sub','active',?,?)",
+        (now, now),
+    )
+    subscription_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.execute(
+        "INSERT INTO swap_jobs(provider,subscription_id,state,reason,created_at,updated_at) "
+        "VALUES('proxiware',?,'reconciliation_required','reconciliation_required',?,?)",
+        (subscription_id, now, now),
+    )
+    db.commit()
+
+    login_admin(client)
+    page = client.get("/admin/providers/proxiware/swaps").get_data(as_text=True)
+
+    assert "Reconciliation required" in page
+    assert "1 job" in page
+
+
 def test_proxiware_inventory_exposes_server_side_controls(client):
     login_admin(client)
     page = client.get(
