@@ -72,6 +72,20 @@ provider distribution disabled. If the session is rejected, the worker returns
 5. Confirm auto-swap is `OFF`.
 6. Confirm no credentials appear in HTML, logs, SQL results, or query strings.
 
+For a direct read-only heartbeat check on a production database, use the
+database-only mode. It opens SQLite read-only and does not load application or
+provider secrets:
+
+```bash
+python scripts/proxiware_healthcheck.py sync_worker \
+  --database /var/lib/earn-proxy/earn-proxy.db
+```
+
+Use `browser_worker`, `qualification_worker`, or `swap_worker` for the other
+workers. Set `EARN_PROXY_PROXIWARE_BROWSER_ENABLED=0` only when intentionally
+checking a disabled browser worker; an omitted flag lets the persisted worker
+state decide the result.
+
 ## Normal operation
 
 Use `Admin -> Providers -> Proxiware`:

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -55,25 +58,47 @@ def check_worker_health(
 
 
 def main() -> int:
-    from app import create_app
-    from app.db import get_db
-
     parser = argparse.ArgumentParser(description="Check a Proxiware worker heartbeat")
     parser.add_argument("worker")
     parser.add_argument("--max-age-seconds", type=int, default=600)
+    parser.add_argument("--database", type=Path, help="Read a SQLite database without loading application secrets")
     args = parser.parse_args()
-    app = create_app()
-    with app.app_context():
-        result = check_worker_health(
-            get_db(),
-            args.worker,
-            max_age_seconds=args.max_age_seconds,
-            configured_enabled=(
-                bool(app.config.get("PROXIWARE_BROWSER_ENABLED", False))
-                if str(args.worker).strip().lower().replace("-", "_") == "browser_worker"
-                else None
-            ),
-        )
+    if args.database is not None:
+        database = args.database.expanduser().resolve()
+        uri = f"file:{database.as_posix()}?mode=ro"
+        browser_enabled = None
+        if (
+            str(args.worker).strip().lower().replace("-", "_") == "browser_worker"
+            and "EARN_PROXY_PROXIWARE_BROWSER_ENABLED" in os.environ
+        ):
+            browser_enabled = os.environ["EARN_PROXY_PROXIWARE_BROWSER_ENABLED"] == "1"
+        connection = sqlite3.connect(uri, uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            result = check_worker_health(
+                connection,
+                args.worker,
+                max_age_seconds=args.max_age_seconds,
+                configured_enabled=browser_enabled,
+            )
+        finally:
+            connection.close()
+    else:
+        from app import create_app
+        from app.db import get_db
+
+        app = create_app()
+        with app.app_context():
+            result = check_worker_health(
+                get_db(),
+                args.worker,
+                max_age_seconds=args.max_age_seconds,
+                configured_enabled=(
+                    bool(app.config.get("PROXIWARE_BROWSER_ENABLED", False))
+                    if str(args.worker).strip().lower().replace("-", "_") == "browser_worker"
+                    else None
+                ),
+            )
     print(result.reason)
     return 0 if result.ok else 1
 

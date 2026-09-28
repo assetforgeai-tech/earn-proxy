@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import sqlite3
+import sys
 from datetime import UTC, datetime, timedelta
 
 from app.db import get_db
 from app.services.proxiware_health import record_worker_heartbeat
-from scripts.proxiware_healthcheck import check_worker_health
+from scripts.proxiware_healthcheck import check_worker_health, main
 
 
 def test_worker_healthcheck_accepts_recent_heartbeat(app):
@@ -111,3 +113,43 @@ def test_worker_healthcheck_rejects_stopped_worker(app):
 
     assert result.ok is False
     assert result.reason == "stopped"
+
+
+def test_healthcheck_cli_reads_database_without_application_secrets(tmp_path, monkeypatch, capsys):
+    database = tmp_path / "health.db"
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    now = datetime.now(UTC).isoformat()
+    connection.executemany(
+        "INSERT INTO settings(key,value) VALUES(?,?)",
+        [("proxiware_sync_worker_status", "ok"), ("proxiware_sync_worker_heartbeat_at", now)],
+    )
+    connection.commit()
+    connection.close()
+
+    monkeypatch.delenv("EARN_PROXY_SECRET_KEY", raising=False)
+    monkeypatch.delenv("EARN_PROXY_FERNET_KEY", raising=False)
+    monkeypatch.delenv("EARN_PROXY_PROXIWARE_WORKER_FERNET_KEY", raising=False)
+    monkeypatch.setattr(sys, "argv", ["proxiware_healthcheck", "sync_worker", "--database", str(database)])
+
+    assert main() == 0
+    assert capsys.readouterr().out.strip() == "ok"
+
+
+def test_healthcheck_cli_does_not_assume_browser_disabled_without_config(tmp_path, monkeypatch, capsys):
+    database = tmp_path / "health.db"
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    now = datetime.now(UTC).isoformat()
+    connection.executemany(
+        "INSERT INTO settings(key,value) VALUES(?,?)",
+        [("proxiware_browser_worker_status", "sleeping"), ("proxiware_browser_worker_heartbeat_at", now)],
+    )
+    connection.commit()
+    connection.close()
+
+    monkeypatch.delenv("EARN_PROXY_PROXIWARE_BROWSER_ENABLED", raising=False)
+    monkeypatch.setattr(sys, "argv", ["proxiware_healthcheck", "browser_worker", "--database", str(database)])
+
+    assert main() == 0
+    assert capsys.readouterr().out.strip() == "ok"
