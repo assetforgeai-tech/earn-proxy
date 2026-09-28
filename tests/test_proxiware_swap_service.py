@@ -45,6 +45,17 @@ def _queue(app):
         return sub_id
 
 
+def test_safe_swap_error_preserves_provider_response_codes():
+    from app.proxiware_swap_service import safe_swap_error
+    from app.services.proxiware_browser import BrowserProviderResponseError
+
+    assert safe_swap_error(BrowserProviderResponseError("provider_mutation_rejected")) == "provider_mutation_rejected"
+    assert (
+        safe_swap_error(BrowserProviderResponseError("provider_response_unconfirmed"))
+        == "provider_response_unconfirmed"
+    )
+
+
 def test_swap_runner_waits_for_read_only_reconciliation_after_provider_response(app):
     from app.proxiware_swap_service import ProxiwareSwapRunner
 

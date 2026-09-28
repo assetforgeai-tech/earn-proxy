@@ -33,11 +33,12 @@ from app.services.proxiware_swap import (
 from app.services.settings import get_setting
 
 logger = logging.getLogger(__name__)
+PROVIDER_RESPONSE_CODES = frozenset({"provider_mutation_rejected", "provider_response_unconfirmed"})
 
 
 def safe_swap_error(exc: BaseException) -> str:
     code = str(getattr(exc, "error_code", "") or "").strip().lower()
-    if code in MANUAL_ACTION_CODES:
+    if code in MANUAL_ACTION_CODES or code in PROVIDER_RESPONSE_CODES:
         return code
     message = str(exc).lower()
     for candidate in MANUAL_ACTION_CODES:

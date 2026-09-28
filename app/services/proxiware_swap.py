@@ -41,6 +41,8 @@ SAFE_ERROR_CODES = frozenset(
         "stock_unavailable",
         "provider_forbidden",
         "provider_conflict",
+        "provider_mutation_rejected",
+        "provider_response_unconfirmed",
         "provider_timeout",
         "provider_error",
         "dashboard_stale",
