@@ -353,16 +353,21 @@ def _proxiware_snapshot(db, area: str, args) -> dict[str, object]:
             ).fetchone()["count"]
         )
         summary["all"] = summary["assignments"]
-        for state, key in (("live", "live"), ("online", "live"), ("offline", "dead")):
-            if "live_status" in assignment_columns:
-                summary[key] = int(
-                    db.execute(
-                        f"SELECT COUNT(*) AS count FROM {assignment_table} WHERE {provider_clause} AND LOWER(COALESCE(live_status,'')) IN (?,?)"
-                        if state == "live"
-                        else f"SELECT COUNT(*) AS count FROM {assignment_table} WHERE {provider_clause} AND LOWER(COALESCE(live_status,''))=?",
-                        (*provider_params, "live", "online") if state == "live" else (*provider_params, state),
-                    ).fetchone()["count"]
-                )
+        if "live_status" in assignment_columns:
+            summary["live"] = int(
+                db.execute(
+                    f"SELECT COUNT(*) AS count FROM {assignment_table} WHERE {provider_clause} "
+                    "AND LOWER(COALESCE(live_status,'')) IN (?,?)",
+                    (*provider_params, "live", "online"),
+                ).fetchone()["count"]
+            )
+            summary["dead"] = int(
+                db.execute(
+                    f"SELECT COUNT(*) AS count FROM {assignment_table} WHERE {provider_clause} "
+                    "AND LOWER(COALESCE(live_status,'')) IN (?,?)",
+                    (*provider_params, "dead", "offline"),
+                ).fetchone()["count"]
+            )
         if "qualification" in assignment_columns:
             for state in ("allow", "risk", "pending"):
                 summary[state] = int(

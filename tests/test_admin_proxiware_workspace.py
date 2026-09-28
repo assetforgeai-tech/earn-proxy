@@ -253,8 +253,31 @@ def test_proxiware_overview_counts_canonical_live_status(client, db):
     )
     db.commit()
     page = client.get("/admin/providers/proxiware/inventory").get_data(as_text=True)
+    overview = client.get("/admin/providers/proxiware").get_data(as_text=True)
     # The canonical worker value is live, while the UI label is Online.
     assert ">Online</span>" in page
+    assert "<article><span>Live</span><strong>1</strong>" in overview
+
+
+def test_proxiware_overview_counts_canonical_dead_status(client, db):
+    login_admin(client)
+    ensure_proxiware_swap_schema(db)
+    now = "2026-09-25T00:00:00+00:00"
+    db.execute(
+        "INSERT INTO provider_subscriptions(provider,external_id,status,created_at,updated_at) VALUES('proxiware','dead-count-sub','active',?,?)",
+        (now, now),
+    )
+    subscription_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.execute(
+        "INSERT INTO provider_assignments(subscription_id,provider,external_id,host,port,live_status,qualification,created_at,updated_at) "
+        "VALUES(?,?,?,'dead-count.example',8080,'dead','risk',?,?)",
+        (subscription_id, "proxiware", "dead-count-assignment", now, now),
+    )
+    db.commit()
+
+    page = client.get("/admin/providers/proxiware/inventory").get_data(as_text=True)
+
+    assert "<span>Dead</span><strong>1</strong>" in page
 
 
 def test_proxiware_inventory_all_count_matches_assignment_count(client, db):
