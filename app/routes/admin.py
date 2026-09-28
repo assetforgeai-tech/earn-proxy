@@ -352,6 +352,7 @@ def _proxiware_snapshot(db, area: str, args) -> dict[str, object]:
                 f"SELECT COUNT(*) AS count FROM {assignment_table} WHERE {provider_clause}", provider_params
             ).fetchone()["count"]
         )
+        summary["all"] = summary["assignments"]
         for state, key in (("live", "live"), ("online", "live"), ("offline", "dead")):
             if "live_status" in assignment_columns:
                 summary[key] = int(

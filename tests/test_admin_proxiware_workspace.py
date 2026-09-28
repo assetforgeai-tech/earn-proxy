@@ -257,6 +257,28 @@ def test_proxiware_overview_counts_canonical_live_status(client, db):
     assert ">Online</span>" in page
 
 
+def test_proxiware_inventory_all_count_matches_assignment_count(client, db):
+    login_admin(client)
+    ensure_proxiware_swap_schema(db)
+    now = "2026-09-25T00:00:00+00:00"
+    db.execute(
+        "INSERT INTO provider_subscriptions(provider,external_id,status,created_at,updated_at) VALUES('proxiware','all-count-sub','active',?,?)",
+        (now, now),
+    )
+    subscription_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.execute(
+        "INSERT INTO provider_assignments(subscription_id,provider,external_id,host,port,live_status,qualification,created_at,updated_at) "
+        "VALUES(?,?,?,'all-count.example',8080,'live','risk',?,?)",
+        (subscription_id, "proxiware", "all-count-assignment", now, now),
+    )
+    db.commit()
+
+    page = client.get("/admin/providers/proxiware/inventory").get_data(as_text=True)
+
+    assert 'class="inventory-count all"' in page
+    assert "<span>All</span><strong>1</strong>" in page
+
+
 def test_proxiware_online_filter_matches_canonical_live_value(client, db):
     login_admin(client)
     ensure_proxiware_swap_schema(db)
