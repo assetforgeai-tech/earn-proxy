@@ -82,6 +82,55 @@ def test_runtime_observation_uses_disabled_adapter_over_old_browser_heartbeat(tm
     assert observation["heartbeats"]["browser_worker"]["reason"] == "disabled"
 
 
+def test_adapter_state_reads_safe_worker_env_files_when_process_env_is_empty(tmp_path, monkeypatch):
+    from scripts import proxiware_preflight
+
+    for key in proxiware_preflight.ADAPTER_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("EARN_PROXY_PROXIWARE_BROWSER_ENABLED", "0")
+    monkeypatch.setenv("EARN_PROXY_PROXIWARE_BROWSER_ALLOW_MUTATION", "1")
+    worker_env = tmp_path / "worker.env"
+    browser_env = tmp_path / "browser.env"
+    binary = tmp_path / "google-chrome"
+    binary.write_text("", encoding="utf-8")
+    profile_root = tmp_path / "runtime"
+    profile_dir = profile_root / "profile"
+    profile_dir.mkdir(parents=True)
+    worker_env.write_text(
+        "\n".join(
+            [
+                "EARN_PROXY_PROXIWARE_BROWSER_ENABLED=1",
+                "EARN_PROXY_PROXIWARE_BROWSER_ALLOW_MUTATION=0",
+                "EARN_PROXY_PROXIWARE_CDP_URL=http://127.0.0.1:9222",
+                "EARN_PROXY_PROXIWARE_API_KEY=must-not-appear",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    browser_env.write_text(
+        "\n".join(
+            [
+                "EARN_PROXY_PROXIWARE_CHROME_ENABLED=1",
+                f"EARN_PROXY_PROXIWARE_CHROME_BINARY={binary}",
+                f"EARN_PROXY_PROXIWARE_CHROME_PROFILE_ROOT={profile_root}",
+                f"EARN_PROXY_PROXIWARE_CHROME_PROFILE_DIR={profile_dir}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(proxiware_preflight, "PROXIWARE_SAFE_ENV_FILES", (worker_env, browser_env))
+    monkeypatch.setattr(proxiware_preflight.os, "access", lambda _path, _mode: True)
+
+    state = proxiware_preflight._adapter_state()
+
+    assert state["state"] == "enabled"
+    assert state["chrome_enabled"] is True
+    assert state["mutation_allowed"] is False
+    assert state["cdp_loopback"] is True
+    assert state["profile_isolated"] is True
+    assert "must-not-appear" not in json.dumps(state)
+
+
 def test_preflight_is_redacted_and_keeps_mutations_disabled(tmp_path):
     report = run_preflight(tmp_path / "preflight.db")
 

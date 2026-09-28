@@ -37,6 +37,20 @@ PROVIDER_SERVICES = (
     "earn-proxy-proxiware-browser",
 )
 WORKERS = ("sync_worker", "qualification_worker", "swap_worker", "browser_worker")
+ADAPTER_ENV_KEYS = (
+    "EARN_PROXY_PROXIWARE_BROWSER_ENABLED",
+    "EARN_PROXY_PROXIWARE_BROWSER_DRY_RUN",
+    "EARN_PROXY_PROXIWARE_BROWSER_ALLOW_MUTATION",
+    "EARN_PROXY_PROXIWARE_CDP_URL",
+    "EARN_PROXY_PROXIWARE_CHROME_ENABLED",
+    "EARN_PROXY_PROXIWARE_CHROME_BINARY",
+    "EARN_PROXY_PROXIWARE_CHROME_PROFILE_ROOT",
+    "EARN_PROXY_PROXIWARE_CHROME_PROFILE_DIR",
+)
+PROXIWARE_SAFE_ENV_FILES = (
+    Path("/etc/earn-proxy-proxiware-worker.env"),
+    Path("/etc/earn-proxy-browser.env"),
+)
 
 
 def _tables(db) -> set[str]:
@@ -206,8 +220,28 @@ def _health_state(url: str) -> dict[str, object]:
         return {"ok": False, "code": "unreachable"}
 
 
+def _safe_adapter_env() -> dict[str, str]:
+    """Read only non-secret adapter flags from the process or safe env files."""
+
+    values: dict[str, str] = {}
+    for env_file in PROXIWARE_SAFE_ENV_FILES:
+        try:
+            lines = env_file.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            key, separator, value = line.partition("=")
+            if separator and key.strip() in ADAPTER_ENV_KEYS and key.strip() not in values:
+                values[key.strip()] = value.strip().strip('"').strip("'")
+    for key in ADAPTER_ENV_KEYS:
+        if key not in values and key in os.environ:
+            values[key] = str(os.environ[key])
+    return values
+
+
 def _adapter_state() -> dict[str, object]:
-    endpoint = str(os.environ.get("EARN_PROXY_PROXIWARE_CDP_URL") or "http://127.0.0.1:9222").strip()
+    env = _safe_adapter_env()
+    endpoint = str(env.get("EARN_PROXY_PROXIWARE_CDP_URL") or "http://127.0.0.1:9222").strip()
     parsed = urlparse(endpoint)
     loopback = parsed.scheme in {"http", "https"} and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
     try:
@@ -215,13 +249,13 @@ def _adapter_state() -> dict[str, object]:
     except ValueError:
         port = 0
     loopback = loopback and 1 <= port <= 65535
-    enabled = os.environ.get("EARN_PROXY_PROXIWARE_BROWSER_ENABLED", "0") == "1"
-    dry_run = os.environ.get("EARN_PROXY_PROXIWARE_BROWSER_DRY_RUN", "0") == "1"
-    mutation = os.environ.get("EARN_PROXY_PROXIWARE_BROWSER_ALLOW_MUTATION", "0") == "1"
-    chrome_enabled = os.environ.get("EARN_PROXY_PROXIWARE_CHROME_ENABLED", "0") == "1"
-    binary = Path(os.environ.get("EARN_PROXY_PROXIWARE_CHROME_BINARY", "/usr/bin/google-chrome"))
-    profile_root = Path(os.environ.get("EARN_PROXY_PROXIWARE_CHROME_PROFILE_ROOT", "/run/earn-proxy-browser"))
-    profile_dir = Path(os.environ.get("EARN_PROXY_PROXIWARE_CHROME_PROFILE_DIR", "/run/earn-proxy-browser/profile"))
+    enabled = env.get("EARN_PROXY_PROXIWARE_BROWSER_ENABLED", "0") == "1"
+    dry_run = env.get("EARN_PROXY_PROXIWARE_BROWSER_DRY_RUN", "0") == "1"
+    mutation = env.get("EARN_PROXY_PROXIWARE_BROWSER_ALLOW_MUTATION", "0") == "1"
+    chrome_enabled = env.get("EARN_PROXY_PROXIWARE_CHROME_ENABLED", "0") == "1"
+    binary = Path(env.get("EARN_PROXY_PROXIWARE_CHROME_BINARY", "/usr/bin/google-chrome"))
+    profile_root = Path(env.get("EARN_PROXY_PROXIWARE_CHROME_PROFILE_ROOT", "/run/earn-proxy-browser"))
+    profile_dir = Path(env.get("EARN_PROXY_PROXIWARE_CHROME_PROFILE_DIR", "/run/earn-proxy-browser/profile"))
     binary_exists = binary.is_file()
     binary_executable = binary_exists and os.access(binary, os.X_OK)
     try:
