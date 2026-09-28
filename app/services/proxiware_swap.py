@@ -1270,6 +1270,38 @@ def mark_swap_success(
         )
 
 
+def _fresh_dashboard_snapshot_covers_subscription(db, job, *, mutation_at: datetime, now: datetime) -> bool:
+    rows = db.execute(
+        "SELECT last_seen_at,dashboard_observed_at,dashboard_source FROM provider_assignments "
+        "WHERE provider=? AND subscription_id=? AND missing_at IS NULL AND status IN ('active','current')",
+        (PROVIDER, int(job["subscription_id"])),
+    ).fetchall()
+    if not rows:
+        return False
+    try:
+        max_age = max(
+            60,
+            int(get_setting(db, "proxiware_dashboard_max_age_seconds", str(DEFAULT_DASHBOARD_MAX_AGE_SECONDS))),
+        )
+    except (TypeError, ValueError):
+        max_age = DEFAULT_DASHBOARD_MAX_AGE_SECONDS
+    for row in rows:
+        synced_at = _parse_timestamp(row["last_seen_at"])
+        observed_at = _parse_timestamp(row["dashboard_observed_at"])
+        if synced_at is None or observed_at is None or synced_at <= mutation_at or observed_at <= mutation_at:
+            return False
+        if str(row["dashboard_source"] or "") != "provider_dashboard":
+            return False
+        if (
+            now - observed_at > timedelta(seconds=max_age)
+            or observed_at - now > timedelta(seconds=60)
+            or now - synced_at > timedelta(seconds=max_age)
+            or synced_at - now > timedelta(seconds=60)
+        ):
+            return False
+    return True
+
+
 def _reconcile_no_provider_change(db, job, *, now: datetime) -> bool:
     """Close an uncertain job only when later read-only evidence proves no swap."""
 
@@ -1278,6 +1310,8 @@ def _reconcile_no_provider_change(db, job, *, now: datetime) -> bool:
     old_address = str(job["mutation_old_assignment_address"] or "").strip()
     old_dashboard_id = str(job["mutation_dashboard_assignment_id"] or "").strip()
     if mutation_at is None or not old_external or not old_address or not old_dashboard_id:
+        return False
+    if not _fresh_dashboard_snapshot_covers_subscription(db, job, mutation_at=mutation_at, now=now):
         return False
     try:
         old_host, old_port, _ = _validated_address(old_address)
@@ -1288,51 +1322,10 @@ def _reconcile_no_provider_change(db, job, *, now: datetime) -> bool:
         return False
     if str(old["host"] or "").strip().lower() != old_host or int(old["port"] or 0) != old_port:
         return False
-    synced_at = _parse_timestamp(old["last_seen_at"])
-    observed_at = _parse_timestamp(old["dashboard_observed_at"])
-    if synced_at is None or observed_at is None or synced_at <= mutation_at or observed_at <= mutation_at:
-        return False
-    try:
-        max_age = max(
-            60,
-            int(get_setting(db, "proxiware_dashboard_max_age_seconds", str(DEFAULT_DASHBOARD_MAX_AGE_SECONDS))),
-        )
-    except (TypeError, ValueError):
-        max_age = DEFAULT_DASHBOARD_MAX_AGE_SECONDS
-    if (
-        now - observed_at > timedelta(seconds=max_age)
-        or observed_at - now > timedelta(seconds=60)
-        or now - synced_at > timedelta(seconds=max_age)
-        or synced_at - now > timedelta(seconds=60)
-    ):
-        return False
     if str(old["dashboard_assignment_id"] or "").strip() != old_dashboard_id:
         return False
     if str(old["dashboard_source"] or "") != "provider_dashboard":
         return False
-    subscription = db.execute(
-        "SELECT quantity FROM provider_subscriptions WHERE id=? AND provider=?",
-        (int(job["subscription_id"]), PROVIDER),
-    ).fetchone()
-    # With multiple provider slots, an unchanged old row cannot prove which
-    # slot the provider may have replaced during the uncertain mutation.
-    if subscription is None or int(subscription["quantity"] or 0) != 1:
-        return False
-    fresh_other = db.execute(
-        "SELECT last_seen_at,dashboard_observed_at FROM provider_assignments "
-        "WHERE provider=? AND subscription_id=? AND external_id<>? AND missing_at IS NULL "
-        "AND status IN ('active','current')",
-        (PROVIDER, int(job["subscription_id"]), old_external),
-    ).fetchall()
-    for candidate in fresh_other:
-        candidate_times = (
-            _parse_timestamp(candidate["last_seen_at"]),
-            _parse_timestamp(candidate["dashboard_observed_at"]),
-        )
-        # Any second identity refreshed after the fence keeps the outcome
-        # ambiguous; it may be a replacement or a pre-existing assignment.
-        if all(value is not None and value > mutation_at for value in candidate_times):
-            return False
     with _write_transaction(db):
         cursor = db.execute(
             "UPDATE swap_jobs SET state='blocked', reason='reconciled_no_provider_change', "
@@ -1356,44 +1349,45 @@ def _reconcile_no_provider_change(db, job, *, now: datetime) -> bool:
     return True
 
 
-def _record_inferred_replacement(db, job) -> bool:
+def _record_inferred_replacement(db, job, *, now: datetime) -> bool:
     """Persist one unambiguous post-mutation assignment discovered read-only."""
 
     mutation_at = _parse_timestamp(job["provider_applied_at"] or job["mutation_started_at"])
     old_external = str(job["mutation_old_assignment_external_id"] or "").strip()
-    if mutation_at is None or not old_external:
+    old_dashboard_id = str(job["mutation_dashboard_assignment_id"] or "").strip()
+    if mutation_at is None or not old_external or not old_dashboard_id:
         return False
     old = _resolve_assignment(db, old_external)
     if old is not None and old["missing_at"] is None and str(old["status"] or "").lower() != "replaced":
         return False
     subscription = db.execute(
-        "SELECT quantity,last_seen_at FROM provider_subscriptions WHERE id=? AND provider=?",
+        "SELECT last_seen_at FROM provider_subscriptions WHERE id=? AND provider=?",
         (int(job["subscription_id"]), PROVIDER),
     ).fetchone()
-    if subscription is None or int(subscription["quantity"] or 0) != 1:
+    if subscription is None:
         return False
     subscription_seen_at = _parse_timestamp(subscription["last_seen_at"])
     if subscription_seen_at is None or subscription_seen_at <= mutation_at:
         return False
+    if not _fresh_dashboard_snapshot_covers_subscription(db, job, mutation_at=mutation_at, now=now):
+        return False
     rows = db.execute(
         "SELECT * FROM provider_assignments WHERE provider=? AND subscription_id=? "
-        "AND external_id<>? AND missing_at IS NULL AND status IN ('active','current') ORDER BY id",
-        (PROVIDER, int(job["subscription_id"]), old_external),
+        "AND external_id<>? AND dashboard_assignment_id=? AND missing_at IS NULL "
+        "AND status IN ('active','current') ORDER BY id",
+        (PROVIDER, int(job["subscription_id"]), old_external, old_dashboard_id),
     ).fetchall()
     candidates = []
     for row in rows:
-        created_at = _parse_timestamp(row["created_at"])
         synced_at = _parse_timestamp(row["last_seen_at"])
         observed_at = _parse_timestamp(row["dashboard_observed_at"])
         if (
-            created_at is not None
-            and created_at > mutation_at
-            and synced_at is not None
+            synced_at is not None
             and observed_at is not None
             and synced_at > mutation_at
             and observed_at > mutation_at
             and str(row["dashboard_source"] or "") == "provider_dashboard"
-            and str(row["dashboard_assignment_id"] or "").strip()
+            and str(row["dashboard_assignment_id"] or "").strip() == old_dashboard_id
         ):
             candidates.append(row)
     if len(candidates) != 1:
@@ -1431,7 +1425,7 @@ def reconcile_provider_applied_swaps(db, *, now: datetime | None = None, limit: 
             if _reconcile_no_provider_change(db, row, now=current):
                 result["reconciled_no_provider_change"] += 1
                 continue
-            if not _record_inferred_replacement(db, row):
+            if not _record_inferred_replacement(db, row, now=current):
                 result["pending"] += 1
                 continue
         try:

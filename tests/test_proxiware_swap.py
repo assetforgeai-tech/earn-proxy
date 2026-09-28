@@ -154,6 +154,7 @@ def _seed_replacement_evidence(
     observed_at,
     username="replacement-user",
     password="replacement-password",
+    dashboard_assignment_id="dashboard-new",
 ):
     timestamp = observed_at.isoformat()
     db.execute(
@@ -164,13 +165,14 @@ def _seed_replacement_evidence(
             dashboard_assignment_id,dashboard_eligible,dashboard_connections,dashboard_observed_at,
             dashboard_source,assigned_at,last_seen_at,created_at,updated_at
         ) VALUES(?, 'proxiware', ?, 'new.example', 1080, ?, ?, 'active', 'pending', 1,
-                 'pending', 'socks5', 0, 'dashboard-new', 1, 1, ?, 'provider_dashboard', ?, ?, ?, ?)
+                 'pending', 'socks5', 0, ?, 1, 1, ?, 'provider_dashboard', ?, ?, ?, ?)
         """,
         (
             subscription_id,
             external_id,
             encrypt_secret(username) if username else "",
             encrypt_secret(password) if password else "",
+            dashboard_assignment_id,
             timestamp,
             timestamp,
             timestamp,
@@ -617,7 +619,7 @@ def test_reconciliation_required_with_fresh_unchanged_identity_releases_subscrip
     assert tuple(stored) == ("blocked", "reconciled_no_provider_change", "provider_timeout", None, None)
 
 
-def test_reconciliation_required_keeps_job_pending_when_new_candidate_coexists_with_old(app):
+def test_reconciliation_required_ignores_unrelated_fresh_dashboard_assignment(app):
     mutation_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
     observed_at = mutation_at + timedelta(minutes=1)
     with app.app_context():
@@ -652,11 +654,11 @@ def test_reconciliation_required_keeps_job_pending_when_new_candidate_coexists_w
         result = reconcile_provider_applied_swaps(db, now=observed_at)
         stored = db.execute("SELECT state FROM swap_jobs WHERE id=?", (job["id"],)).fetchone()
 
-    assert result["pending"] == 1
-    assert stored["state"] == "reconciliation_required"
+    assert result["reconciled_no_provider_change"] == 1
+    assert stored["state"] == "blocked"
 
 
-def test_reconciliation_required_keeps_job_pending_when_existing_other_assignment_is_refreshed(app):
+def test_reconciliation_required_closes_unchanged_target_in_multi_assignment_subscription(app):
     mutation_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
     observed_at = mutation_at + timedelta(minutes=1)
     with app.app_context():
@@ -687,26 +689,21 @@ def test_reconciliation_required_keeps_job_pending_when_existing_other_assignmen
             (observed_at.isoformat(), observed_at.isoformat(), sub_id),
         )
         _seed_replacement_evidence(db, sub_id, observed_at=observed_at)
-        db.execute(
-            "UPDATE provider_assignments SET created_at=? WHERE external_id='assignment-2'",
-            ((mutation_at - timedelta(days=1)).isoformat(),),
-        )
         db.commit()
 
         result = reconcile_provider_applied_swaps(db, now=observed_at)
         stored = db.execute("SELECT state FROM swap_jobs WHERE id=?", (job["id"],)).fetchone()
 
-    assert result["pending"] == 1
-    assert stored["state"] == "reconciliation_required"
+    assert result["reconciled_no_provider_change"] == 1
+    assert stored["state"] == "blocked"
 
 
-def test_reconciliation_required_does_not_close_unchanged_multi_assignment_subscription(app):
+def test_reconciliation_required_keeps_pending_until_dashboard_covers_fresh_api_candidate(app):
     mutation_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
     observed_at = mutation_at + timedelta(minutes=1)
     with app.app_context():
         db = get_db()
         sub_id = _seed_subscription(db)
-        db.execute("UPDATE provider_subscriptions SET quantity=2 WHERE id=?", (sub_id,))
         set_setting(db, "proxiware_auto_swap", "1")
         assert queue_eligible_swaps(db, now=mutation_at) == 1
         job = claim_next_swap(db, now=mutation_at)
@@ -727,8 +724,14 @@ def test_reconciliation_required_does_not_close_unchanged_multi_assignment_subsc
         db.execute(
             "UPDATE provider_assignments SET dashboard_assignment_id='dashboard-1', dashboard_eligible=1, "
             "dashboard_connections=10, dashboard_observed_at=?, dashboard_source='provider_dashboard', "
-            "last_seen_at=? WHERE subscription_id=?",
+            "last_seen_at=? WHERE subscription_id=? AND external_id='assignment-1'",
             (observed_at.isoformat(), observed_at.isoformat(), sub_id),
+        )
+        _seed_replacement_evidence(db, sub_id, observed_at=observed_at)
+        db.execute(
+            "UPDATE provider_assignments SET dashboard_assignment_id=NULL, dashboard_observed_at=NULL, "
+            "dashboard_source='', last_seen_at=? WHERE external_id='assignment-2'",
+            (observed_at.isoformat(),),
         )
         db.commit()
 
@@ -852,7 +855,12 @@ def test_reconciliation_required_resolves_single_fresh_replacement_without_provi
             "UPDATE provider_subscriptions SET last_seen_at=? WHERE id=?",
             (observed_at.isoformat(), sub_id),
         )
-        _seed_replacement_evidence(db, sub_id, observed_at=observed_at)
+        _seed_replacement_evidence(
+            db,
+            sub_id,
+            observed_at=observed_at,
+            dashboard_assignment_id="dashboard-1",
+        )
         db.commit()
 
         result = reconcile_provider_applied_swaps(db, now=observed_at)
@@ -863,7 +871,7 @@ def test_reconciliation_required_resolves_single_fresh_replacement_without_provi
     assert stored["new_assignment_id"] is not None
 
 
-def test_reconciliation_required_does_not_infer_refreshed_old_candidate_as_replacement(app):
+def test_reconciliation_required_does_not_infer_replacement_with_different_dashboard_identity(app):
     mutation_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
     observed_at = mutation_at + timedelta(minutes=1)
     with app.app_context():
@@ -895,10 +903,6 @@ def test_reconciliation_required_does_not_infer_refreshed_old_candidate_as_repla
             (observed_at.isoformat(), sub_id),
         )
         _seed_replacement_evidence(db, sub_id, observed_at=observed_at)
-        db.execute(
-            "UPDATE provider_assignments SET created_at=? WHERE external_id='assignment-2'",
-            ((mutation_at - timedelta(days=1)).isoformat(),),
-        )
         db.commit()
 
         result = reconcile_provider_applied_swaps(db, now=observed_at)
