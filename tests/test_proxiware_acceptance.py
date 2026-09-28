@@ -82,6 +82,41 @@ def test_runtime_observation_uses_disabled_adapter_over_old_browser_heartbeat(tm
     assert observation["heartbeats"]["browser_worker"]["reason"] == "disabled"
 
 
+def test_runtime_observation_reads_public_domain_from_safe_env_file(tmp_path, monkeypatch):
+    from scripts import proxiware_preflight
+
+    monkeypatch.delenv("EARN_PROXY_DOMAIN", raising=False)
+    runtime_env = tmp_path / "earn-proxy.env"
+    runtime_env.write_text(
+        "EARN_PROXY_DOMAIN=proxy.example.test\nEARN_PROXY_SECRET_KEY=must-not-appear\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        proxiware_preflight,
+        "PUBLIC_HEALTH_SAFE_ENV_FILES",
+        (runtime_env,),
+        raising=False,
+    )
+    requested_urls: list[str] = []
+
+    def fake_health(url: str):
+        requested_urls.append(url)
+        return {"ok": bool(url), "code": "http_200" if url else "not_configured"}
+
+    monkeypatch.setattr(proxiware_preflight, "_health_state", fake_health)
+
+    observation = proxiware_preflight.collect_runtime_observation(
+        database_path=tmp_path / "missing.db",
+        backup_root=tmp_path / "backups",
+        local_health_url="",
+        public_health_url="",
+    )
+
+    assert requested_urls == ["", "https://proxy.example.test/healthz"]
+    assert observation["health"]["public"] == {"ok": True, "code": "http_200"}
+    assert "must-not-appear" not in json.dumps(observation)
+
+
 def test_adapter_state_reads_safe_worker_env_files_when_process_env_is_empty(tmp_path, monkeypatch):
     from scripts import proxiware_preflight
 

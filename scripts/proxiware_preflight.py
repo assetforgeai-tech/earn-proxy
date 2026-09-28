@@ -51,6 +51,7 @@ PROXIWARE_SAFE_ENV_FILES = (
     Path("/etc/earn-proxy-proxiware-worker.env"),
     Path("/etc/earn-proxy-browser.env"),
 )
+PUBLIC_HEALTH_SAFE_ENV_FILES = (Path("/etc/earn-proxy.env"),)
 
 
 def _tables(db) -> set[str]:
@@ -239,6 +240,38 @@ def _safe_adapter_env() -> dict[str, str]:
     return values
 
 
+def _safe_public_domain() -> str:
+    """Read only the non-secret public hostname needed by production health."""
+
+    candidate = str(os.environ.get("EARN_PROXY_DOMAIN") or "").strip()
+    if not candidate:
+        for env_file in PUBLIC_HEALTH_SAFE_ENV_FILES:
+            try:
+                lines = env_file.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                key, separator, value = line.partition("=")
+                if separator and key.strip() == "EARN_PROXY_DOMAIN":
+                    candidate = value.strip().strip('"').strip("'")
+                    break
+            if candidate:
+                break
+    parsed = urlparse(f"https://{candidate}")
+    if (
+        not candidate
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or parsed.netloc != candidate
+    ):
+        return ""
+    return candidate
+
+
 def _adapter_state() -> dict[str, object]:
     env = _safe_adapter_env()
     endpoint = str(env.get("EARN_PROXY_PROXIWARE_CDP_URL") or "http://127.0.0.1:9222").strip()
@@ -303,7 +336,7 @@ def collect_runtime_observation(
         latest_backup = str(candidates[0].resolve()) if candidates else ""
     except OSError:
         latest_backup = ""
-    domain = str(os.environ.get("EARN_PROXY_DOMAIN") or "").strip()
+    domain = _safe_public_domain()
     public_url = public_health_url or (f"https://{domain}/healthz" if domain else "")
     release = _release_state(Path(release_link))
     source = _git_state(Path(str(release["current_path"]))) if release.get("current_path") else _git_state()
