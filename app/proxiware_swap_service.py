@@ -15,7 +15,7 @@ import threading
 from datetime import UTC, datetime
 from typing import Any, Callable
 
-from app import create_app
+from app import create_worker_app
 from app.db import get_db
 from app.services.proxiware_browser import build_browser_adapter
 from app.services.proxiware_credentials import load_provider_session, mark_manual_action_required
@@ -74,7 +74,7 @@ class ProxiwareSwapRunner:
         interval_seconds: float = 5.0,
         claim_seconds: int = 300,
     ) -> None:
-        self.app = app or create_app()
+        self.app = app or create_worker_app()
         self._uses_configured_adapter = adapter_factory is None
         self.adapter_factory = adapter_factory or self._configured_adapter
         self.interval_seconds = max(1.0, float(interval_seconds))

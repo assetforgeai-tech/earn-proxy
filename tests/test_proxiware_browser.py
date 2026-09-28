@@ -314,7 +314,7 @@ def test_cdp_swap_request_uses_provider_xhr_header():
     assert "XMLHttpRequest" in expression
 
 
-def test_cdp_swap_request_uses_static_isp_row_id_prefix():
+def test_cdp_swap_request_matches_selected_dashboard_row_payload():
     client = FakeCdp(
         {
             "status": 200,
@@ -334,7 +334,23 @@ def test_cdp_swap_request_uses_static_isp_row_id_prefix():
     adapter.swap_assignment({"dashboard_assignment_id": "141943", "old_assignment_external_id": "old-external-id"})
 
     request = client.calls[0][2]
-    assert request["body"]["assignment_ids"] == ["ip:141943"]
+    assert request["body"]["assignment_ids"] == [141943]
+
+
+def test_cdp_swap_rejects_non_numeric_dashboard_assignment_id_before_provider_call():
+    client = FakeCdp({})
+    adapter = CdpProxiwareBrowser(
+        "http://127.0.0.1:9222",
+        client_factory=lambda: client,
+        allow_mutation=True,
+    )
+
+    with pytest.raises(BrowserAdapterUnavailable, match="swap_identity_missing"):
+        adapter.swap_assignment(
+            {"dashboard_assignment_id": "ip:not-an-id", "old_assignment_external_id": "old-external-id"}
+        )
+
+    assert client.calls == []
 
 
 def test_cdp_observation_maps_auth_failure_to_session_expiry():

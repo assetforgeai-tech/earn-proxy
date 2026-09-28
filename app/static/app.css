@@ -596,7 +596,7 @@ form[aria-busy="true"] .button {
 .proxiware-status-item small { color: var(--muted); }
 .status-dot.is-good { background: var(--teal); }
 .status-dot.is-warn { background: var(--amber); }
-.proxiware-tabs { display: flex; gap: 6px; overflow-x: auto; margin: 0 0 16px; padding: 4px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+.proxiware-tabs { display: flex; width: 100%; max-width: 100%; min-width: 0; gap: 6px; overflow-x: auto; overflow-y: hidden; margin: 0 0 16px; padding: 4px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
 .proxiware-tab { min-height: 44px; display: inline-flex; align-items: center; padding: 8px 14px; border-radius: 10px; color: var(--muted); text-decoration: none; white-space: nowrap; }
 .proxiware-tab:hover, .proxiware-tab:focus-visible { background: var(--teal-soft); color: var(--teal-dark); }
 .proxiware-tab.is-active { background: var(--teal); color: #fff; }

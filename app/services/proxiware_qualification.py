@@ -11,12 +11,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 
-from app.crypto import decrypt_secret
 from app.earnapp_probe import classify_verdict
 from app.services.proxiware import (
     assignment_identity_fingerprint,
     assignment_identity_from_row,
 )
+from app.services.proxiware_crypto import decrypt_assignment_secret
 from app.services.proxiware_swap import ensure_proxiware_swap_schema
 from app.services.settings import get_setting
 
@@ -105,8 +105,8 @@ class QualificationResult:
 
 def _proxy_from_row(row) -> dict[str, Any]:
     try:
-        username = decrypt_secret(str(row["username_encrypted"] or "")) if row["username_encrypted"] else ""
-        password = decrypt_secret(str(row["password_encrypted"] or "")) if row["password_encrypted"] else ""
+        username = decrypt_assignment_secret(row, "username_encrypted") if row["username_encrypted"] else ""
+        password = decrypt_assignment_secret(row, "password_encrypted") if row["password_encrypted"] else ""
     except ValueError as exc:
         raise ValueError("provider credential unavailable") from exc
     protocol = str(row["protocol"] or "auto").strip().lower()

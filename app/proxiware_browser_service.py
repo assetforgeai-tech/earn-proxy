@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from threading import Event, Thread
 from typing import Any, Callable
 
-from app import create_app
+from app import create_worker_app
 from app.db import get_db
 from app.services.proxiware_browser import (
     BrowserAdapterUnavailable,
@@ -48,7 +48,7 @@ class ProxiwareBrowserRunner:
         now: Callable[[], datetime] | None = None,
         heartbeat_interval_seconds: float | None = None,
     ) -> None:
-        self.app = app or create_app()
+        self.app = app or create_worker_app()
         self._uses_configured_adapter = adapter_factory is None
         self.adapter_factory = adapter_factory or self._configured_adapter
         self.interval_seconds = max(5.0, float(interval_seconds))
@@ -311,7 +311,7 @@ def main() -> int:
         stopped.wait()
         return 0
 
-    app = create_app()
+    app = create_worker_app()
     runner = ProxiwareBrowserRunner(
         app=app,
         interval_seconds=args.interval_seconds,

@@ -642,6 +642,10 @@ def init_db() -> None:
         DEFAULT_SETTINGS.items(),
     )
     _ensure_provider_schema(db)
+    if str(current_app.config.get("RUNTIME_PROFILE") or "web").strip().lower() != "proxiware_worker":
+        from app.services.proxiware_crypto import migrate_provider_worker_secrets
+
+        migrate_provider_worker_secrets(db)
     db.commit()
 
 

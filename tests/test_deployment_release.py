@@ -268,10 +268,92 @@ def test_database_writers_preserve_group_write_access_for_sqlite_sidecars():
     assert all("UMask=0007" in path.read_text() for path in units)
 
 
-def test_browser_observer_loads_its_optional_isolated_environment():
+def test_browser_observer_loads_its_required_worker_environment():
     unit = (ROOT / "deploy" / "earn-proxy-proxiware-browser.service").read_text()
 
-    assert "EnvironmentFile=-/etc/earn-proxy-browser.env" in unit
+    assert "EnvironmentFile=/etc/earn-proxy-proxiware-worker.env" in unit
+
+
+def test_proxiware_workers_do_not_load_web_or_chrome_secrets():
+    browser_unit = (ROOT / "deploy" / "earn-proxy-proxiware-browser.service").read_text()
+    swap_unit = (ROOT / "deploy" / "earn-proxy-proxiware-swap.service").read_text()
+    chrome_unit = (ROOT / "deploy" / "earn-proxy-proxiware-chrome.service").read_text()
+    acl_unit = (ROOT / "deploy" / "earn-proxy-proxiware-cdp-acl.service").read_text()
+
+    for unit in (browser_unit, swap_unit):
+        assert "EnvironmentFile=/etc/earn-proxy.env" not in unit
+        assert "EnvironmentFile=-/etc/earn-proxy-browser.env" not in unit
+        assert "EnvironmentFile=/etc/earn-proxy-proxiware-worker.env" in unit
+        assert "EnvironmentFile=/etc/earn-proxy-proxiware-worker-key.env" in unit
+        assert "Environment=EARN_PROXY_RUNTIME_PROFILE=proxiware_worker" in unit
+    qualification_unit = (ROOT / "deploy" / "earn-proxy-proxiware-qualification.service").read_text()
+    assert "EnvironmentFile=/etc/earn-proxy.env" not in qualification_unit
+    assert "EnvironmentFile=/etc/earn-proxy-proxiware-worker.env" in qualification_unit
+    assert "EnvironmentFile=/etc/earn-proxy-proxiware-worker-key.env" in qualification_unit
+    assert "Environment=EARN_PROXY_RUNTIME_PROFILE=proxiware_worker" in qualification_unit
+    for unit in (chrome_unit, acl_unit):
+        assert "EnvironmentFile=/etc/earn-proxy.env" not in unit
+        assert "EnvironmentFile=/etc/earn-proxy-proxiware-worker.env" not in unit
+        assert "EnvironmentFile=-/etc/earn-proxy-browser.env" in unit
+
+
+def test_worker_services_use_worker_app_factory():
+    browser_service = (ROOT / "app" / "proxiware_browser_service.py").read_text()
+    swap_service = (ROOT / "app" / "proxiware_swap_service.py").read_text()
+    qualification_service = (ROOT / "app" / "services" / "proxiware_qualification_service.py").read_text()
+
+    assert "create_worker_app" in browser_service
+    assert "create_worker_app" in swap_service
+    assert "create_worker_app" in qualification_service
+
+
+def test_release_backs_up_and_requires_worker_environment():
+    installer = (ROOT / "deploy" / "release.sh").read_text()
+
+    assert 'worker_env="/etc/earn-proxy-proxiware-worker.env"' in installer
+    assert "render_worker_env()" in installer
+    assert "EARN_PROXY_RUNTIME_PROFILE=proxiware_worker" in installer
+    assert "EARN_PROXY_PROXIWARE_WORKER_FERNET_KEY" in installer
+    worker_keys = installer[
+        installer.index("EARN_PROXY_DATABASE") : installer.index("EOF", installer.index("EARN_PROXY_DATABASE"))
+    ]
+    assert "EARN_PROXY_FERNET_KEY" not in worker_keys
+    assert 'cp -a "$worker_env" "$backup_dir/earn-proxy-proxiware-worker.env"' in installer
+    assert 'install -o root -g root -m 0600 "$worker_env_tmp" "$worker_env"' in installer
+    assert 'install -o root -g root -m 0600 "$backup_dir/earn-proxy-proxiware-worker.env" "$worker_env"' in installer
+
+
+def test_release_generates_and_rolls_back_a_dedicated_worker_key_file():
+    installer = (ROOT / "deploy" / "release.sh").read_text()
+
+    assert 'worker_key_env="/etc/earn-proxy-proxiware-worker-key.env"' in installer
+    assert "EARN_PROXY_PROXIWARE_WORKER_FERNET_KEY=" in installer
+    assert "urlsafe_b64encode(os.urandom(32))" in installer
+    assert 'cp -a "$worker_key_env" "$backup_dir/earn-proxy-proxiware-worker-key.env"' in installer
+    assert 'install -o root -g root -m 0600 "$worker_key_env_tmp" "$worker_key_env"' in installer
+    assert (
+        'install -o root -g root -m 0600 "$backup_dir/earn-proxy-proxiware-worker-key.env" "$worker_key_env"'
+        in installer
+    )
+    assert "EnvironmentFile=/etc/earn-proxy-proxiware-worker-key.env" in installer
+
+
+def test_every_application_service_receives_the_dedicated_provider_key():
+    application_units = [
+        path
+        for path in (ROOT / "deploy").glob("earn-proxy-*.service")
+        if (
+            "ExecStart=/opt/earn-proxy/.venv/bin/python -m app." in path.read_text()
+            and "app.proxiware_cdp_acl" not in path.read_text()
+            and "app.proxiware_chrome_service" not in path.read_text()
+        )
+        or '"app:create_app()"' in path.read_text()
+    ]
+
+    assert application_units
+    assert all(
+        "EnvironmentFile=/etc/earn-proxy-proxiware-worker-key.env" in path.read_text() for path in application_units
+    )
 
 
 def test_release_backup_listing_is_group_visible_but_backup_files_stay_private():
@@ -328,3 +410,10 @@ def test_release_preflight_rejects_public_cdp_and_persistent_profile(tmp_path, m
 
     assert "Proxiware CDP endpoint must be loopback HTTP with an explicit port" in errors
     assert "Proxiware Chrome profile root must be under /run" in errors
+
+
+def test_release_preflight_requires_a_distinct_worker_encryption_key():
+    preflight = (ROOT / "deploy" / "release_preflight.py").read_text()
+
+    assert '"EARN_PROXY_PROXIWARE_WORKER_FERNET_KEY"' in preflight
+    assert "must differ from the global Fernet key" in preflight

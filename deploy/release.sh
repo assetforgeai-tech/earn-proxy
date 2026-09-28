@@ -26,6 +26,14 @@ backup_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 backup_dir="/var/backups/earn-proxy/${backup_stamp}-${revision}"
 database_path="$(awk -F= '$1 == "EARN_PROXY_DATABASE" { sub(/^[[:space:]]+/, "", $2); gsub(/^"|"$/, "", $2); print $2; exit }' /etc/earn-proxy.env)"
 database_path="${database_path:-/var/lib/earn-proxy/earn-proxy.db}"
+worker_env="/etc/earn-proxy-proxiware-worker.env"
+worker_key_env="/etc/earn-proxy-proxiware-worker-key.env"
+worker_env_tmp=""
+worker_key_env_tmp=""
+worker_env_existed=0
+worker_key_env_existed=0
+worker_env_installed=0
+worker_key_env_installed=0
 # ponytail: keep production DB at the fixed direct path; support custom paths
 # only after adding dirfd/openat2 validation for every parent component.
 if [[ "$database_path" != "/var/lib/earn-proxy/earn-proxy.db" ]]; then
@@ -59,7 +67,21 @@ if ! id -u earnproxy-chrome >/dev/null 2>&1; then
 fi
 
 cleanup() {
-  rm -f -- "$archive" "$next_link"
+  rm -f -- "$archive" "$next_link" "$worker_env_tmp" "$worker_key_env_tmp"
+  if [[ "$activated" -eq 0 && "$worker_env_installed" -eq 1 ]]; then
+    if [[ "$worker_env_existed" -eq 1 && -f "$backup_dir/earn-proxy-proxiware-worker.env" ]]; then
+      install -o root -g root -m 0600 "$backup_dir/earn-proxy-proxiware-worker.env" "$worker_env"
+    else
+      rm -f -- "$worker_env"
+    fi
+  fi
+  if [[ "$activated" -eq 0 && "$worker_key_env_installed" -eq 1 ]]; then
+    if [[ "$worker_key_env_existed" -eq 1 && -f "$backup_dir/earn-proxy-proxiware-worker-key.env" ]]; then
+      install -o root -g root -m 0600 "$backup_dir/earn-proxy-proxiware-worker-key.env" "$worker_key_env"
+    else
+      rm -f -- "$worker_key_env"
+    fi
+  fi
   if [[ "$activated" -eq 0 && -d "$release_dir" ]]; then
     rm -rf -- "$release_dir"
   fi
@@ -74,6 +96,37 @@ if [[ ! -f /etc/earn-proxy.env ]]; then
   echo "missing /etc/earn-proxy.env" >&2
   exit 78
 fi
+if [[ -f "$worker_env" ]]; then
+  worker_env_existed=1
+fi
+if [[ -f "$worker_key_env" ]]; then
+  worker_key_env_existed=1
+fi
+worker_env_tmp="$(mktemp --tmpdir earn-proxy-worker-env.XXXXXX)"
+worker_key_env_tmp="$(mktemp --tmpdir earn-proxy-worker-key-env.XXXXXX)"
+render_worker_env() {
+  local key line
+  : > "$worker_env_tmp"
+  printf '%s\n' 'EARN_PROXY_RUNTIME_PROFILE=proxiware_worker' >> "$worker_env_tmp"
+  while IFS= read -r key; do
+    line="$(awk -F= -v wanted="$key" '$1 == wanted { print; exit }' /etc/earn-proxy-browser.env /etc/earn-proxy.env 2>/dev/null || true)"
+    if [[ -z "$line" ]]; then
+      echo "missing worker environment key: $key" >&2
+      return 1
+    fi
+    printf '%s\n' "$line" >> "$worker_env_tmp"
+  done <<'EOF'
+EARN_PROXY_DATABASE
+EARN_PROXY_INSTANCE_PATH
+EARN_PROXY_PROXIWARE_BROWSER_ENABLED
+EARN_PROXY_PROXIWARE_BROWSER_DRY_RUN
+EARN_PROXY_PROXIWARE_BROWSER_ALLOW_MUTATION
+EARN_PROXY_PROXIWARE_CDP_URL
+EARN_PROXY_PROXIWARE_BROWSER_DASHBOARD_URL
+EARN_PROXY_PROXIWARE_BROWSER_INTERVAL_SECONDS
+EARN_PROXY_PROXIWARE_BROWSER_HEARTBEAT_INTERVAL_SECONDS
+EOF
+}
 if [[ ! -x "$python_bin" ]]; then
   python_bin="$(command -v python3.11 || true)"
 fi
@@ -81,7 +134,26 @@ if [[ -z "$python_bin" ]] || ! "$python_bin" -c 'import sys; raise SystemExit(sy
   echo "Python 3.11 or newer is required" >&2
   exit 69
 fi
+render_worker_env
+if [[ "$worker_key_env_existed" -eq 1 ]]; then
+  cp "$worker_key_env" "$worker_key_env_tmp"
+else
+  "$python_bin" - "$worker_key_env_tmp" <<'PY'
+import base64
+import os
+import sys
 
+with open(sys.argv[1], "w", encoding="ascii") as output:
+    output.write("EARN_PROXY_PROXIWARE_WORKER_FERNET_KEY=")
+    output.write(base64.urlsafe_b64encode(os.urandom(32)).decode("ascii"))
+    output.write("\n")
+PY
+fi
+worker_key_line="$(awk -F= '$1 == "EARN_PROXY_PROXIWARE_WORKER_FERNET_KEY" { print; exit }' "$worker_key_env_tmp")"
+if [[ -z "$worker_key_line" ]]; then
+  echo "missing worker encryption key" >&2
+  exit 78
+fi
 git -C "$source_dir" archive --format=tar "$revision" -o "$archive"
 install -d -o root -g root -m 0755 "$release_dir"
 tar -xf "$archive" -C "$release_dir"
@@ -140,7 +212,32 @@ finally:
     os.close(source_fd)
 PY
 cp -a /etc/earn-proxy.env "$backup_dir/earn-proxy.env"
+if [[ "$worker_env_existed" -eq 1 ]]; then
+  cp -a "$worker_env" "$backup_dir/earn-proxy-proxiware-worker.env"
+fi
+if [[ "$worker_key_env_existed" -eq 1 ]]; then
+  cp -a "$worker_key_env" "$backup_dir/earn-proxy-proxiware-worker-key.env"
+fi
 chmod 0600 "$backup_dir/earn-proxy.db" "$backup_dir/earn-proxy.env"
+if [[ "$worker_key_env_existed" -eq 1 ]]; then
+  chmod 0600 "$backup_dir/earn-proxy-proxiware-worker-key.env"
+fi
+install -o root -g root -m 0600 "$worker_env_tmp" "$worker_env"
+worker_env_installed=1
+install -o root -g root -m 0600 "$worker_key_env_tmp" "$worker_key_env"
+worker_key_env_installed=1
+worker_env_mode="$(stat -c '%a' "$worker_env" 2>/dev/null || true)"
+worker_env_owner="$(stat -c '%U:%G' "$worker_env" 2>/dev/null || true)"
+if [[ "$worker_env_mode" != "600" || "$worker_env_owner" != "root:root" ]]; then
+  echo "$worker_env must be root:root mode 0600" >&2
+  exit 78
+fi
+worker_key_env_mode="$(stat -c '%a' "$worker_key_env" 2>/dev/null || true)"
+worker_key_env_owner="$(stat -c '%U:%G' "$worker_key_env" 2>/dev/null || true)"
+if [[ "$worker_key_env_mode" != "600" || "$worker_key_env_owner" != "root:root" ]]; then
+  echo "$worker_key_env must be root:root mode 0600" >&2
+  exit 78
+fi
 cp -a /etc/systemd/system/earn-proxy-*.service "$backup_dir/systemd/"
 for unit_path in "$backup_dir"/systemd/earn-proxy-*.service; do
   unit_name="$(basename "$unit_path")"
@@ -151,6 +248,7 @@ systemd-run --quiet --wait --pipe --collect \
   --uid=earnproxy --gid=earnproxy \
   --working-directory="$release_dir" \
   --property=EnvironmentFile=/etc/earn-proxy.env \
+  --property=EnvironmentFile=/etc/earn-proxy-proxiware-worker-key.env \
   --property=EnvironmentFile=-/etc/earn-proxy-browser.env \
   "$release_dir/.venv/bin/python" -m deploy.release_preflight --release-dir "$release_dir"
 
@@ -174,6 +272,18 @@ if ! systemctl restart "${services[@]}" || ! systemctl is-active --quiet "${serv
     ln -s "$previous_release" "$next_link"
     mv -Tf "$next_link" /opt/earn-proxy
     install -m 0644 "$backup_dir"/systemd/earn-proxy-*.service /etc/systemd/system/
+    if [[ "$worker_env_existed" -eq 1 ]]; then
+      install -o root -g root -m 0600 "$backup_dir/earn-proxy-proxiware-worker.env" "$worker_env"
+    else
+      rm -f -- "$worker_env"
+    fi
+    worker_env_installed=0
+    if [[ "$worker_key_env_existed" -eq 1 ]]; then
+      install -o root -g root -m 0600 "$backup_dir/earn-proxy-proxiware-worker-key.env" "$worker_key_env"
+    else
+      rm -f -- "$worker_key_env"
+    fi
+    worker_key_env_installed=0
     systemctl daemon-reload
     systemctl enable "${previous_services[@]}"
     systemctl restart "${previous_services[@]}"

@@ -304,8 +304,12 @@ class CdpProxiwareBrowser:
         old_external = str(job.get("old_assignment_external_id") or "").strip()
         if not assignment_id or not old_external:
             raise BrowserAdapterUnavailable("swap_identity_missing")
-        provider_assignment_id = assignment_id if assignment_id.startswith("ip:") else f"ip:{assignment_id}"
         response_assignment_id = assignment_id.removeprefix("ip:")
+        if not response_assignment_id.isdigit():
+            raise BrowserAdapterUnavailable("swap_identity_missing")
+        # The static ISP UI posts numeric assignment IDs; ``ip:`` is only our
+        # internal row key and must never cross the provider boundary.
+        provider_assignment_id = int(response_assignment_id)
         with self._client() as client:
             self._navigate(client)
             result = self._fetch(

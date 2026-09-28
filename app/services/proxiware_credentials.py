@@ -14,6 +14,12 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from app.crypto import decrypt_secret, encrypt_secret
+from app.services.proxiware_crypto import (
+    decrypt_worker_json,
+    encrypt_worker_secret,
+    ensure_worker_columns,
+    worker_profile,
+)
 
 PROVIDER = "proxiware"
 SECRET_NAMES = frozenset({"login_email", "login_password", "api_key", "captcha_api_key"})
@@ -60,6 +66,7 @@ def ensure_proxiware_security_schema(db) -> None:
     from app.services.proxiware_swap import ensure_proxiware_swap_schema
 
     ensure_proxiware_swap_schema(db)
+    ensure_worker_columns(db)
 
 
 def _validate_secret_name(name: str) -> str:
@@ -135,6 +142,8 @@ def get_provider_secret(db, name: str) -> str | None:
     ).fetchone()
     if row is None or not row["secret_encrypted"]:
         return None
+    if worker_profile():
+        return None
     return decrypt_secret(row["secret_encrypted"])
 
 
@@ -156,7 +165,7 @@ def get_provider_secret_metadata(db) -> dict[str, dict[str, object]]:
             continue
         # Decrypt only to derive non-sensitive metadata.  Never return value.
         try:
-            secret = decrypt_secret(row["secret_encrypted"])
+            secret = "" if worker_profile() else decrypt_secret(row["secret_encrypted"])
         except ValueError:
             secret = ""
         values[name] = {
@@ -258,18 +267,27 @@ def store_provider_session(
     elif expiry is not None:
         expiry = str(expiry)[:64]
     db.execute(
-        "INSERT INTO provider_sessions(provider,cookie_encrypted,expires_at,state,last_error_code,renewed_at,updated_at) "
-        "VALUES(?,?,?,?,?,?,?) ON CONFLICT(provider) DO UPDATE SET cookie_encrypted=excluded.cookie_encrypted,"
+        "INSERT INTO provider_sessions(provider,cookie_encrypted,worker_cookie_encrypted,expires_at,state,"
+        "last_error_code,renewed_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(provider) DO UPDATE SET "
+        "cookie_encrypted=excluded.cookie_encrypted,worker_cookie_encrypted=excluded.worker_cookie_encrypted,"
         "expires_at=excluded.expires_at,state=excluded.state,last_error_code='',renewed_at=excluded.renewed_at,updated_at=excluded.updated_at",
-        (PROVIDER, encrypt_secret(encoded), expiry, "active", "", _iso(now), _iso(now)),
+        (PROVIDER, encrypt_secret(encoded), encrypt_worker_secret(encoded), expiry, "active", "", _iso(now), _iso(now)),
     )
     db.commit()
 
 
 def load_provider_session(db) -> dict[str, Any] | list[dict[str, Any]] | None:
     ensure_proxiware_security_schema(db)
-    row = db.execute("SELECT cookie_encrypted FROM provider_sessions WHERE provider=?", (PROVIDER,)).fetchone()
-    if row is None or not row["cookie_encrypted"]:
+    row = db.execute(
+        "SELECT cookie_encrypted,worker_cookie_encrypted FROM provider_sessions WHERE provider=?", (PROVIDER,)
+    ).fetchone()
+    if row is None:
+        return None
+    if worker_profile():
+        if not row["worker_cookie_encrypted"]:
+            return None
+        return decrypt_worker_json(row["worker_cookie_encrypted"])
+    if not row["cookie_encrypted"]:
         return None
     raw = decrypt_secret(row["cookie_encrypted"])
     try:

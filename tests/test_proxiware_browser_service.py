@@ -385,7 +385,7 @@ def test_browser_service_disabled_does_not_initialize_application(monkeypatch):
     import app.proxiware_browser_service as service
 
     monkeypatch.delenv("EARN_PROXY_PROXIWARE_BROWSER_ENABLED", raising=False)
-    monkeypatch.setattr(service, "create_app", lambda: (_ for _ in ()).throw(AssertionError("app initialized")))
+    monkeypatch.setattr(service, "create_worker_app", lambda: (_ for _ in ()).throw(AssertionError("app initialized")))
     monkeypatch.setattr(sys, "argv", ["proxiware_browser_service", "--once"])
 
     assert service.main() == 0

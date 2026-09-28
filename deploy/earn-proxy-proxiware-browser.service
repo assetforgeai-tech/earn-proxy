@@ -11,8 +11,9 @@ User=earnproxy-browser
 Group=earnproxy
 UMask=0007
 WorkingDirectory=/opt/earn-proxy
-EnvironmentFile=/etc/earn-proxy.env
-EnvironmentFile=-/etc/earn-proxy-browser.env
+Environment=EARN_PROXY_RUNTIME_PROFILE=proxiware_worker
+EnvironmentFile=/etc/earn-proxy-proxiware-worker.env
+EnvironmentFile=/etc/earn-proxy-proxiware-worker-key.env
 ExecStart=/opt/earn-proxy/.venv/bin/python -m app.proxiware_browser_service
 Restart=always
 RestartSec=10

@@ -78,6 +78,7 @@ def validate_runtime(release_dir: Path) -> list[str]:
     required_env = (
         "EARN_PROXY_SECRET_KEY",
         "EARN_PROXY_FERNET_KEY",
+        "EARN_PROXY_PROXIWARE_WORKER_FERNET_KEY",
         "EARN_PROXY_INTERNAL_API_KEY",
         "EARN_PROXY_ADMIN_PASSWORD",
         "EARN_PROXY_DATABASE",
@@ -86,6 +87,8 @@ def validate_runtime(release_dir: Path) -> list[str]:
     if missing:
         errors.append(f"required environment is missing: {', '.join(missing)}")
         return errors
+    if os.environ.get("EARN_PROXY_FERNET_KEY") == os.environ.get("EARN_PROXY_PROXIWARE_WORKER_FERNET_KEY"):
+        errors.append("Proxiware worker encryption key must differ from the global Fernet key")
 
     from app import create_app
 

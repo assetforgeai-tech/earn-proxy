@@ -10,6 +10,7 @@ Group=earnproxy
 UMask=0007
 WorkingDirectory=/opt/earn-proxy
 EnvironmentFile=/etc/earn-proxy.env
+EnvironmentFile=/etc/earn-proxy-proxiware-worker-key.env
 ExecStart=/opt/earn-proxy/.venv/bin/python -m app.check_service --worker health
 Restart=always
 RestartSec=5

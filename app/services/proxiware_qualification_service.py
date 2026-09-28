@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from threading import Event, Thread
 from typing import Any, Callable
 
-from app import create_app
+from app import create_worker_app
 from app.checker import check_proxy
 from app.db import get_db
 from app.earnapp_probe import probe_earnapp_proxy
@@ -66,7 +66,7 @@ class ProxiwareQualificationRunner:
         check_interval_seconds: int | None = None,
         heartbeat_interval_seconds: float | None = None,
     ) -> None:
-        self.app = app or create_app()
+        self.app = app or create_worker_app()
         self.probe = probe or _default_probe
         self.eligibility = eligibility or _default_eligibility
         self.concurrency = None if concurrency is None else max(1, min(MAX_CONCURRENCY, int(concurrency)))

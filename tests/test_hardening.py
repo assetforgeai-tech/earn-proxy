@@ -67,6 +67,34 @@ def test_mobile_navigation_wraps_without_hidden_horizontal_overflow():
     )
 
 
+def test_mobile_proxiware_tabs_are_constrained_while_remaining_scrollable():
+    css = (Path(__file__).parents[1] / "app" / "static" / "app.css").read_text()
+    rule = css[css.index(".proxiware-tabs {") : css.index(".proxiware-tab {")]
+
+    assert "max-width: 100%;" in rule
+    assert "min-width: 0;" in rule
+    assert "overflow-x: auto;" in rule
+
+
+def test_worker_app_does_not_require_web_secrets(tmp_path, monkeypatch):
+    for name in (
+        "EARN_PROXY_SECRET_KEY",
+        "EARN_PROXY_INTERNAL_API_KEY",
+        "EARN_PROXY_ADMIN_PASSWORD",
+        "EARN_PROXY_ADMIN_EMAIL",
+        "EARN_PROXY_FERNET_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("EARN_PROXY_DATABASE", str(tmp_path / "worker.db"))
+    monkeypatch.setenv("EARN_PROXY_PROXIWARE_WORKER_FERNET_KEY", Fernet.generate_key().decode("ascii"))
+
+    from app import create_worker_app
+
+    application = create_worker_app()
+
+    assert application.config["RUNTIME_PROFILE"] == "proxiware_worker"
+
+
 def test_schema_contains_scheduler_and_egress_audit_columns(app):
     with app.app_context():
         columns = {row["name"] for row in get_db().execute("PRAGMA table_info(proxies)").fetchall()}

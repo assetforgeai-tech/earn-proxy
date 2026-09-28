@@ -12,7 +12,11 @@ from typing import Any
 
 import requests
 
-from app.crypto import decrypt_secret, encrypt_secret
+from app.services.proxiware_crypto import (
+    decrypt_assignment_secret,
+    encrypt_assignment_secret,
+    ensure_worker_columns,
+)
 from app.services.proxiware_swap import reconcile_provider_applied_swaps
 
 
@@ -39,15 +43,12 @@ class SyncLeaseLost(RuntimeError):
 
 def _decrypted_assignment_secret(row, column: str) -> str:
     try:
-        value = str(row[column] or "")
+        value = decrypt_assignment_secret(row, column)
     except (IndexError, KeyError, TypeError):
-        value = ""
-    if not value:
         return ""
-    try:
-        return decrypt_secret(value)
     except ValueError:
         return ""
+    return value
 
 
 def assignment_identity(
@@ -466,6 +467,7 @@ def ensure_proxiware_inventory_schema(db) -> None:
         CREATE INDEX IF NOT EXISTS provider_sync_runs_idx ON provider_sync_runs(provider, started_at);
         """
     )
+    ensure_worker_columns(db)
     # The swap service may create an older compatible shape first. Add only
     # missing columns; never rewrite existing provider credentials or metadata.
     for table, definitions in {
@@ -747,16 +749,24 @@ def sync_proxiware_inventory(db, client: ProxiwareClient, *, now: datetime | Non
                     )
                 if protocol not in {"http", "socks5"}:
                     protocol = "unknown"
-                username_encrypted = (
-                    encrypt_secret(str(raw_proxy.get("username") or ""))
-                    if "username" in raw_proxy
-                    else str(existing_proxy["username_encrypted"] if existing_proxy else "")
-                )
-                password_encrypted = (
-                    encrypt_secret(str(raw_proxy.get("password") or ""))
-                    if "password" in raw_proxy
-                    else str(existing_proxy["password_encrypted"] if existing_proxy else "")
-                )
+                if "username" in raw_proxy:
+                    username_encrypted, worker_username_encrypted = encrypt_assignment_secret(
+                        str(raw_proxy.get("username") or "")
+                    )
+                else:
+                    username_encrypted = str(existing_proxy["username_encrypted"] if existing_proxy else "")
+                    worker_username_encrypted = str(
+                        existing_proxy["worker_username_encrypted"] if existing_proxy else ""
+                    )
+                if "password" in raw_proxy:
+                    password_encrypted, worker_password_encrypted = encrypt_assignment_secret(
+                        str(raw_proxy.get("password") or "")
+                    )
+                else:
+                    password_encrypted = str(existing_proxy["password_encrypted"] if existing_proxy else "")
+                    worker_password_encrypted = str(
+                        existing_proxy["worker_password_encrypted"] if existing_proxy else ""
+                    )
                 username = (
                     str(raw_proxy.get("username") or "")
                     if "username" in raw_proxy
@@ -893,6 +903,11 @@ def sync_proxiware_inventory(db, client: ProxiwareClient, *, now: datetime | Non
                         ),
                     )
                     updated += int(changed)
+                db.execute(
+                    "UPDATE provider_assignments SET worker_username_encrypted=?,worker_password_encrypted=? "
+                    "WHERE provider='proxiware' AND external_id=?",
+                    (worker_username_encrypted, worker_password_encrypted, proxy_id),
+                )
             _assert_sync_owner(db, run_id, claim_token, now=now)
             db.commit()
             db.execute("UPDATE provider_sync_runs SET processed_count=? WHERE id=?", (index, run_id))

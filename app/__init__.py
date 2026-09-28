@@ -45,6 +45,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     app = Flask(__name__, **flask_kwargs)
     app.config.from_mapping(
         SECRET_KEY=os.environ.get("EARN_PROXY_SECRET_KEY", "dev-change-me"),
+        RUNTIME_PROFILE=os.environ.get("EARN_PROXY_RUNTIME_PROFILE", "web"),
         DATABASE=os.environ.get(
             "EARN_PROXY_DATABASE",
             os.path.join(app.instance_path, "earn-proxy.db"),
@@ -58,6 +59,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         RELAY_SSO_SECRET=os.environ.get("EARN_PROXY_RELAY_SSO_SECRET", ""),
         RELAY_PUBLIC_URL=os.environ.get("EARN_PROXY_RELAY_PUBLIC_URL", "https://transfer.proxy.acacondos.com"),
         FERNET_KEY=os.environ.get("EARN_PROXY_FERNET_KEY", ""),
+        PROXIWARE_WORKER_FERNET_KEY=os.environ.get("EARN_PROXY_PROXIWARE_WORKER_FERNET_KEY", ""),
         INTERNAL_API_KEY=os.environ.get("EARN_PROXY_INTERNAL_API_KEY", ""),
         ADMIN_EMAIL=os.environ.get("EARN_PROXY_ADMIN_EMAIL", "admin@example.com"),
         ADMIN_PASSWORD=os.environ.get("EARN_PROXY_ADMIN_PASSWORD", ""),
@@ -125,12 +127,18 @@ def create_app(test_config: dict | None = None) -> Flask:
             parsed = parsed.replace(tzinfo=UTC)
         return parsed.astimezone(UTC).strftime("%b %d, %Y %H:%M UTC")
 
+    worker_profile = str(app.config.get("RUNTIME_PROFILE") or "web").strip().lower() == "proxiware_worker"
     if not app.testing:
         unsafe = (
-            _is_secret_placeholder(app.secret_key)
-            or not _valid_fernet_key(app.config.get("FERNET_KEY"))
-            or _is_secret_placeholder(app.config.get("INTERNAL_API_KEY"))
-            or _is_secret_placeholder(app.config.get("ADMIN_PASSWORD"))
+            not _valid_fernet_key(app.config.get("PROXIWARE_WORKER_FERNET_KEY"))
+            if worker_profile
+            else (
+                not _valid_fernet_key(app.config.get("FERNET_KEY"))
+                or not _valid_fernet_key(app.config.get("PROXIWARE_WORKER_FERNET_KEY"))
+                or _is_secret_placeholder(app.secret_key)
+                or _is_secret_placeholder(app.config.get("INTERNAL_API_KEY"))
+                or _is_secret_placeholder(app.config.get("ADMIN_PASSWORD"))
+            )
         )
         if unsafe:
             raise RuntimeError("Production secrets are missing or still use development placeholders")
@@ -239,26 +247,28 @@ def create_app(test_config: dict | None = None) -> Flask:
 
     with app.app_context():
         database = db.get_db()
-        from app.services.api_keys import ensure_legacy_api_key
+        if not worker_profile:
+            from app.services.api_keys import ensure_legacy_api_key
 
-        # Keep the pre-existing environment key working while moving auth to
-        # revocable, database-backed key records. Only its digest is stored.
-        ensure_legacy_api_key(database, app.config.get("INTERNAL_API_KEY"))
-        admin_email = str(app.config.get("ADMIN_EMAIL") or "").strip().lower()
-        admin_password = str(app.config.get("ADMIN_PASSWORD") or "")
-        if admin_email and admin_password:
-            existing = database.execute("SELECT id FROM users WHERE email=?", (admin_email,)).fetchone()
-            if existing is None:
-                from app.services.users import create_user
+            # Keep the pre-existing environment key working while moving auth
+            # to revocable, database-backed key records. Only its digest is
+            # stored.
+            ensure_legacy_api_key(database, app.config.get("INTERNAL_API_KEY"))
+            admin_email = str(app.config.get("ADMIN_EMAIL") or "").strip().lower()
+            admin_password = str(app.config.get("ADMIN_PASSWORD") or "")
+            if admin_email and admin_password:
+                existing = database.execute("SELECT id FROM users WHERE email=?", (admin_email,)).fetchone()
+                if existing is None:
+                    from app.services.users import create_user
 
-                try:
-                    create_user(database, admin_email, admin_password, status="active", role="admin")
-                except sqlite3.IntegrityError:
-                    existing = database.execute(
-                        "SELECT role,status FROM users WHERE email=?", (admin_email,)
-                    ).fetchone()
-                    if existing is None or existing["role"] != "admin" or existing["status"] != "active":
-                        raise
+                    try:
+                        create_user(database, admin_email, admin_password, status="active", role="admin")
+                    except sqlite3.IntegrityError:
+                        existing = database.execute(
+                            "SELECT role,status FROM users WHERE email=?", (admin_email,)
+                        ).fetchone()
+                        if existing is None or existing["role"] != "admin" or existing["status"] != "active":
+                            raise
 
     @app.get("/healthz")
     def healthz():
@@ -267,4 +277,10 @@ def create_app(test_config: dict | None = None) -> Flask:
     return app
 
 
-__all__ = ["create_app"]
+def create_worker_app() -> Flask:
+    """Build a Proxiware worker app without loading web/API/admin secrets."""
+
+    return create_app({"RUNTIME_PROFILE": "proxiware_worker"})
+
+
+__all__ = ["create_app", "create_worker_app"]

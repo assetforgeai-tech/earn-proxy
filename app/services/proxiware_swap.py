@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from app.crypto import decrypt_secret
+from app.services.proxiware_crypto import decrypt_assignment_secret, ensure_worker_columns
 from app.services.proxiware_dashboard import dashboard_address_endpoint, normalize_dashboard_address
 from app.services.proxiware_health import is_proxiware_automation_paused
 from app.services.settings import get_setting
@@ -399,6 +399,7 @@ def ensure_proxiware_swap_schema(db) -> None:
         )
     _ensure_columns(db, "provider_credentials", {"provider": "TEXT NOT NULL DEFAULT 'proxiware'"})
     _ensure_columns(db, "provider_action_attempts", {"provider": "TEXT NOT NULL DEFAULT 'proxiware'"})
+    ensure_worker_columns(db)
     db.execute(
         "CREATE INDEX IF NOT EXISTS provider_action_attempts_provider_idx "
         "ON provider_action_attempts(provider, actor_id, action, attempted_at)"
@@ -1208,11 +1209,8 @@ def mark_swap_success(
         if not str(new["host"] or "").strip() or int(new["port"] or 0) <= 0:
             raise SwapReconciliationPending("Replacement credential evidence is missing")
         for column in ("username_encrypted", "password_encrypted"):
-            encrypted = str(new[column] or "").strip()
-            if not encrypted:
-                raise SwapReconciliationPending("Replacement credential evidence is missing")
             try:
-                if not decrypt_secret(encrypted).strip():
+                if not decrypt_assignment_secret(new, column).strip():
                     raise ValueError
             except (TypeError, ValueError):
                 raise SwapReconciliationPending("Replacement credential evidence is invalid") from None

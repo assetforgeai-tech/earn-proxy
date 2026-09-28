@@ -27,8 +27,14 @@ verified:
 - `EARN_PROXY_PROXIWARE_CHROME_PROFILE_DIR=/run/earn-proxy-browser/profile`
 
 Put Chrome-only values in `/etc/earn-proxy-browser.env` with mode `0600`.
-Do not reuse `/etc/earn-proxy.env`; the Chrome process must not receive the
-database, Fernet, API, or admin secrets. The Chrome unit runs as the separate
+Put only the worker database path, instance path, runtime profile, and browser
+worker settings in `/etc/earn-proxy-proxiware-worker.env` with mode `0600`.
+Put the dedicated `EARN_PROXY_PROXIWARE_WORKER_FERNET_KEY` in
+`/etc/earn-proxy-proxiware-worker-key.env` with mode `0600`. The browser and
+swap workers must load those files only; they must not load `/etc/earn-proxy.env`
+or the Chrome-only file. Do not put admin, internal API, relay, global Fernet
+key, or provider API credentials in the worker files. The Chrome unit
+must not receive the database or Fernet key. The Chrome unit runs as the separate
 `earnproxy-chrome` account, uses an ephemeral systemd runtime profile, and
 binds CDP to loopback. It does not log in, solve challenges, spoof a
 fingerprint, or perform a provider mutation. A missing binary/profile/session
@@ -106,6 +112,10 @@ maintenance.
   any swap action.
 - duplicate active swap: stop the worker and inspect the durable job claim;
   never run a second process against the same SQLite database.
+
+The static ISP table uses `ip:<assignment_id>` only as a browser row-selection
+key. The provider swap request must contain numeric `assignment_ids`. Never
+send the UI row-key prefix to the provider endpoint.
 
 ## Rollback
 
