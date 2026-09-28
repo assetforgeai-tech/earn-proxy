@@ -101,4 +101,3 @@ The deployed read-only Proxiware integration and guarded mutation code pass the
 current test, static, dependency, security, preflight, and observation gates.
 The system is not approved for automatic swapping: a successful separately
 approved canary remains mandatory.
-

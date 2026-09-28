@@ -53,4 +53,3 @@ tracks inspected browser/account scope and timeout/state-machine behavior, then
 ran focused regression suites. The only incomplete production gate is a
 successful provider canary: the previously approved canary returned
 `provider_error`, was reconciled as no provider change, and was not retried.
-
