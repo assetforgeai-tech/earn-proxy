@@ -110,7 +110,7 @@ def _raw_rows():
                   AND (pa.replacement_ready_at IS NULL OR pa.replacement_ready_at<=?)
                   AND NOT EXISTS (
                       SELECT 1 FROM swap_jobs sj
-                      WHERE sj.provider='proxiware' AND sj.subscription_id=pa.subscription_id
+                      WHERE sj.provider='proxiware' AND sj.old_assignment_id=pa.id
                         AND sj.state IN ('pending','running','mutating','provider_applied','reconciliation_required')
                   )
                   AND NOT EXISTS (

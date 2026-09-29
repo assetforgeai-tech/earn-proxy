@@ -61,6 +61,7 @@ GUARD_ERROR_CODES = frozenset(
         "quota_exhausted",
         "cooldown",
         "duplicate_egress",
+        "subscription_mutation_in_progress",
         "manual_action_required",
     }
 )
@@ -160,6 +161,37 @@ def _table_exists(db, table: str) -> bool:
     )
 
 
+def _active_swap_index_is_current(db) -> bool:
+    """Require one active job per assignment, not per subscription."""
+
+    index = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name='swap_jobs_one_active_assignment_idx'"
+    ).fetchone()
+    if index is None or not str(index["sql"] or "").strip():
+        return False
+    columns = [
+        str(row["name"]) for row in db.execute('PRAGMA index_info("swap_jobs_one_active_assignment_idx")').fetchall()
+    ]
+    if columns != ["provider", "old_assignment_id"]:
+        return False
+    mutation_index = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name='swap_jobs_one_mutation_subscription_idx'"
+    ).fetchone()
+    if mutation_index is None or not str(mutation_index["sql"] or "").strip():
+        return False
+    mutation_columns = [
+        str(row["name"])
+        for row in db.execute('PRAGMA index_info("swap_jobs_one_mutation_subscription_idx")').fetchall()
+    ]
+    if mutation_columns != ["provider", "subscription_id"]:
+        return False
+    legacy = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' "
+        "AND name IN ('swap_jobs_one_active_idx','swap_jobs_one_active_v2_idx') LIMIT 1"
+    ).fetchone()
+    return legacy is None
+
+
 def _ensure_columns(db, table: str, definitions: dict[str, str]) -> None:
     existing = _column_names(db, table)
     for name, definition in definitions.items():
@@ -181,7 +213,7 @@ def _execute_sql_script(db, script: str) -> None:
         db.execute(pending)
 
 
-PROXIWARE_SCHEMA_VERSION = "2026-09-29-1"
+PROXIWARE_SCHEMA_VERSION = "2026-09-29-2"
 
 
 def _proxiware_swap_schema_is_current(db) -> bool:
@@ -254,7 +286,7 @@ def _proxiware_swap_schema_is_current(db) -> bool:
         "AND id IN (SELECT new_assignment_id FROM swap_jobs WHERE provider='proxiware' "
         "AND state='success' AND new_assignment_id IS NOT NULL) LIMIT 1"
     ).fetchone()
-    return pending_repair is None
+    return pending_repair is None and _active_swap_index_is_current(db)
 
 
 def ensure_proxiware_swap_schema(db) -> None:
@@ -410,8 +442,6 @@ def _ensure_proxiware_swap_schema(db) -> None:
             action TEXT NOT NULL,
             attempted_at TEXT NOT NULL
         );
-        CREATE UNIQUE INDEX IF NOT EXISTS swap_jobs_one_active_idx
-            ON swap_jobs(subscription_id) WHERE state IN ('pending','running');
         CREATE INDEX IF NOT EXISTS swap_jobs_due_idx
             ON swap_jobs(state, claimed_until, created_at);
         CREATE INDEX IF NOT EXISTS swap_jobs_subscription_idx
@@ -492,9 +522,9 @@ def _ensure_proxiware_swap_schema(db) -> None:
                 "mutation_new_assignment_address": "TEXT",
             },
         )
-        # Older releases allowed more than one active state per subscription.
-        # Preserve the most advanced job and quarantine the rest before adding
-        # the stronger uniqueness fence.
+        # Older releases fenced by subscription. Preserve only duplicate jobs
+        # for the same assignment, then install the assignment-scoped fence so
+        # sibling assignments in one subscription can be queued together.
         priority = {
             "pending": 1,
             "running": 2,
@@ -503,16 +533,16 @@ def _ensure_proxiware_swap_schema(db) -> None:
             "reconciliation_required": 5,
         }
         active_rows = db.execute(
-            "SELECT id,subscription_id,state FROM swap_jobs "
+            "SELECT id,provider,old_assignment_id,state FROM swap_jobs "
             "WHERE state IN ('pending','running','mutating','provider_applied','reconciliation_required') "
-            "ORDER BY subscription_id,id"
+            "AND old_assignment_id IS NOT NULL ORDER BY provider,old_assignment_id,id"
         ).fetchall()
-        keep_by_subscription: dict[int, int] = {}
+        keep_by_assignment: dict[tuple[str, int], int] = {}
         for row in active_rows:
-            subscription_id = int(row["subscription_id"])
-            current_id = keep_by_subscription.get(subscription_id)
+            assignment_key = (str(row["provider"]), int(row["old_assignment_id"]))
+            current_id = keep_by_assignment.get(assignment_key)
             if current_id is None:
-                keep_by_subscription[subscription_id] = int(row["id"])
+                keep_by_assignment[assignment_key] = int(row["id"])
                 continue
             current = db.execute("SELECT state FROM swap_jobs WHERE id=?", (current_id,)).fetchone()
             if current is not None and priority.get(str(row["state"]), 0) > priority.get(str(current["state"]), 0):
@@ -522,7 +552,7 @@ def _ensure_proxiware_swap_schema(db) -> None:
                     "WHERE id=?",
                     (_iso(), _iso(), current_id),
                 )
-                keep_by_subscription[subscription_id] = int(row["id"])
+                keep_by_assignment[assignment_key] = int(row["id"])
             else:
                 db.execute(
                     "UPDATE swap_jobs SET state='blocked',reason='migration_conflict',"
@@ -530,10 +560,52 @@ def _ensure_proxiware_swap_schema(db) -> None:
                     "WHERE id=?",
                     (_iso(), _iso(), int(row["id"])),
                 )
+        # A mutation/reconciliation fence remains subscription-scoped because
+        # dashboard evidence for sibling assignments becomes stale as soon as
+        # one provider mutation starts. Quarantine legacy duplicates before
+        # creating that second safety index.
+        mutation_rows = db.execute(
+            "SELECT id,subscription_id,state FROM swap_jobs "
+            "WHERE state IN ('mutating','provider_applied','reconciliation_required') "
+            "ORDER BY subscription_id,id"
+        ).fetchall()
+        keep_mutation_by_subscription: dict[int, int] = {}
+        for row in mutation_rows:
+            subscription_id = int(row["subscription_id"])
+            current_id = keep_mutation_by_subscription.get(subscription_id)
+            if current_id is None:
+                keep_mutation_by_subscription[subscription_id] = int(row["id"])
+                continue
+            current = db.execute("SELECT state FROM swap_jobs WHERE id=?", (current_id,)).fetchone()
+            if current is not None and priority.get(str(row["state"]), 0) > priority.get(str(current["state"]), 0):
+                db.execute(
+                    "UPDATE swap_jobs SET state='blocked',reason='migration_conflict',"
+                    "error_code='manual_action_required',blocked_at=?,claim_token=NULL,claimed_until=NULL,updated_at=? "
+                    "WHERE id=?",
+                    (_iso(), _iso(), current_id),
+                )
+                keep_mutation_by_subscription[subscription_id] = int(row["id"])
+            else:
+                db.execute(
+                    "UPDATE swap_jobs SET state='blocked',reason='migration_conflict',"
+                    "error_code='manual_action_required',blocked_at=?,claim_token=NULL,claimed_until=NULL,updated_at=? "
+                    "WHERE id=?",
+                    (_iso(), _iso(), int(row["id"])),
+                )
+        db.execute("DROP INDEX IF EXISTS swap_jobs_one_active_idx")
+        db.execute("DROP INDEX IF EXISTS swap_jobs_one_active_v2_idx")
+        db.execute("DROP INDEX IF EXISTS swap_jobs_one_active_assignment_idx")
+        db.execute("DROP INDEX IF EXISTS swap_jobs_one_mutation_subscription_idx")
         db.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS swap_jobs_one_active_v2_idx "
-            "ON swap_jobs(subscription_id) "
-            "WHERE state IN ('pending','running','mutating','provider_applied','reconciliation_required')"
+            "CREATE UNIQUE INDEX swap_jobs_one_active_assignment_idx "
+            "ON swap_jobs(provider, old_assignment_id) "
+            "WHERE old_assignment_id IS NOT NULL "
+            "AND state IN ('pending','running','mutating','provider_applied','reconciliation_required')"
+        )
+        db.execute(
+            "CREATE UNIQUE INDEX swap_jobs_one_mutation_subscription_idx "
+            "ON swap_jobs(provider, subscription_id) "
+            "WHERE state IN ('mutating','provider_applied','reconciliation_required')"
         )
         # Older releases marked a reconciled replacement as ``pending``. That
         # state is not claimable by the qualification batch, so repair only
@@ -718,6 +790,7 @@ class SwapDecision:
         threshold: int = DEFAULT_ELIGIBLE_THRESHOLD,
         cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS,
         assignment_id: int | None = None,
+        exclude_job_id: int | None = None,
     ) -> "SwapDecision":
         current = _now(now)
         subscription = db.execute(
@@ -824,7 +897,19 @@ class SwapDecision:
             used = int(subscription["swap_used"] or 0)
         except (TypeError, ValueError):
             quota, used = 0, 0
-        if quota >= 0 and quota <= used:
+        reserved_query = (
+            "SELECT COUNT(*) FROM swap_jobs WHERE provider=? AND subscription_id=? "
+            "AND state IN ('pending','running','mutating','provider_applied','reconciliation_required')"
+        )
+        reserved_params: list[object] = [PROVIDER, int(subscription_id)]
+        if exclude_job_id is not None:
+            reserved_query += " AND id<>?"
+            reserved_params.append(int(exclude_job_id))
+        try:
+            reserved = int(db.execute(reserved_query, tuple(reserved_params)).fetchone()[0])
+        except (TypeError, ValueError, sqlite3.Error):
+            return cls(False, "manual_action_required", int(subscription_id), assignment_id)
+        if quota >= 0 and quota <= used + reserved:
             return cls(False, "quota_exhausted", int(subscription_id), assignment_id)
         ready_at = assignment["replacement_ready_at"]
         if ready_at:
@@ -835,16 +920,9 @@ class SwapDecision:
                     return cls(False, "cooldown", int(subscription_id), assignment_id)
             except ValueError:
                 return cls(False, "manual_action_required", int(subscription_id), assignment_id)
-        # A subscription-level timestamp protects against replacements whose
-        # old assignment was already removed from the provider response.
-        last_success = subscription["last_swap_success_at"]
-        if last_success:
-            try:
-                elapsed = current - datetime.fromisoformat(str(last_success)).astimezone(UTC)
-                if elapsed < timedelta(seconds=max(60, int(cooldown_seconds))):
-                    return cls(False, "cooldown", int(subscription_id), assignment_id)
-            except ValueError:
-                return cls(False, "manual_action_required", int(subscription_id), assignment_id)
+        # Cooldown belongs to the replacement assignment. A subscription can
+        # contain several independent Risk assignments, all of which must be
+        # queued in the same batch; a previous sibling swap must not hide them.
         return cls(True, "ready", int(subscription_id), assignment_id)
 
 
@@ -881,29 +959,55 @@ def queue_eligible_swaps(
         configured_threshold = int(get_setting(db, "proxiware_eligible_threshold", str(DEFAULT_ELIGIBLE_THRESHOLD)))
     except ValueError:
         configured_threshold = DEFAULT_ELIGIBLE_THRESHOLD
+    effective_threshold = max(1, int(threshold or configured_threshold))
     try:
-        configured_cooldown = max(
-            DEFAULT_COOLDOWN_SECONDS,
-            int(get_setting(db, "proxiware_cooldown_seconds", str(DEFAULT_COOLDOWN_SECONDS))),
+        dashboard_max_age = max(
+            60,
+            int(get_setting(db, "proxiware_dashboard_max_age_seconds", str(DEFAULT_DASHBOARD_MAX_AGE_SECONDS))),
         )
     except ValueError:
-        configured_cooldown = DEFAULT_COOLDOWN_SECONDS
-    effective_threshold = max(1, int(threshold or configured_threshold))
+        dashboard_max_age = DEFAULT_DASHBOARD_MAX_AGE_SECONDS
+    dashboard_cutoff = (current - timedelta(seconds=dashboard_max_age)).isoformat()
+    dashboard_future = (current + timedelta(seconds=60)).isoformat()
     rows = db.execute(
-        "SELECT id FROM provider_subscriptions WHERE provider=? AND status IN ('active','ready') "
-        "ORDER BY updated_at,id LIMIT ?",
-        (PROVIDER, max(0, int(limit))),
+        "SELECT pa.id AS assignment_id, pa.subscription_id "
+        "FROM provider_assignments pa "
+        "JOIN provider_subscriptions ps ON ps.id=pa.subscription_id "
+        "WHERE pa.provider=? AND ps.provider=? "
+        "AND pa.status IN ('active','current') AND pa.missing_at IS NULL "
+        "AND ps.status IN ('active','ready') AND ps.missing_at IS NULL "
+        "AND pa.qualification='risk' AND pa.live_status IN ('live','online') "
+        "AND pa.provider_eligible=1 AND COALESCE(pa.duplicate_egress,0)=0 "
+        "AND pa.dashboard_assignment_id IS NOT NULL AND trim(pa.dashboard_assignment_id)<>'' "
+        "AND pa.dashboard_eligible=1 AND pa.dashboard_connections>=0 AND pa.dashboard_connections<1000 "
+        "AND pa.dashboard_observed_at BETWEEN ? AND ? "
+        "AND (pa.replacement_ready_at IS NULL OR pa.replacement_ready_at<=?) "
+        "AND (ps.eligible_count IS NULL OR ps.eligible_count<?) "
+        "AND (ps.swap_quota<0 OR ps.swap_used<ps.swap_quota) "
+        "AND NOT EXISTS (SELECT 1 FROM swap_jobs sj WHERE sj.provider=pa.provider "
+        "AND sj.old_assignment_id=pa.id "
+        "AND sj.state IN ('pending','running','mutating','provider_applied','reconciliation_required')) "
+        "ORDER BY ps.updated_at, pa.updated_at, pa.id LIMIT ?",
+        (
+            PROVIDER,
+            PROVIDER,
+            dashboard_cutoff,
+            dashboard_future,
+            current.isoformat(),
+            effective_threshold,
+            max(0, int(limit)),
+        ),
     ).fetchall()
     queued = 0
     with _write_transaction(db):
         for row in rows:
-            subscription_id = int(row["id"])
+            subscription_id = int(row["subscription_id"])
             decision = SwapDecision.for_subscription(
                 db,
                 subscription_id,
                 now=current,
                 threshold=effective_threshold,
-                cooldown_seconds=configured_cooldown,
+                assignment_id=int(row["assignment_id"]),
             )
             _remember_decision(db, decision, now=current)
             if not decision.allowed:
@@ -957,13 +1061,23 @@ def claim_next_swap(
         if job_id is None:
             row = db.execute(
                 "SELECT id FROM swap_jobs WHERE provider=? AND state='pending' AND "
-                "(claimed_until IS NULL OR claimed_until<=?) ORDER BY created_at,id LIMIT 1",
+                "(claimed_until IS NULL OR claimed_until<=?) "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM swap_jobs active WHERE active.provider=swap_jobs.provider "
+                "AND active.subscription_id=swap_jobs.subscription_id AND active.id<>swap_jobs.id "
+                "AND active.state IN ('running','mutating','provider_applied','reconciliation_required')"
+                ") ORDER BY created_at,id LIMIT 1",
                 (PROVIDER, current.isoformat()),
             ).fetchone()
         else:
             row = db.execute(
                 "SELECT id FROM swap_jobs WHERE id=? AND provider=? AND state='pending' AND "
-                "(claimed_until IS NULL OR claimed_until<=?) LIMIT 1",
+                "(claimed_until IS NULL OR claimed_until<=?) "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM swap_jobs active WHERE active.provider=swap_jobs.provider "
+                "AND active.subscription_id=swap_jobs.subscription_id AND active.id<>swap_jobs.id "
+                "AND active.state IN ('running','mutating','provider_applied','reconciliation_required')"
+                ") LIMIT 1",
                 (int(job_id), PROVIDER, current.isoformat()),
             ).fetchone()
         if row is None:
@@ -1027,22 +1141,28 @@ def revalidate_swap_job(
             threshold = int(get_setting(db, "proxiware_eligible_threshold", str(DEFAULT_ELIGIBLE_THRESHOLD)))
         except (TypeError, ValueError):
             threshold = DEFAULT_ELIGIBLE_THRESHOLD
-        try:
-            cooldown_seconds = max(
-                DEFAULT_COOLDOWN_SECONDS,
-                int(get_setting(db, "proxiware_cooldown_seconds", str(DEFAULT_COOLDOWN_SECONDS))),
-            )
-        except (TypeError, ValueError):
-            cooldown_seconds = DEFAULT_COOLDOWN_SECONDS
         if decision is None:
-            decision = SwapDecision.for_subscription(
-                db,
-                int(job["subscription_id"]),
-                now=current,
-                threshold=max(1, threshold),
-                cooldown_seconds=cooldown_seconds,
-                assignment_id=(int(job["old_assignment_id"]) if job["old_assignment_id"] is not None else None),
-            )
+            mutation_in_progress = db.execute(
+                "SELECT 1 FROM swap_jobs WHERE provider=? AND subscription_id=? "
+                "AND id<>? AND state IN ('running','mutating','provider_applied','reconciliation_required') LIMIT 1",
+                (PROVIDER, int(job["subscription_id"]), int(job_id)),
+            ).fetchone()
+            if mutation_in_progress is not None:
+                decision = SwapDecision(
+                    False,
+                    "subscription_mutation_in_progress",
+                    int(job["subscription_id"]),
+                    int(job["old_assignment_id"]) if job["old_assignment_id"] is not None else None,
+                )
+            else:
+                decision = SwapDecision.for_subscription(
+                    db,
+                    int(job["subscription_id"]),
+                    now=current,
+                    threshold=max(1, threshold),
+                    assignment_id=(int(job["old_assignment_id"]) if job["old_assignment_id"] is not None else None),
+                    exclude_job_id=int(job_id),
+                )
         if decision.allowed and decision.assignment_id == job["old_assignment_id"]:
             if enter_mutation:
                 token = str(job["claim_token"] or claim_token or "").strip()
@@ -1792,20 +1912,13 @@ def request_manual_swap(db, job_id: int, *, now: datetime | None = None) -> None
             threshold = int(get_setting(db, "proxiware_eligible_threshold", str(DEFAULT_ELIGIBLE_THRESHOLD)))
         except ValueError:
             threshold = DEFAULT_ELIGIBLE_THRESHOLD
-        try:
-            cooldown_seconds = max(
-                DEFAULT_COOLDOWN_SECONDS,
-                int(get_setting(db, "proxiware_cooldown_seconds", str(DEFAULT_COOLDOWN_SECONDS))),
-            )
-        except ValueError:
-            cooldown_seconds = DEFAULT_COOLDOWN_SECONDS
         decision = SwapDecision.for_subscription(
             db,
             int(row["subscription_id"]),
             now=current,
             threshold=max(1, threshold),
-            cooldown_seconds=cooldown_seconds,
             assignment_id=(int(row["old_assignment_id"]) if row["old_assignment_id"] is not None else None),
+            exclude_job_id=int(job_id),
         )
         if not decision.allowed or decision.assignment_id != row["old_assignment_id"]:
             raise ValueError(f"Swap guards no longer pass: {decision.reason}")

@@ -146,6 +146,52 @@ def test_provider_proxy_with_active_swap_job_is_never_exported(app, client):
     assert response.get_data(as_text=True) == ""
 
 
+def test_active_swap_job_does_not_hide_allow_sibling_assignment(app, client):
+    with app.app_context():
+        db = get_db()
+        _assignment(db)
+        subscription_id = db.execute("SELECT id FROM provider_subscriptions").fetchone()["id"]
+        now = datetime.now(UTC).isoformat()
+        db.execute(
+            """
+            INSERT INTO provider_assignments(
+                subscription_id,provider,external_id,host,port,username_encrypted,password_encrypted,
+                status,qualification,provider_eligible,live_status,exit_ip,assigned_at,last_seen_at,
+                created_at,updated_at,protocol,last_checked_at,egress_verified_at,duplicate_egress,
+                distribution_enabled,dashboard_assignment_id,dashboard_eligible,dashboard_connections,
+                dashboard_observed_at,dashboard_source
+            ) VALUES(?, 'proxiware','feed-risk','provider-risk.example',9001,?,?, 'active','risk',1,
+                     'live','198.51.100.81',?,?,?,?,'socks5',?,?,0,0,'dashboard-risk',1,10,?,
+                     'provider_dashboard')
+            """,
+            (
+                subscription_id,
+                encrypt_secret("risk-user"),
+                encrypt_secret("risk-pass"),
+                now,
+                now,
+                now,
+                now,
+                now,
+                now,
+                now,
+            ),
+        )
+        risk_id = db.execute("SELECT id FROM provider_assignments WHERE external_id='feed-risk'").fetchone()["id"]
+        db.execute(
+            "INSERT INTO swap_jobs(provider,subscription_id,old_assignment_id,state,reason,created_at,updated_at) "
+            "VALUES('proxiware',?,?, 'pending','queued',?,?)",
+            (subscription_id, risk_id, now, now),
+        )
+        db.commit()
+        set_setting(db, "proxiware_distribution_enabled", "1")
+
+    response = client.get("/api/v1/proxy-raw?format=json", headers={"X-API-Key": "internal-test-key"})
+
+    assert response.status_code == 200
+    assert [row["endpoint"] for row in response.get_json()] == ["provider-feed.example:9000"]
+
+
 def test_provider_proxy_without_fresh_dashboard_evidence_is_never_exported(app, client):
     with app.app_context():
         db = get_db()

@@ -112,6 +112,81 @@ def test_ready_swap_schema_does_not_write_when_another_connection_holds_lock(tmp
         subject.close()
 
 
+def test_swap_schema_uses_assignment_scoped_active_job_fence(app):
+    with app.app_context():
+        db = get_db()
+        indexes = {row["name"]: row for row in db.execute('PRAGMA index_list("swap_jobs")').fetchall()}
+        assignment_index = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='swap_jobs_one_active_assignment_idx'"
+        ).fetchone()
+        mutation_index = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='swap_jobs_one_mutation_subscription_idx'"
+        ).fetchone()
+
+    assert "swap_jobs_one_active_idx" not in indexes
+    assert "swap_jobs_one_active_v2_idx" not in indexes
+    assert assignment_index is not None
+    assert "old_assignment_id" in str(assignment_index["sql"])
+    assert mutation_index is not None
+    assert "subscription_id" in str(mutation_index["sql"])
+
+
+def test_swap_schema_migrates_legacy_subscription_fence(app):
+    with app.app_context():
+        db = get_db()
+        db.execute("DROP INDEX IF EXISTS swap_jobs_one_active_assignment_idx")
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS swap_jobs_one_active_v2_idx "
+            "ON swap_jobs(subscription_id) "
+            "WHERE state IN ('pending','running','mutating','provider_applied','reconciliation_required')"
+        )
+        db.commit()
+
+        ensure_proxiware_swap_schema(db)
+
+        indexes = {row["name"] for row in db.execute('PRAGMA index_list("swap_jobs")').fetchall()}
+
+    assert "swap_jobs_one_active_v2_idx" not in indexes
+    assert "swap_jobs_one_active_assignment_idx" in indexes
+
+
+def test_swap_schema_quarantines_duplicate_mutations_per_subscription(app):
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC).isoformat()
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db, quota=-1)
+        db.execute(
+            "INSERT INTO provider_assignments(subscription_id,provider,external_id,host,port,status,qualification,"
+            "provider_eligible,live_status,created_at,updated_at) VALUES(?, 'proxiware','assignment-2',"
+            "'proxy-2.example',8081,'active','risk',1,'live',?,?)",
+            (sub_id, now, now),
+        )
+        assignment_ids = [
+            int(row["id"])
+            for row in db.execute(
+                "SELECT id FROM provider_assignments WHERE subscription_id=? ORDER BY id", (sub_id,)
+            ).fetchall()
+        ]
+        db.execute("DROP INDEX IF EXISTS swap_jobs_one_active_assignment_idx")
+        db.execute("DROP INDEX IF EXISTS swap_jobs_one_mutation_subscription_idx")
+        for assignment_id in assignment_ids:
+            db.execute(
+                "INSERT INTO swap_jobs(provider,subscription_id,old_assignment_id,state,created_at,updated_at) "
+                "VALUES('proxiware',?,?, 'mutating',?,?)",
+                (sub_id, assignment_id, now, now),
+            )
+        db.commit()
+
+        ensure_proxiware_swap_schema(db)
+        rows = db.execute(
+            "SELECT state,reason FROM swap_jobs WHERE subscription_id=? ORDER BY id", (sub_id,)
+        ).fetchall()
+
+    assert [row["state"] for row in rows].count("mutating") == 1
+    assert [row["state"] for row in rows].count("blocked") == 1
+    assert rows[1]["reason"] == "migration_conflict"
+
+
 def _seed_subscription(db, *, eligible_count=500, connections=100, quota=1, cooldown=None):
     ensure_proxiware_swap_schema(db)
     now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC).isoformat()
@@ -237,6 +312,210 @@ def test_queue_requires_all_guards_and_creates_one_durable_job(app):
         job = db.execute("SELECT * FROM swap_jobs WHERE subscription_id=?", (sub_id,)).fetchone()
     assert job["state"] == "pending"
     assert job["reason"] == "queued"
+
+
+def test_queue_batches_each_non_allow_assignment_in_a_subscription(app):
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db, quota=-1)
+        timestamp = now.isoformat()
+        db.execute(
+            """
+            INSERT INTO provider_assignments(
+                subscription_id, provider, external_id, host, port, status,
+                qualification, provider_eligible, live_status, country,
+                dashboard_assignment_id, dashboard_eligible, dashboard_connections,
+                dashboard_observed_at, dashboard_source,
+                assigned_at, last_seen_at, created_at, updated_at
+            ) VALUES (?, 'proxiware', 'assignment-2', 'proxy-2.example', 8081, 'active',
+                      'risk', 1, 'live', 'US', 'dashboard-2', 1, 10, ?,
+                      'provider_dashboard', ?, ?, ?, ?)
+            """,
+            (sub_id, timestamp, timestamp, timestamp, timestamp, timestamp),
+        )
+        db.commit()
+        set_setting(db, "proxiware_auto_swap", "1")
+
+        assert queue_eligible_swaps(db, now=now, limit=20) == 2
+        rows = db.execute(
+            "SELECT old_assignment_id FROM swap_jobs WHERE subscription_id=? ORDER BY old_assignment_id",
+            (sub_id,),
+        ).fetchall()
+
+    assert [int(row["old_assignment_id"]) for row in rows] == [1, 2]
+
+
+def test_queue_reserves_finite_swap_quota_across_sibling_assignments(app):
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db, quota=1)
+        timestamp = now.isoformat()
+        db.execute(
+            """
+            INSERT INTO provider_assignments(
+                subscription_id, provider, external_id, host, port, status,
+                qualification, provider_eligible, live_status, country,
+                dashboard_assignment_id, dashboard_eligible, dashboard_connections,
+                dashboard_observed_at, dashboard_source,
+                assigned_at, last_seen_at, created_at, updated_at
+            ) VALUES (?, 'proxiware', 'assignment-2', 'proxy-2.example', 8081, 'active',
+                      'risk', 1, 'live', 'US', 'dashboard-2', 1, 10, ?,
+                      'provider_dashboard', ?, ?, ?, ?)
+            """,
+            (sub_id, timestamp, timestamp, timestamp, timestamp, timestamp),
+        )
+        db.commit()
+        set_setting(db, "proxiware_auto_swap", "1")
+
+        assert queue_eligible_swaps(db, now=now, limit=20) == 1
+
+
+def test_pending_sibling_waits_until_existing_mutation_reconciles(app):
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db, quota=-1)
+        timestamp = now.isoformat()
+        db.execute(
+            """
+            INSERT INTO provider_assignments(
+                subscription_id, provider, external_id, host, port, status,
+                qualification, provider_eligible, live_status, country,
+                dashboard_assignment_id, dashboard_eligible, dashboard_connections,
+                dashboard_observed_at, dashboard_source,
+                assigned_at, last_seen_at, created_at, updated_at
+            ) VALUES (?, 'proxiware', 'assignment-2', 'proxy-2.example', 8081, 'active',
+                      'risk', 1, 'live', 'US', 'dashboard-2', 1, 10, ?,
+                      'provider_dashboard', ?, ?, ?, ?)
+            """,
+            (sub_id, timestamp, timestamp, timestamp, timestamp, timestamp),
+        )
+        db.commit()
+        set_setting(db, "proxiware_auto_swap", "1")
+        assert queue_eligible_swaps(db, now=now, limit=20) == 2
+        first = claim_next_swap(db, now=now)
+        assert claim_next_swap(db, now=now) is None
+        revalidate_swap_job(
+            db,
+            first["id"],
+            now=now,
+            claim_token=first["claim_token"],
+            enter_mutation=True,
+        )
+
+        assert claim_next_swap(db, now=now) is None
+
+
+def test_allow_assignment_does_not_hide_risk_sibling_from_queue(app):
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db, quota=-1)
+        timestamp = now.isoformat()
+        risk_id = db.execute("SELECT id FROM provider_assignments WHERE external_id='assignment-1'").fetchone()["id"]
+        db.execute(
+            """
+            INSERT INTO provider_assignments(
+                subscription_id, provider, external_id, host, port, status,
+                qualification, provider_eligible, live_status, country,
+                dashboard_assignment_id, dashboard_eligible, dashboard_connections,
+                dashboard_observed_at, dashboard_source,
+                assigned_at, last_seen_at, created_at, updated_at
+            ) VALUES (?, 'proxiware', 'assignment-allow', 'allow.example', 8081, 'active',
+                      'allow', 1, 'live', 'US', 'dashboard-allow', 1, 10, ?,
+                      'provider_dashboard', ?, ?, ?, ?)
+            """,
+            (sub_id, timestamp, timestamp, timestamp, timestamp, timestamp),
+        )
+        db.commit()
+        set_setting(db, "proxiware_auto_swap", "1")
+
+        assert queue_eligible_swaps(db, now=now, limit=20) == 1
+        queued = db.execute("SELECT old_assignment_id FROM swap_jobs").fetchone()
+
+    assert int(queued["old_assignment_id"]) == int(risk_id)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("live_status", "dead"),
+        ("qualification", "pending"),
+        ("provider_eligible", 0),
+        ("duplicate_egress", 1),
+    ],
+)
+def test_queue_skips_non_swappable_sibling_without_hiding_valid_risk(app, field, value):
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db, quota=-1)
+        timestamp = now.isoformat()
+        valid_id = db.execute("SELECT id FROM provider_assignments WHERE external_id='assignment-1'").fetchone()["id"]
+        db.execute(
+            """
+            INSERT INTO provider_assignments(
+                subscription_id, provider, external_id, host, port, status,
+                qualification, provider_eligible, live_status, country,
+                duplicate_egress, dashboard_assignment_id, dashboard_eligible,
+                dashboard_connections, dashboard_observed_at, dashboard_source,
+                assigned_at, last_seen_at, created_at, updated_at
+            ) VALUES (?, 'proxiware', 'assignment-invalid', 'invalid.example', 8081, 'active',
+                      'risk', 1, 'live', 'US', 0, 'dashboard-invalid', 1, 10, ?,
+                      'provider_dashboard', ?, ?, ?, ?)
+            """,
+            (sub_id, timestamp, timestamp, timestamp, timestamp, timestamp),
+        )
+        db.execute(f"UPDATE provider_assignments SET {field}=? WHERE external_id='assignment-invalid'", (value,))
+        db.commit()
+        set_setting(db, "proxiware_auto_swap", "1")
+
+        assert queue_eligible_swaps(db, now=now, limit=20) == 1
+        queued = db.execute("SELECT old_assignment_id FROM swap_jobs").fetchone()
+
+    assert int(queued["old_assignment_id"]) == int(valid_id)
+
+
+def test_sibling_assignment_is_not_blocked_by_previous_swap_cooldown(app):
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db, quota=-1)
+        timestamp = now.isoformat()
+        db.execute(
+            """
+            INSERT INTO provider_assignments(
+                subscription_id, provider, external_id, host, port, status,
+                qualification, provider_eligible, live_status, country,
+                dashboard_assignment_id, dashboard_eligible, dashboard_connections,
+                dashboard_observed_at, dashboard_source,
+                assigned_at, last_seen_at, created_at, updated_at
+            ) VALUES (?, 'proxiware', 'assignment-2', 'proxy-2.example', 8081, 'active',
+                      'risk', 1, 'live', 'US', 'dashboard-2', 1, 10, ?,
+                      'provider_dashboard', ?, ?, ?, ?)
+            """,
+            (sub_id, timestamp, timestamp, timestamp, timestamp, timestamp),
+        )
+        db.execute(
+            "UPDATE provider_subscriptions SET last_swap_success_at=? WHERE id=?",
+            (timestamp, sub_id),
+        )
+        db.commit()
+
+        assignment_id = db.execute("SELECT id FROM provider_assignments WHERE external_id='assignment-2'").fetchone()[
+            "id"
+        ]
+        decision = SwapDecision.for_subscription(
+            db,
+            sub_id,
+            now=now,
+            assignment_id=assignment_id,
+        )
+
+    assert decision.allowed is True
+    assert decision.assignment_id == assignment_id
 
 
 def test_explicit_assignment_guard_does_not_drift_to_latest_assignment(app):

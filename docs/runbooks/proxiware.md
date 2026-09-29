@@ -165,6 +165,10 @@ script. Keep auto-swap disabled until a fresh dry-run passes.
   qualification batch. `Allow` stops replacement. Only a conclusive live
   `Risk` result may queue the next guarded swap; pending, dead, inconclusive,
   duplicate, stale, or unverified rows remain excluded.
+- Every guarded `Risk` assignment is queued independently. Provider mutations
+  remain sequential within one subscription until the prior mutation is
+  reconciled; cooled-down replacements are qualified together using the
+  configured bounded worker concurrency.
 - `inconclusive` or `unknown`: keep the assignment out of distribution and swap
   until a bounded qualification run produces a trusted result.
 - `manual_action_required`: the browser adapter is unavailable or the provider
