@@ -537,3 +537,163 @@ def test_cdp_swap_rejects_provider_error_without_claiming_success():
                 "subscription_external_id": "39277",
             }
         )
+
+
+def test_cdp_browser_renews_login_with_fingerprint_and_cookies():
+    class RenewClient(FakeCdp):
+        def __init__(self):
+            super().__init__(None)
+            self.navigated = []
+
+        def navigate(self, url):
+            self.navigated.append(url)
+
+        @property
+        def url(self):
+            return "https://app.proxiware.com/auth/login"
+
+        def cookies(self):
+            return [{"name": "session", "value": "opaque", "domain": "app.proxiware.com", "path": "/"}]
+
+        def evaluate(self, expression, arg=None):
+            self.calls.append(("evaluate", expression, arg))
+            if "fp.proxiware.com" in expression:
+                return {"visitor_id": "visitor", "event_id": "event"}
+            assert arg["path"] == "/api/auth/login"
+            assert arg["body"] == {
+                "email": "owner@example.com",
+                "password": "provider-password",
+                "token": "captcha-token",
+                "fp": "visitor",
+                "fpr": "event",
+            }
+            return {
+                "status": 200,
+                "origin": "https://app.proxiware.com",
+                "response_origin": "https://app.proxiware.com",
+                "path": "/api/auth/login",
+                "response_path": "/api/auth/login",
+                "payload": {"success": True},
+            }
+
+    client = RenewClient()
+    adapter = CdpProxiwareBrowser(
+        "http://127.0.0.1:9222",
+        client_factory=lambda: client,
+        login_url="https://app.proxiware.com/auth/login?redirect=%2F",
+        fingerprint_public_key="public-key",
+    )
+
+    result = adapter.renew(email="owner@example.com", password="provider-password", captcha_token="captcha-token")
+
+    assert result["fingerprint_observed"] is True
+    assert result["cookies"] == [
+        {"name": "session", "value": "opaque", "domain": "app.proxiware.com", "path": "/"}
+    ]
+    assert client.navigated == ["https://app.proxiware.com/auth/login?redirect=%2F"]
+
+
+def test_cdp_browser_clears_existing_provider_session_before_login():
+    class RenewClient(FakeCdp):
+        def __init__(self):
+            super().__init__(None)
+            self.cleared = False
+
+        def clear_provider_session(self):
+            self.cleared = True
+
+        def navigate(self, _url):
+            return None
+
+        @property
+        def url(self):
+            return (
+                "https://app.proxiware.com/auth/login"
+                if self.cleared
+                else "https://app.proxiware.com/static/proxy/isp"
+            )
+
+        def cookies(self):
+            return [{"name": "session", "value": "fresh", "domain": "app.proxiware.com", "path": "/"}]
+
+        def evaluate(self, expression, arg=None):
+            self.calls.append(("evaluate", expression, arg))
+            if "fp.proxiware.com" in expression:
+                return {"visitor_id": "visitor", "event_id": "event"}
+            assert arg["path"] == "/api/auth/login"
+            return {
+                "status": 200,
+                "origin": "https://app.proxiware.com",
+                "response_origin": "https://app.proxiware.com",
+                "path": "/auth/login",
+                "response_path": "/api/auth/login",
+                "payload": {"success": True},
+            }
+
+    client = RenewClient()
+    adapter = CdpProxiwareBrowser("http://127.0.0.1:9222", client_factory=lambda: client)
+
+    result = adapter.renew(email="owner@example.com", password="provider-password", captcha_token="captcha-token")
+
+    assert result["fingerprint_observed"] is True
+    assert client.cleared is True
+
+
+def test_cdp_browser_posts_legacy_login_page_to_auth_endpoint():
+    class RenewClient(FakeCdp):
+        def navigate(self, _url):
+            return None
+
+        @property
+        def url(self):
+            return "https://app.proxiware.com/login"
+
+        def cookies(self):
+            return [{"name": "session", "value": "opaque", "domain": "app.proxiware.com", "path": "/"}]
+
+        def evaluate(self, expression, arg=None):
+            self.calls.append(("evaluate", expression, arg))
+            if "fp.proxiware.com" in expression:
+                return {"visitor_id": "visitor", "event_id": "event"}
+            assert arg["path"] == "/api/auth/login"
+            return {
+                "status": 200,
+                "origin": "https://app.proxiware.com",
+                "response_origin": "https://app.proxiware.com",
+                "path": "/login",
+                "response_path": "/api/auth/login",
+                "payload": {"success": True},
+            }
+
+    adapter = CdpProxiwareBrowser(
+        "http://127.0.0.1:9222",
+        client_factory=lambda: RenewClient(None),
+        login_url="https://app.proxiware.com/login",
+    )
+
+    result = adapter.renew(email="owner@example.com", password="provider-password", captcha_token="captcha-token")
+
+    assert result["fingerprint_observed"] is True
+
+
+def test_cdp_browser_site_key_discovery_checks_hcaptcha_iframe_url():
+    class SiteKeyClient(FakeCdp):
+        def navigate(self, _url):
+            return None
+
+        @property
+        def url(self):
+            return "https://app.proxiware.com/auth/login"
+
+        def evaluate(self, expression, arg=None):
+            self.calls.append(("evaluate", expression, arg))
+            assert "iframe" in expression
+            assert "sitekey" in expression
+            return "iframe-site-key"
+
+    adapter = CdpProxiwareBrowser(
+        "http://127.0.0.1:9222",
+        client_factory=lambda: SiteKeyClient(None),
+    )
+
+    assert adapter.discover_hcaptcha_site_key() == "iframe-site-key"

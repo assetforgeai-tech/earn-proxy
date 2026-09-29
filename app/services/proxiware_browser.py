@@ -31,8 +31,11 @@ class BrowserAdapterUnavailable(RuntimeError):
                 "browser_dependency_missing",
                 "browser_session_missing",
                 "browser_transport_missing",
+                "captcha_required",
                 "endpoint_mismatch",
+                "fingerprint_failed",
                 "invalid_session",
+                "login_failed",
                 "manual_action_required",
                 "origin_mismatch",
                 "session_expired",
@@ -161,6 +164,16 @@ class _PlaywrightCdpClient:
     def add_cookies(self, cookies: list[dict[str, Any]]) -> None:
         self._context.add_cookies(cookies)
 
+    def cookies(self) -> list[dict[str, Any]]:
+        origin = urlparse(self._dashboard_url)
+        return list(self._context.cookies([f"{origin.scheme}://{origin.netloc}"]))
+
+    def clear_provider_session(self) -> None:
+        # Renewal must be a real login, never an accidental reuse of an old
+        # provider cookie from the isolated browser profile.
+        self._context.clear_cookies(domain="app.proxiware.com")
+        self._context.clear_cookies(domain=".proxiware.com")
+
     @property
     def url(self) -> str:
         return str(self._page.url)
@@ -188,6 +201,8 @@ class CdpProxiwareBrowser:
 
     cdp_url: str
     dashboard_url: str = "https://app.proxiware.com/static/proxy/isp"
+    login_url: str = "https://app.proxiware.com/auth/login?redirect=%2F"
+    fingerprint_public_key: str = "FifZsPA6O1gC5x2RsInJ"
     client_factory: Callable[[], Any] | None = None
     allow_mutation: bool = False
     _session_client: Any | None = field(default=None, init=False, repr=False)
@@ -198,6 +213,11 @@ class CdpProxiwareBrowser:
             raise ValueError("dashboard origin must be https://app.proxiware.com")
         if parsed.path.rstrip("/") != "/static/proxy/isp":
             raise ValueError("dashboard path is invalid")
+        login = urlparse(self.login_url)
+        if login.scheme != "https" or login.netloc.lower() != "app.proxiware.com":
+            raise ValueError("login origin must be https://app.proxiware.com")
+        if login.path.rstrip("/") not in {"/login", "/auth/login"}:
+            raise ValueError("login path is invalid")
 
     @property
     def _origin(self) -> str:
@@ -229,6 +249,76 @@ class CdpProxiwareBrowser:
         expected_path = urlparse(self.dashboard_url).path.rstrip("/") or "/"
         if parsed.path.rstrip("/") != expected_path:
             raise BrowserAdapterUnavailable("session_expired")
+
+    def _navigate_login(self, client: Any) -> None:
+        navigate = getattr(client, "navigate", None)
+        if callable(navigate):
+            navigate(self.login_url)
+        current_url = str(getattr(client, "url", self.login_url) or self.login_url)
+        parsed = urlparse(current_url)
+        if f"{parsed.scheme}://{parsed.netloc}".rstrip("/").lower() != self._origin.lower():
+            raise BrowserAdapterUnavailable("origin_mismatch")
+        if parsed.path.rstrip("/") not in {"/login", "/auth/login"}:
+            raise BrowserAdapterUnavailable("login_failed")
+
+    @staticmethod
+    def _fingerprint_expression(_arg: Any) -> str:
+        return """async ({public_key}) => {
+          try {
+            if (!public_key) return null;
+            const module = await import(`https://fp.proxiware.com/web/v4/${encodeURIComponent(public_key)}`);
+            const agent = await module.start({endpoints: 'https://fp.proxiware.com'});
+            const result = await agent.get();
+            if (!result || !result.visitor_id || !result.event_id) return null;
+            return {visitor_id: String(result.visitor_id), event_id: String(result.event_id)};
+          } catch (_) {
+            return null;
+          }
+        }"""
+
+    def _fingerprint(self, client: Any) -> tuple[str, str]:
+        evaluate = getattr(client, "evaluate", None)
+        if not callable(evaluate):
+            raise BrowserAdapterUnavailable("browser_transport_missing")
+        result = evaluate(self._fingerprint_expression(None), {"public_key": self.fingerprint_public_key})
+        if not isinstance(result, dict):
+            raise BrowserAdapterUnavailable("fingerprint_failed")
+        visitor_id = str(result.get("visitor_id") or "").strip()
+        event_id = str(result.get("event_id") or "").strip()
+        if not visitor_id or not event_id or len(visitor_id) > 512 or len(event_id) > 512:
+            raise BrowserAdapterUnavailable("fingerprint_failed")
+        return visitor_id, event_id
+
+    @staticmethod
+    def _site_key_expression(_arg: Any) -> str:
+        return """() => {
+          const keys = [];
+          for (const element of document.querySelectorAll('[data-sitekey]')) {
+            const key = String(element.getAttribute('data-sitekey') || '').trim();
+            if (key) keys.push(key);
+          }
+          for (const frame of document.querySelectorAll('iframe[src]')) {
+            try {
+              const url = new URL(frame.src, location.href);
+              const hash = new URLSearchParams(url.hash.replace(/^#/, ''));
+              const key = String(url.searchParams.get('sitekey') || hash.get('sitekey') || '').trim();
+              if (key) keys.push(key);
+            } catch (_) {}
+          }
+          return keys[0] || '';
+        }"""
+
+    def discover_hcaptcha_site_key(self, *, page_url: str | None = None) -> str:
+        with self._client() as client:
+            if page_url:
+                self._navigate_login(client)
+            evaluate = getattr(client, "evaluate", None)
+            if not callable(evaluate):
+                raise BrowserAdapterUnavailable("browser_transport_missing")
+            value = str(evaluate(self._site_key_expression(None)) or "").strip()
+            if not value:
+                raise BrowserAdapterUnavailable("captcha_required")
+            return value
 
     @staticmethod
     def _fetch_expression(_arg: Any) -> str:
@@ -321,6 +411,54 @@ class CdpProxiwareBrowser:
                 _PayloadTransport(result.get("payload")), now=lambda: observed_at
             ).observe(subscription_id=requested)
             return rows
+
+    def renew(self, *, email: str, password: str, captcha_token: str) -> dict[str, Any]:
+        if not str(email or "").strip() or not str(password or "") or not str(captcha_token or "").strip():
+            raise BrowserAdapterUnavailable("login_failed")
+        with self._client() as client:
+            clear_session = getattr(client, "clear_provider_session", None)
+            if callable(clear_session):
+                clear_session()
+            self._navigate_login(client)
+            visitor_id, event_id = self._fingerprint(client)
+            result = self._fetch(
+                client,
+                path="/api/auth/login",
+                method="POST",
+                body={
+                    "email": str(email),
+                    "password": str(password),
+                    "token": str(captcha_token),
+                    "fp": visitor_id,
+                    "fpr": event_id,
+                },
+            )
+            status = int(result.get("status") or 0)
+            if status in {401, 403} or status < 200 or status >= 300:
+                raise BrowserAdapterUnavailable("login_failed")
+            payload = result.get("payload")
+            if isinstance(payload, dict) and payload.get("success") is False:
+                raise BrowserAdapterUnavailable("login_failed")
+            get_cookies = getattr(client, "cookies", None)
+            if not callable(get_cookies):
+                raise BrowserAdapterUnavailable("browser_session_missing")
+            cookies = _safe_cookie_list(get_cookies(), url=self.dashboard_url)
+            if not cookies:
+                raise BrowserAdapterUnavailable("invalid_session")
+            expiries = []
+            for cookie in cookies:
+                try:
+                    expires = float(cookie.get("expires"))
+                except (TypeError, ValueError):
+                    continue
+                if expires > 0:
+                    expiries.append(expires)
+            expires_at = datetime.fromtimestamp(min(expiries), tz=UTC).isoformat() if expiries else None
+            return {
+                "cookies": cookies,
+                "expires_at": expires_at,
+                "fingerprint_observed": True,
+            }
 
     def swap_assignment(self, job: Any, *, timeout_seconds: float | None = None) -> dict[str, Any]:
         if not self.allow_mutation:
@@ -461,6 +599,8 @@ def build_browser_adapter(
     cdp_url: str | None = None,
     dry_run: bool = False,
     dashboard_url: str = "https://app.proxiware.com/static/proxy/isp",
+    login_url: str = "https://app.proxiware.com/auth/login?redirect=%2F",
+    fingerprint_public_key: str = "FifZsPA6O1gC5x2RsInJ",
     allow_mutation: bool = False,
 ) -> UnavailableProxiwareBrowser | DryRunProxiwareBrowser | CdpProxiwareBrowser:
     """Build only the explicitly enabled adapter; default is fail-closed."""
@@ -472,6 +612,8 @@ def build_browser_adapter(
         return CdpProxiwareBrowser(
             endpoint,
             dashboard_url=dashboard_url,
+            login_url=login_url,
+            fingerprint_public_key=fingerprint_public_key,
             allow_mutation=bool(allow_mutation),
         )
     return UnavailableProxiwareBrowser(endpoint)

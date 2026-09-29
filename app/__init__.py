@@ -81,8 +81,16 @@ def create_app(test_config: dict | None = None) -> Flask:
         PROXIWARE_ACTION_RATE_WINDOW_SECONDS=int(
             os.environ.get("EARN_PROXY_PROXIWARE_ACTION_RATE_WINDOW_SECONDS", "60")
         ),
-        PROXIWARE_LOGIN_URL=os.environ.get("EARN_PROXY_PROXIWARE_LOGIN_URL", "https://app.proxiware.com/login"),
+        PROXIWARE_LOGIN_URL=os.environ.get(
+            "EARN_PROXY_PROXIWARE_LOGIN_URL", "https://app.proxiware.com/auth/login?redirect=%2F"
+        ),
         PROXIWARE_HCAPTCHA_SITE_KEY=os.environ.get("EARN_PROXY_PROXIWARE_HCAPTCHA_SITE_KEY", ""),
+        PROXIWARE_FINGERPRINT_PUBLIC_KEY=os.environ.get(
+            "EARN_PROXY_PROXIWARE_FINGERPRINT_PUBLIC_KEY", "FifZsPA6O1gC5x2RsInJ"
+        ),
+        PROXIWARE_SESSION_RENEW_COOLDOWN_SECONDS=int(
+            os.environ.get("EARN_PROXY_PROXIWARE_SESSION_RENEW_COOLDOWN_SECONDS", "300")
+        ),
         PROXIWARE_BROWSER_ENABLED=os.environ.get("EARN_PROXY_PROXIWARE_BROWSER_ENABLED", "0") == "1",
         PROXIWARE_BROWSER_DRY_RUN=os.environ.get("EARN_PROXY_PROXIWARE_BROWSER_DRY_RUN", "0") == "1",
         PROXIWARE_BROWSER_ALLOW_MUTATION=os.environ.get("EARN_PROXY_PROXIWARE_BROWSER_ALLOW_MUTATION", "0") == "1",

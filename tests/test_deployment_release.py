@@ -320,6 +320,25 @@ def test_release_backs_up_and_requires_worker_environment():
     worker_keys = installer[worker_keys_start : installer.index("EOF", worker_keys_start)]
     assert "EARN_PROXY_FERNET_KEY" not in worker_keys
     assert "EARN_PROXY_PROXIWARE_SWAP_MUTATION_TIMEOUT_SECONDS" in worker_keys
+    worker_env_names = {
+        "EARN_PROXY_DATABASE",
+        "EARN_PROXY_INSTANCE_PATH",
+        "EARN_PROXY_PROXIWARE_BROWSER_ENABLED",
+        "EARN_PROXY_PROXIWARE_BROWSER_DRY_RUN",
+        "EARN_PROXY_PROXIWARE_BROWSER_ALLOW_MUTATION",
+        "EARN_PROXY_PROXIWARE_CDP_URL",
+        "EARN_PROXY_PROXIWARE_BROWSER_DASHBOARD_URL",
+        "EARN_PROXY_PROXIWARE_LOGIN_URL",
+        "EARN_PROXY_PROXIWARE_HCAPTCHA_SITE_KEY",
+        "EARN_PROXY_PROXIWARE_FINGERPRINT_PUBLIC_KEY",
+        "EARN_PROXY_PROXIWARE_SESSION_RENEW_COOLDOWN_SECONDS",
+        "EARN_PROXY_PROXIWARE_BROWSER_INTERVAL_SECONDS",
+        "EARN_PROXY_PROXIWARE_BROWSER_HEARTBEAT_INTERVAL_SECONDS",
+        "EARN_PROXY_PROXIWARE_SWAP_MUTATION_TIMEOUT_SECONDS",
+    }
+    for line in worker_keys.splitlines():
+        if line.strip() in worker_env_names:
+            assert line == line.lstrip()
     assert 'cp -a "$worker_env" "$backup_dir/earn-proxy-proxiware-worker.env"' in installer
     assert 'install -o root -g root -m 0600 "$worker_env_tmp" "$worker_env"' in installer
     assert 'install -o root -g root -m 0600 "$backup_dir/earn-proxy-proxiware-worker.env" "$worker_env"' in installer
@@ -338,6 +357,15 @@ def test_release_generates_and_rolls_back_a_dedicated_worker_key_file():
         in installer
     )
     assert "EnvironmentFile=/etc/earn-proxy-proxiware-worker-key.env" in installer
+
+
+def test_release_worker_env_has_safe_defaults_for_optional_renewal_settings():
+    installer = (ROOT / "deploy" / "release.sh").read_text()
+
+    assert 'EARN_PROXY_PROXIWARE_LOGIN_URL)\n          line="$key=https://app.proxiware.com/auth/login?redirect=%2F"' in installer
+    assert 'EARN_PROXY_PROXIWARE_HCAPTCHA_SITE_KEY)\n          line="$key="' in installer
+    assert 'EARN_PROXY_PROXIWARE_FINGERPRINT_PUBLIC_KEY)\n          line="$key=FifZsPA6O1gC5x2RsInJ"' in installer
+    assert 'EARN_PROXY_PROXIWARE_SESSION_RENEW_COOLDOWN_SECONDS)\n          line="$key=300"' in installer
 
 
 def test_every_application_service_receives_the_dedicated_provider_key():

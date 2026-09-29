@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from app.db import get_db
 from app.services.proxies import add_proxy, reconcile_exit_ip
@@ -77,6 +77,62 @@ def test_inconclusive_probe_stays_pending_and_not_distribution_eligible(app):
     assert row["live_status"] == "inconclusive"
     assert row["qualification"] == "pending"
     assert row["distribution_enabled"] == 0
+
+
+def test_fresh_replacement_inconclusive_probe_is_scheduled_for_short_retry(app):
+    now = datetime(2026, 9, 25, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        assignment_id = _provider_assignment(db, external_id="fresh-replacement")
+        db.execute(
+            "UPDATE provider_assignments SET replacement_ready_at=?, last_checked_at=NULL WHERE id=?",
+            (now.isoformat(), assignment_id),
+        )
+        db.commit()
+        qualify_proxiware_assignment(
+            db,
+            assignment_id,
+            probe=lambda _proxy: {"status": "inconclusive", "failure_kind": "probe_endpoint"},
+            eligibility=lambda _proxy: {"verdict": "CID_SET"},
+            now=now + timedelta(seconds=61),
+            check_interval_seconds=3600,
+        )
+        row = db.execute(
+            "SELECT qualification_next_check_at FROM provider_assignments WHERE id=?", (assignment_id,)
+        ).fetchone()
+
+    retry_at = datetime.fromisoformat(row["qualification_next_check_at"])
+    assert timedelta(seconds=60) <= retry_at - (now + timedelta(seconds=61)) <= timedelta(seconds=120)
+
+
+def test_fresh_replacement_probe_error_is_scheduled_for_short_retry(app):
+    now = datetime(2026, 9, 25, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        assignment_id = _provider_assignment(db, external_id="fresh-replacement-error")
+        db.execute(
+            "UPDATE provider_assignments SET replacement_ready_at=?, last_checked_at=NULL WHERE id=?",
+            (now.isoformat(), assignment_id),
+        )
+        db.commit()
+
+        def probe(_proxy):
+            raise TimeoutError("probe timeout")
+
+        qualify_proxiware_assignment(
+            db,
+            assignment_id,
+            probe=probe,
+            eligibility=lambda _proxy: {"verdict": "CID_SET"},
+            now=now + timedelta(seconds=61),
+            check_interval_seconds=3600,
+        )
+        row = db.execute(
+            "SELECT qualification_next_check_at FROM provider_assignments WHERE id=?", (assignment_id,)
+        ).fetchone()
+
+    retry_at = datetime.fromisoformat(row["qualification_next_check_at"])
+    assert timedelta(seconds=60) <= retry_at - (now + timedelta(seconds=61)) <= timedelta(seconds=120)
 
 
 def test_provider_duplicate_egress_is_checked_against_user_inventory(app):

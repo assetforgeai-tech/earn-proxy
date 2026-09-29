@@ -136,6 +136,28 @@ def test_session_renewal_uses_injected_adapters_and_persists_no_ephemeral_materi
     assert "fingerprint" not in dump
 
 
+def test_session_renewal_uses_configured_site_key_without_dom_discovery(app):
+    class BrowserWithoutChallengeDom(FakeBrowser):
+        def discover_hcaptcha_site_key(self, *, page_url):
+            raise AssertionError("configured site key must not require DOM discovery")
+
+    with app.app_context():
+        db = get_db()
+        save_provider_credentials(
+            db,
+            {"login_email": "owner@example.com", "login_password": "password", "captcha_api_key": "solver-key"},
+        )
+        result = renew_provider_session(
+            db,
+            BrowserWithoutChallengeDom(),
+            FakeCaptcha(),
+            site_key="site-key",
+            page_url="https://app.proxiware.com/login",
+        )
+
+    assert result.state == "active"
+
+
 def test_missing_real_fingerprint_fails_closed_and_pauses_swaps(app):
     browser = FakeBrowser(result={"cookies": [{"name": "session", "value": "secret"}]})
     with app.app_context():
@@ -172,6 +194,30 @@ def test_captcha_failure_records_safe_code_not_exception_text(app):
     assert result.error_code == "captcha_timeout"
     assert audit["error_code"] == "captcha_timeout"
     assert "leaked-key-123" not in repr(dict(audit))
+
+
+def test_captcha_provider_error_keeps_typed_error_code(app):
+    from app.services.proxiware_captcha import CaptchaProviderError
+
+    with app.app_context():
+        db = get_db()
+        save_provider_credentials(db, {"login_email": "owner@example.com", "login_password": "password"})
+
+        class Captcha:
+            def solve_hcaptcha(self, **_kwargs):
+                raise CaptchaProviderError("captcha_provider_error")
+
+        result = renew_provider_session(
+            db,
+            FakeBrowser(),
+            Captcha(),
+            site_key="site-key",
+            page_url="https://app.proxiware.com/login",
+        )
+        audit = db.execute("SELECT error_code FROM provider_audit_events ORDER BY id DESC LIMIT 1").fetchone()
+
+    assert result.error_code == "captcha_provider_error"
+    assert audit["error_code"] == "captcha_provider_error"
 
 
 def test_connection_check_is_read_only_and_returns_safe_status(app):
@@ -248,6 +294,28 @@ def test_manual_action_pauses_only_canonical_auto_swap_setting(app):
 
     assert values["proxiware_auto_swap"] == "0"
     assert "proxiware_auto_swap_enabled" not in values
+
+
+def test_successful_session_renewal_restores_explicit_auto_swap_intent(app):
+    with app.app_context():
+        db = get_db()
+        save_provider_credentials(
+            db,
+            {"login_email": "owner@example.com", "login_password": "password", "captcha_api_key": "key"},
+        )
+        set_setting(db, "proxiware_auto_swap_intent", "1")
+        set_setting(db, "proxiware_auto_swap", "0")
+        result = renew_provider_session(
+            db,
+            FakeBrowser(),
+            FakeCaptcha(),
+            site_key="site-key",
+            page_url="https://app.proxiware.com/login",
+        )
+        current = get_setting(db, "proxiware_auto_swap", "0")
+
+    assert result.state == "active"
+    assert current == "1"
 
 
 def test_provider_credentials_are_explicitly_scoped_to_proxiware(app):

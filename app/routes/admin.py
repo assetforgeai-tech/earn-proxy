@@ -34,6 +34,8 @@ from app.services.proxiware import (
     enqueue_sync_run,
     request_sync_cancel,
 )
+from app.services.proxiware_browser import build_browser_adapter
+from app.services.proxiware_captcha import TwoCaptchaAdapter
 from app.services.proxiware_credentials import (
     clear_provider_secret,
     get_provider_secret,
@@ -41,6 +43,7 @@ from app.services.proxiware_credentials import (
     record_provider_audit,
     renew_provider_session,
     save_provider_credentials,
+    set_auto_swap_preference,
     test_provider_connections,
 )
 from app.services.proxiware_health import AUTOMATION_PAUSE_KEY
@@ -1353,7 +1356,7 @@ def proxiware_credentials():
             },
         )
         if "auto_swap_enabled" in request.form:
-            set_setting(db, "proxiware_auto_swap", "1" if request.form.get("auto_swap_enabled") else "0")
+            set_auto_swap_preference(db, bool(request.form.get("auto_swap_enabled")))
         record_provider_audit(
             db,
             actor_id=int(g.user["id"]),
@@ -1420,7 +1423,7 @@ def proxiware_settings():
     set_setting(db, "proxiware_worker_concurrency", str(concurrency))
     set_setting(db, "proxiware_retry_limit", str(retry_limit))
     set_setting(db, "proxiware_cooldown_seconds", str(cooldown))
-    set_setting(db, "proxiware_auto_swap", "1" if request.form.get("auto_swap_enabled") else "0")
+    set_auto_swap_preference(db, bool(request.form.get("auto_swap_enabled")))
     set_setting(db, "proxiware_distribution_enabled", "1" if request.form.get("distribution_enabled") else "0")
     record_provider_audit(
         db,
@@ -1526,6 +1529,35 @@ def _proxiware_api_client(api_key: str):
     )
 
 
+def _proxiware_browser_adapter():
+    factory = current_app.extensions.get("proxiware_browser_adapter_factory")
+    if factory is not None:
+        return factory()
+    if not bool(current_app.config.get("PROXIWARE_BROWSER_ENABLED", False)):
+        return None
+    return build_browser_adapter(
+        enabled=True,
+        cdp_url=str(current_app.config.get("PROXIWARE_CDP_URL") or "").strip() or None,
+        dashboard_url=str(
+            current_app.config.get("PROXIWARE_BROWSER_DASHBOARD_URL")
+            or "https://app.proxiware.com/static/proxy/isp"
+        ),
+        login_url=str(
+            current_app.config.get("PROXIWARE_LOGIN_URL")
+            or "https://app.proxiware.com/auth/login?redirect=%2F"
+        ),
+        fingerprint_public_key=str(
+            current_app.config.get("PROXIWARE_FINGERPRINT_PUBLIC_KEY") or "FifZsPA6O1gC5x2RsInJ"
+        ),
+        allow_mutation=False,
+    )
+
+
+def _proxiware_captcha_adapter(api_key: str):
+    factory = current_app.extensions.get("proxiware_captcha_adapter_factory")
+    return factory(api_key) if factory is not None else TwoCaptchaAdapter(api_key)
+
+
 @bp.post("/providers/proxiware/sync")
 @admin_required
 def proxiware_sync():
@@ -1612,12 +1644,11 @@ def proxiware_test_connection():
             "Provider API and CAPTCHA credentials must be configured.", 503, code="not_configured"
         )
     api_factory = current_app.extensions.get("proxiware_api_client_factory")
-    captcha_factory = current_app.extensions.get("proxiware_captcha_adapter_factory")
-    if api_factory is None or captcha_factory is None:
+    if api_factory is None:
         return _proxiware_action_error("Provider connection adapter is not configured.", 503, code="adapter_missing")
     try:
         api_client = _proxiware_api_client(api_key)
-        captcha_adapter = captcha_factory(captcha_key)
+        captcha_adapter = _proxiware_captcha_adapter(captcha_key)
         result = test_provider_connections(db, api_client, captcha_adapter)
     except Exception:  # noqa: BLE001 - read-only dependency boundary
         record_provider_audit(
@@ -1652,18 +1683,22 @@ def proxiware_renew_session():
     if not _provider_action_allowed(db, "renew_session"):
         return _proxiware_action_error("Provider session renewal rate limit reached.", 429, code="rate_limited")
     ensure_proxiware_swap_schema(db)
-    browser_factory = current_app.extensions.get("proxiware_browser_adapter_factory")
-    captcha_factory = current_app.extensions.get("proxiware_captcha_adapter_factory")
     site_key = str(current_app.config.get("PROXIWARE_HCAPTCHA_SITE_KEY") or "").strip()
-    page_url = str(current_app.config.get("PROXIWARE_LOGIN_URL") or "https://app.proxiware.com/login").strip()
+    page_url = str(
+        current_app.config.get("PROXIWARE_LOGIN_URL")
+        or "https://app.proxiware.com/auth/login?redirect=%2F"
+    ).strip()
     captcha_key = get_provider_secret(db, "captcha_api_key")
-    if browser_factory is None or captcha_factory is None:
+    if not bool(current_app.config.get("PROXIWARE_BROWSER_ENABLED", False)) and not current_app.extensions.get(
+        "proxiware_browser_adapter_factory"
+    ):
         return _proxiware_action_error("Provider browser adapter is not configured.", 503, code="adapter_missing")
-    if not site_key or not captcha_key:
+    if not captcha_key:
         return _proxiware_action_error("Provider session prerequisites are not configured.", 503, code="not_configured")
+    browser_adapter = None
     try:
-        browser_adapter = browser_factory()
-        captcha_adapter = captcha_factory(captcha_key)
+        browser_adapter = _proxiware_browser_adapter()
+        captcha_adapter = _proxiware_captcha_adapter(captcha_key)
         result = renew_provider_session(
             db,
             browser_adapter,
@@ -1673,6 +1708,13 @@ def proxiware_renew_session():
         )
     except Exception:  # noqa: BLE001 - renewal boundary must fail closed
         return _proxiware_action_error("Provider session renewal failed.", 502, code="manual_action_required")
+    finally:
+        close = getattr(browser_adapter, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001 - cleanup must not mask renewal result
+                current_app.logger.warning("proxiware browser adapter cleanup failed")
     payload = {
         "state": str(result.state),
         "error_code": str(result.error_code or ""),

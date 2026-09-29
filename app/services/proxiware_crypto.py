@@ -103,6 +103,7 @@ def ensure_worker_columns(db) -> None:
     """Additive schema step; safe on old releases and fresh databases."""
 
     _add_columns(db, "provider_sessions", {"worker_cookie_encrypted": "TEXT NOT NULL DEFAULT ''"})
+    _add_columns(db, "provider_credentials", {"worker_secret_encrypted": "TEXT NOT NULL DEFAULT ''"})
     _add_columns(
         db,
         "provider_assignments",
@@ -140,6 +141,25 @@ def migrate_provider_worker_secrets(db) -> int:
         db.execute(
             "UPDATE provider_sessions SET worker_cookie_encrypted=? WHERE provider='proxiware'",
             (worker_value,),
+        )
+        migrated += 1
+    for row in db.execute(
+        "SELECT name,secret_encrypted,worker_secret_encrypted FROM provider_credentials "
+        "WHERE provider='proxiware' AND COALESCE(secret_encrypted,'')<>''"
+    ).fetchall():
+        try:
+            decrypt_worker_secret(row["worker_secret_encrypted"])
+            continue
+        except ValueError:
+            pass
+        try:
+            worker_value = encrypt_worker_secret(decrypt_secret(row["secret_encrypted"]))
+        except (TypeError, ValueError):
+            continue
+        db.execute(
+            "UPDATE provider_credentials SET worker_secret_encrypted=? "
+            "WHERE provider='proxiware' AND name=?",
+            (worker_value, row["name"]),
         )
         migrated += 1
     for row in db.execute(

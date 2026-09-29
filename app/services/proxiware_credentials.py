@@ -16,6 +16,7 @@ from typing import Any, Protocol
 from app.crypto import decrypt_secret, encrypt_secret
 from app.services.proxiware_crypto import (
     decrypt_worker_json,
+    decrypt_worker_secret,
     encrypt_worker_secret,
     ensure_worker_columns,
     worker_profile,
@@ -26,6 +27,7 @@ SECRET_NAMES = frozenset({"login_email", "login_password", "api_key", "captcha_a
 SAFE_SESSION_ERROR_CODES = frozenset(
     {
         "captcha_required",
+        "captcha_provider_error",
         "captcha_timeout",
         "csrf_failed",
         "fingerprint_failed",
@@ -86,10 +88,11 @@ def save_provider_secret(db, name: str, value: str, *, now: datetime | None = No
         raise ValueError("Provider secret is invalid")
     ensure_proxiware_security_schema(db)
     db.execute(
-        "INSERT INTO provider_credentials(name,provider,secret_encrypted,updated_at) VALUES(?,?,?,?) "
-        "ON CONFLICT(name) DO UPDATE SET secret_encrypted=excluded.secret_encrypted,updated_at=excluded.updated_at "
+        "INSERT INTO provider_credentials(name,provider,secret_encrypted,worker_secret_encrypted,updated_at) "
+        "VALUES(?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET secret_encrypted=excluded.secret_encrypted,"
+        "worker_secret_encrypted=excluded.worker_secret_encrypted,updated_at=excluded.updated_at "
         "WHERE provider=excluded.provider",
-        (key, PROVIDER, encrypt_secret(value), _iso(now)),
+        (key, PROVIDER, encrypt_secret(value), encrypt_worker_secret(value), _iso(now)),
     )
     db.commit()
 
@@ -113,10 +116,11 @@ def save_provider_credentials(
                 if len(value) > 4096 or any(ord(ch) < 32 and ch not in "\t" for ch in value):
                     raise ValueError("Provider secret is invalid")
                 db.execute(
-                    "INSERT INTO provider_credentials(name,provider,secret_encrypted,updated_at) VALUES(?,?,?,?) "
-                    "ON CONFLICT(name) DO UPDATE SET secret_encrypted=excluded.secret_encrypted,updated_at=excluded.updated_at "
+                    "INSERT INTO provider_credentials(name,provider,secret_encrypted,worker_secret_encrypted,updated_at) "
+                    "VALUES(?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET secret_encrypted=excluded.secret_encrypted,"
+                    "worker_secret_encrypted=excluded.worker_secret_encrypted,updated_at=excluded.updated_at "
                     "WHERE provider=excluded.provider",
-                    (key, PROVIDER, encrypt_secret(value), _iso(now)),
+                    (key, PROVIDER, encrypt_secret(value), encrypt_worker_secret(value), _iso(now)),
                 )
         if owns:
             db.commit()
@@ -138,11 +142,16 @@ def get_provider_secret(db, name: str) -> str | None:
     key = _validate_secret_name(name)
     ensure_proxiware_security_schema(db)
     row = db.execute(
-        "SELECT secret_encrypted FROM provider_credentials WHERE provider=? AND name=?", (PROVIDER, key)
+        "SELECT secret_encrypted,worker_secret_encrypted FROM provider_credentials WHERE provider=? AND name=?",
+        (PROVIDER, key),
     ).fetchone()
-    if row is None or not row["secret_encrypted"]:
+    if row is None:
         return None
     if worker_profile():
+        if not row["worker_secret_encrypted"]:
+            return None
+        return decrypt_worker_secret(row["worker_secret_encrypted"])
+    if not row["secret_encrypted"]:
         return None
     return decrypt_secret(row["secret_encrypted"])
 
@@ -154,7 +163,8 @@ def _last_four(secret: str) -> str:
 def get_provider_secret_metadata(db) -> dict[str, dict[str, object]]:
     ensure_proxiware_security_schema(db)
     rows = db.execute(
-        "SELECT name,secret_encrypted,updated_at FROM provider_credentials WHERE provider=?", (PROVIDER,)
+        "SELECT name,secret_encrypted,worker_secret_encrypted,updated_at FROM provider_credentials WHERE provider=?",
+        (PROVIDER,),
     ).fetchall()
     values: dict[str, dict[str, object]] = {
         key: {"configured": False, "last_four": "", "updated_at": None} for key in SECRET_NAMES
@@ -165,7 +175,10 @@ def get_provider_secret_metadata(db) -> dict[str, dict[str, object]]:
             continue
         # Decrypt only to derive non-sensitive metadata.  Never return value.
         try:
-            secret = "" if worker_profile() else decrypt_secret(row["secret_encrypted"])
+            if worker_profile():
+                secret = decrypt_worker_secret(row["worker_secret_encrypted"])
+            else:
+                secret = decrypt_secret(row["secret_encrypted"])
         except ValueError:
             secret = ""
         values[name] = {
@@ -268,10 +281,25 @@ def store_provider_session(
         expiry = str(expiry)[:64]
     db.execute(
         "INSERT INTO provider_sessions(provider,cookie_encrypted,worker_cookie_encrypted,expires_at,state,"
-        "last_error_code,renewed_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(provider) DO UPDATE SET "
+        "last_error_code,renewed_at,renew_attempted_at,renew_next_attempt_at,renewal_failures,updated_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider) DO UPDATE SET "
         "cookie_encrypted=excluded.cookie_encrypted,worker_cookie_encrypted=excluded.worker_cookie_encrypted,"
-        "expires_at=excluded.expires_at,state=excluded.state,last_error_code='',renewed_at=excluded.renewed_at,updated_at=excluded.updated_at",
-        (PROVIDER, encrypt_secret(encoded), encrypt_worker_secret(encoded), expiry, "active", "", _iso(now), _iso(now)),
+        "expires_at=excluded.expires_at,state=excluded.state,last_error_code='',renewed_at=excluded.renewed_at,"
+        "renew_attempted_at=excluded.renew_attempted_at,renew_next_attempt_at=NULL,renewal_failures=0,"
+        "updated_at=excluded.updated_at",
+        (
+            PROVIDER,
+            "" if worker_profile() else encrypt_secret(encoded),
+            encrypt_worker_secret(encoded),
+            expiry,
+            "active",
+            "",
+            _iso(now),
+            _iso(now),
+            None,
+            0,
+            _iso(now),
+        ),
     )
     db.commit()
 
@@ -308,6 +336,15 @@ def mark_manual_action_required(db, error_code: str, *, now: datetime | None = N
     if owns:
         db.execute("BEGIN IMMEDIATE")
     try:
+        prior = db.execute("SELECT value FROM settings WHERE key='proxiware_auto_swap'").fetchone()
+        existing_intent = db.execute(
+            "SELECT 1 FROM settings WHERE key='proxiware_auto_swap_intent'"
+        ).fetchone()
+        if existing_intent is None:
+            db.execute(
+                "INSERT INTO settings(key,value,updated_at) VALUES('proxiware_auto_swap_intent',?,?)",
+                ("1" if prior is not None and str(prior["value"]) == "1" else "0", timestamp),
+            )
         db.execute(
             "INSERT INTO provider_sessions(provider,state,last_error_code,updated_at) VALUES(?,?,?,?) "
             "ON CONFLICT(provider) DO UPDATE SET state='manual_action_required',"
@@ -327,6 +364,55 @@ def mark_manual_action_required(db, error_code: str, *, now: datetime | None = N
         raise
 
 
+def record_session_renewal_failure(
+    db,
+    error_code: str,
+    *,
+    cooldown_seconds: int = 300,
+    now: datetime | None = None,
+) -> None:
+    """Pause mutation and persist a bounded next login attempt."""
+
+    from datetime import timedelta
+
+    ensure_proxiware_security_schema(db)
+    candidate = str(error_code or "manual_action_required").strip().lower()
+    safe = candidate if candidate in SAFE_SESSION_ERROR_CODES else "manual_action_required"
+    current = now or datetime.now(UTC)
+    current = current.astimezone(UTC) if current.tzinfo else current.replace(tzinfo=UTC)
+    failures = db.execute(
+        "SELECT renewal_failures FROM provider_sessions WHERE provider=?", (PROVIDER,)
+    ).fetchone()
+    count = int(failures["renewal_failures"] or 0) + 1 if failures else 1
+    delay = min(3600, max(60, int(cooldown_seconds)) * (2 ** min(count - 1, 3)))
+    next_attempt = (current + timedelta(seconds=delay)).isoformat()
+    mark_manual_action_required(db, safe, now=current)
+    db.execute(
+        "UPDATE provider_sessions SET renew_attempted_at=?,renew_next_attempt_at=?,renewal_failures=?,updated_at=? "
+        "WHERE provider=?",
+        (current.isoformat(), next_attempt, count, current.isoformat(), PROVIDER),
+    )
+    db.commit()
+
+
+def set_auto_swap_preference(db, enabled: bool, *, now: datetime | None = None) -> None:
+    """Persist operator intent separately from the fail-closed runtime gate."""
+
+    from app.services.settings import set_setting
+
+    value = "1" if enabled else "0"
+    set_setting(db, "proxiware_auto_swap_intent", value)
+    set_setting(db, "proxiware_auto_swap", value)
+
+
+def restore_auto_swap_intent(db, *, now: datetime | None = None) -> bool:
+    from app.services.settings import get_setting, set_setting
+
+    enabled = get_setting(db, "proxiware_auto_swap_intent", "0") == "1"
+    set_setting(db, "proxiware_auto_swap", "1" if enabled else "0")
+    return enabled
+
+
 def renew_provider_session(
     db,
     browser_adapter: BrowserSessionAdapter,
@@ -344,7 +430,15 @@ def renew_provider_session(
         mark_manual_action_required(db, "login_failed", now=now)
         return SessionRenewalResult("manual_action_required", "login_failed")
     try:
-        captcha_token = captcha_adapter.solve_hcaptcha(site_key=site_key, page_url=page_url)
+        effective_site_key = str(site_key or "").strip()
+        if not effective_site_key:
+            discover = getattr(browser_adapter, "discover_hcaptcha_site_key", None)
+            if callable(discover):
+                discovered = discover(page_url=page_url)
+                effective_site_key = str(discovered or "").strip()
+        if not effective_site_key:
+            raise ValueError("captcha site key missing")
+        captcha_token = captcha_adapter.solve_hcaptcha(site_key=effective_site_key, page_url=page_url)
         if not captcha_token:
             raise ValueError("captcha timeout")
         # The adapter obtains fp/fpr from its isolated real browser context;
@@ -355,12 +449,14 @@ def renew_provider_session(
                 raise ValueError("fingerprint failed")
             raise ValueError("login failed")
         store_provider_session(db, result["cookies"], expires_at=result.get("expires_at"), now=now)
+        restore_auto_swap_intent(db, now=now)
         record_provider_audit(db, action="renew_session", result="success", now=now)
         return SessionRenewalResult("active", expires_at=str(result.get("expires_at") or "") or None)
     except Exception as exc:  # noqa: BLE001 - adapter boundary must fail closed
         message = str(exc).lower()
-        if getattr(exc, "error_code", "") == "manual_action_required":
-            code = "manual_action_required"
+        explicit_code = str(getattr(exc, "error_code", "") or getattr(exc, "code", "")).strip().lower()
+        if explicit_code in SAFE_SESSION_ERROR_CODES:
+            code = explicit_code
         elif "captcha" in message:
             code = "captcha_timeout"
         elif "fingerprint" in message or "fp" in message:
@@ -409,10 +505,13 @@ __all__ = [
     "load_provider_session",
     "mark_manual_action_required",
     "record_provider_audit",
+    "record_session_renewal_failure",
     "redact_provider_payload",
     "renew_provider_session",
+    "restore_auto_swap_intent",
     "save_provider_credentials",
     "save_provider_secret",
+    "set_auto_swap_preference",
     "store_provider_session",
     "test_provider_connections",
 ]

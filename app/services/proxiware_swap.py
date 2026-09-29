@@ -31,6 +31,7 @@ ACTIVE_SWAP_STATES = PRE_MUTATION_SWAP_STATES | MUTATION_SWAP_STATES
 SAFE_ERROR_CODES = frozenset(
     {
         "captcha_required",
+        "captcha_provider_error",
         "captcha_timeout",
         "csrf_failed",
         "fingerprint_failed",
@@ -66,6 +67,7 @@ GUARD_ERROR_CODES = frozenset(
 MANUAL_ACTION_CODES = frozenset(
     {
         "captcha_required",
+        "captcha_provider_error",
         "captcha_timeout",
         "csrf_failed",
         "fingerprint_failed",
@@ -96,6 +98,21 @@ def _set_setting_no_commit(db, key: str, value: str, *, now: datetime | None = N
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
         (str(key), str(value), _iso(now)),
     )
+
+
+def _pause_auto_swap_no_commit(db, *, now: datetime | None = None) -> None:
+    """Gate mutations off while retaining the operator's explicit intent."""
+
+    current = db.execute("SELECT value FROM settings WHERE key='proxiware_auto_swap'").fetchone()
+    intent = db.execute("SELECT 1 FROM settings WHERE key='proxiware_auto_swap_intent'").fetchone()
+    if intent is None:
+        _set_setting_no_commit(
+            db,
+            "proxiware_auto_swap_intent",
+            "1" if current is not None and str(current["value"]) == "1" else "0",
+            now=now,
+        )
+    _set_setting_no_commit(db, "proxiware_auto_swap", "0", now=now)
 
 
 def _safe_code(value: object, default: str = "provider_error") -> str:
@@ -208,8 +225,13 @@ def _proxiware_swap_schema_is_current(db) -> bool:
             "mutation_new_assignment_external_id",
             "mutation_new_assignment_address",
         },
-        "provider_sessions": {"worker_cookie_encrypted"},
-        "provider_credentials": {"provider"},
+        "provider_sessions": {
+            "worker_cookie_encrypted",
+            "renew_attempted_at",
+            "renew_next_attempt_at",
+            "renewal_failures",
+        },
+        "provider_credentials": {"provider", "worker_secret_encrypted"},
         "provider_action_attempts": {"provider"},
         "swap_mappings": set(),
         "provider_audit_events": set(),
@@ -356,6 +378,7 @@ def _ensure_proxiware_swap_schema(db) -> None:
             name TEXT PRIMARY KEY,
             provider TEXT NOT NULL DEFAULT 'proxiware',
             secret_encrypted TEXT NOT NULL DEFAULT '',
+            worker_secret_encrypted TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS provider_sessions (
@@ -365,6 +388,9 @@ def _ensure_proxiware_swap_schema(db) -> None:
             state TEXT NOT NULL DEFAULT 'missing',
             last_error_code TEXT NOT NULL DEFAULT '',
             renewed_at TEXT,
+            renew_attempted_at TEXT,
+            renew_next_attempt_at TEXT,
+            renewal_failures INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS provider_audit_events (
@@ -523,7 +549,20 @@ def _ensure_proxiware_swap_schema(db) -> None:
             "AND state='success' AND new_assignment_id IS NOT NULL)",
             (repair_timestamp,),
         )
-    _ensure_columns(db, "provider_credentials", {"provider": "TEXT NOT NULL DEFAULT 'proxiware'"})
+    _ensure_columns(
+        db,
+        "provider_sessions",
+        {
+            "renew_attempted_at": "TEXT",
+            "renew_next_attempt_at": "TEXT",
+            "renewal_failures": "INTEGER NOT NULL DEFAULT 0",
+        },
+    )
+    _ensure_columns(
+        db,
+        "provider_credentials",
+        {"provider": "TEXT NOT NULL DEFAULT 'proxiware'", "worker_secret_encrypted": "TEXT NOT NULL DEFAULT ''"},
+    )
     _ensure_columns(db, "provider_action_attempts", {"provider": "TEXT NOT NULL DEFAULT 'proxiware'"})
     ensure_worker_columns(db)
     db.execute(
@@ -606,6 +645,11 @@ def _ensure_proxiware_swap_schema(db) -> None:
         db.execute("DELETE FROM settings WHERE key='proxiware_eligibility_threshold'")
     db.execute(
         "INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES('proxiware_auto_swap','0',?)",
+        (now,),
+    )
+    db.execute(
+        "INSERT OR IGNORE INTO settings(key,value,updated_at) "
+        "SELECT 'proxiware_auto_swap_intent',value,? FROM settings WHERE key='proxiware_auto_swap'",
         (now,),
     )
     db.execute(
@@ -1248,7 +1292,7 @@ def mark_reconciliation_required(
             "WHERE id=? AND provider=? AND state IN ('mutating','provider_applied','reconciliation_required')",
             (safe_error, current.isoformat(), current.isoformat(), int(job_id), PROVIDER),
         )
-        _set_setting_no_commit(db, "proxiware_auto_swap", "0", now=current)
+        _pause_auto_swap_no_commit(db, now=current)
 
 
 def mark_swap_success(
@@ -1634,7 +1678,7 @@ def mark_swap_blocked(
         if cursor.rowcount != 1:
             raise LookupError("Swap job not found or already terminal")
         if safe_error in MANUAL_ACTION_CODES:
-            _set_setting_no_commit(db, "proxiware_auto_swap", "0", now=current)
+            _pause_auto_swap_no_commit(db, now=current)
 
 
 def mark_swap_failed(
@@ -1686,7 +1730,7 @@ def mark_swap_failed(
             (state, reason, safe_error, blocked_at, current.isoformat(), int(job_id), PROVIDER),
         )
         if terminal and safe_error in MANUAL_ACTION_CODES:
-            _set_setting_no_commit(db, "proxiware_auto_swap", "0", now=current)
+            _pause_auto_swap_no_commit(db, now=current)
         return state
 
 

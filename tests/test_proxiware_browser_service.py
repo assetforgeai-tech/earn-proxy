@@ -8,7 +8,7 @@ from time import sleep
 from app.db import get_db
 from app.proxiware_browser_service import ProxiwareBrowserRunner
 from app.services.proxiware import sync_proxiware_inventory
-from app.services.proxiware_credentials import store_provider_session
+from app.services.proxiware_credentials import save_provider_credentials, store_provider_session
 from app.services.proxiware_dashboard import DashboardAssignment
 from app.services.proxiware_swap import ensure_proxiware_swap_schema
 
@@ -133,6 +133,115 @@ def test_browser_runner_blocks_expired_provider_session(app):
 
     assert runner.run_once() == {"status": "manual_action_required", "observed": 0, "subscriptions": 1}
     assert calls == []
+
+
+def test_browser_runner_renews_expired_session_with_captcha_before_observing(app):
+    now = datetime(2026, 9, 25, 8, 0, tzinfo=UTC)
+    _seed_inventory(app, now)
+    with app.app_context():
+        db = get_db()
+        app.config["PROXIWARE_WORKER_FERNET_KEY"] = app.config["FERNET_KEY"]
+        save_provider_credentials(
+            db,
+            {
+                "login_email": "owner@example.com",
+                "login_password": "provider-password",
+                "captcha_api_key": "captcha-key",
+            },
+        )
+        db.execute(
+            "INSERT INTO provider_sessions(provider,state,expires_at,updated_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(provider) DO UPDATE SET state=excluded.state,expires_at=excluded.expires_at,updated_at=excluded.updated_at",
+            ("proxiware", "active", (now - timedelta(minutes=1)).isoformat(), now.isoformat()),
+        )
+        db.commit()
+
+    calls = []
+
+    class Adapter:
+        def renew(self, *, email, password, captcha_token):
+            calls.append(("renew", email, password, captcha_token))
+            return {
+                "cookies": [{"name": "session", "value": "new", "domain": "app.proxiware.com", "path": "/"}],
+                "fingerprint_observed": True,
+            }
+
+        def restore_session(self, cookies):
+            calls.append(("restore", cookies))
+
+        def observe_dashboard(self, *, subscription_id):
+            return [DashboardAssignment("dashboard-1", subscription_id, "51.194.85.8:1337", True, 1, now)]
+
+    class Captcha:
+        def solve_hcaptcha(self, *, site_key, page_url):
+            calls.append(("captcha", site_key, page_url))
+            return "token"
+
+    app.config.update(
+        RUNTIME_PROFILE="proxiware_worker",
+        PROXIWARE_HCAPTCHA_SITE_KEY="site-key",
+        PROXIWARE_LOGIN_URL="https://app.proxiware.com/auth/login",
+    )
+    app.extensions["proxiware_captcha_adapter_factory"] = lambda _key: Captcha()
+
+    result = ProxiwareBrowserRunner(app=app, adapter_factory=lambda: Adapter(), now=lambda: now).run_once()
+
+    assert result["status"] == "ok"
+    assert calls[0] == ("captcha", "site-key", "https://app.proxiware.com/auth/login")
+    assert calls[1] == ("renew", "owner@example.com", "provider-password", "token")
+    assert calls[2][0] == "restore"
+
+
+def test_browser_runner_preserves_renewal_error_code_after_captcha_failure(app):
+    now = datetime(2026, 9, 25, 8, 0, tzinfo=UTC)
+    _seed_inventory(app, now)
+    with app.app_context():
+        db = get_db()
+        app.config["PROXIWARE_WORKER_FERNET_KEY"] = app.config["FERNET_KEY"]
+        save_provider_credentials(
+            db,
+            {
+                "login_email": "owner@example.com",
+                "login_password": "provider-password",
+                "captcha_api_key": "captcha-key",
+            },
+        )
+        db.execute(
+            "INSERT INTO provider_sessions(provider,state,expires_at,updated_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(provider) DO UPDATE SET state=excluded.state,expires_at=excluded.expires_at,updated_at=excluded.updated_at",
+            ("proxiware", "active", (now - timedelta(minutes=1)).isoformat(), now.isoformat()),
+        )
+        db.commit()
+
+    class Adapter:
+        def renew(self, **_kwargs):
+            raise RuntimeError("captcha provider unavailable")
+
+        def restore_session(self, _cookies):
+            raise AssertionError("expired session must not be restored")
+
+        def observe_dashboard(self, *, subscription_id):
+            raise AssertionError("observation must wait for renewal")
+
+    class Captcha:
+        def solve_hcaptcha(self, **_kwargs):
+            raise RuntimeError("captcha provider unavailable")
+
+    app.config.update(
+        RUNTIME_PROFILE="proxiware_worker",
+        PROXIWARE_HCAPTCHA_SITE_KEY="site-key",
+        PROXIWARE_LOGIN_URL="https://app.proxiware.com/auth/login",
+    )
+    app.extensions["proxiware_captcha_adapter_factory"] = lambda _key: Captcha()
+
+    result = ProxiwareBrowserRunner(app=app, adapter_factory=lambda: Adapter(), now=lambda: now).run_once()
+
+    assert result == {"status": "manual_action_required", "observed": 0, "subscriptions": 1}
+    with app.app_context():
+        session = get_db().execute(
+            "SELECT state,last_error_code FROM provider_sessions WHERE provider='proxiware'"
+        ).fetchone()
+    assert tuple(session) == ("manual_action_required", "captcha_timeout")
 
 
 def test_browser_runner_marks_corrupt_session_as_manual_action_required(app):

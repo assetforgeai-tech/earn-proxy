@@ -403,7 +403,7 @@ def test_runner_keeps_hourly_idle_schedule_when_auto_swap_is_disabled(app):
     assert waits == [3600]
 
 
-def test_runner_does_not_fast_poll_after_replacement_check(app):
+def test_runner_fast_polls_while_replacement_is_still_inconclusive(app):
     from app.services.settings import set_setting
 
     with app.app_context():
@@ -428,7 +428,7 @@ def test_runner_does_not_fast_poll_after_replacement_check(app):
     runner._wait_for_handoff = lambda seconds: waits.append(seconds)
 
     assert runner.run_forever(max_cycles=2) == 2
-    assert waits == [3600]
+    assert waits == [5.0]
 
 
 def test_runner_drains_full_batches_without_poll_delay(app):

@@ -110,8 +110,24 @@ render_worker_env() {
   printf '%s\n' 'EARN_PROXY_RUNTIME_PROFILE=proxiware_worker' >> "$worker_env_tmp"
   while IFS= read -r key; do
     line="$(awk -F= -v wanted="$key" '$1 == wanted { print; exit }' /etc/earn-proxy-browser.env /etc/earn-proxy.env 2>/dev/null || true)"
-    if [[ -z "$line" && "$key" == "EARN_PROXY_PROXIWARE_SWAP_MUTATION_TIMEOUT_SECONDS" ]]; then
-      line="$key=60"
+    if [[ -z "$line" ]]; then
+      case "$key" in
+        EARN_PROXY_PROXIWARE_LOGIN_URL)
+          line="$key=https://app.proxiware.com/auth/login?redirect=%2F"
+          ;;
+        EARN_PROXY_PROXIWARE_HCAPTCHA_SITE_KEY)
+          line="$key="
+          ;;
+        EARN_PROXY_PROXIWARE_FINGERPRINT_PUBLIC_KEY)
+          line="$key=FifZsPA6O1gC5x2RsInJ"
+          ;;
+        EARN_PROXY_PROXIWARE_SESSION_RENEW_COOLDOWN_SECONDS)
+          line="$key=300"
+          ;;
+        EARN_PROXY_PROXIWARE_SWAP_MUTATION_TIMEOUT_SECONDS)
+          line="$key=60"
+          ;;
+      esac
     fi
     if [[ -z "$line" ]]; then
       echo "missing worker environment key: $key" >&2
@@ -126,6 +142,10 @@ EARN_PROXY_PROXIWARE_BROWSER_DRY_RUN
 EARN_PROXY_PROXIWARE_BROWSER_ALLOW_MUTATION
 EARN_PROXY_PROXIWARE_CDP_URL
 EARN_PROXY_PROXIWARE_BROWSER_DASHBOARD_URL
+EARN_PROXY_PROXIWARE_LOGIN_URL
+EARN_PROXY_PROXIWARE_HCAPTCHA_SITE_KEY
+EARN_PROXY_PROXIWARE_FINGERPRINT_PUBLIC_KEY
+EARN_PROXY_PROXIWARE_SESSION_RENEW_COOLDOWN_SECONDS
 EARN_PROXY_PROXIWARE_BROWSER_INTERVAL_SECONDS
 EARN_PROXY_PROXIWARE_BROWSER_HEARTBEAT_INTERVAL_SECONDS
 EARN_PROXY_PROXIWARE_SWAP_MUTATION_TIMEOUT_SECONDS

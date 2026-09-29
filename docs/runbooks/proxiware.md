@@ -36,21 +36,36 @@ or the Chrome-only file. Do not put admin, internal API, relay, global Fernet
 key, or provider API credentials in the worker files. The Chrome unit
 must not receive the database or Fernet key. The Chrome unit runs as the separate
 `earnproxy-chrome` account, uses an ephemeral systemd runtime profile, and
-binds CDP to loopback. It does not log in, solve challenges, spoof a
-fingerprint, or perform a provider mutation. A missing binary/profile/session
-keeps the observer `manual_action_required` or disabled.
+binds CDP to loopback. It does not spoof or randomize a fingerprint and never
+performs a provider mutation by itself. The worker may use this real browser
+context to renew the configured account through 2Captcha-backed hCaptcha.
+A missing binary/profile keeps the observer `manual_action_required` or disabled.
 
 Browser/session credentials are entered from the admin provider workspace and
 are encrypted at rest. They are write-only in the UI.
 
-### Operator-assisted session import
+### Automatic session renewal
 
-When the provider requires hCaptcha, do not automate or bypass the challenge.
-Open the provider in the approved operator Chrome profile, complete the login
-and challenge manually, then pipe only the current Proxiware cookie JSON over
-the existing SSH channel. The importer validates the `app.proxiware.com`
-origin, encrypts the cookie blob immediately, stores only safe expiry metadata,
-and prints no cookie value:
+Store the account email, password, and 2Captcha API key through the write-only
+admin credentials form. When no active session exists, browser and swap workers
+open the configured Proxiware login page, discover the hCaptcha site key when
+it is not pinned, request one bounded 2Captcha solution, obtain `fp`/`fpr` from
+the real Proxiware FingerprintJS context, and submit `/api/auth/login`. Cookies
+are immediately encrypted with the worker key. CAPTCHA tokens, credentials,
+cookies, and fingerprint values are never logged or rendered.
+
+Failures use bounded exponential cooldown and pause the runtime mutation gate
+while preserving the operator's auto-swap intent. A successful renewal restores
+that intent. `captcha_provider_error`, `captcha_timeout`, `fingerprint_failed`,
+and `login_failed` require inspecting the provider workspace before retrying.
+
+### Operator-assisted fallback
+
+If automatic renewal is unavailable, open the approved operator Chrome profile,
+complete login manually, then pipe only current Proxiware cookie JSON over the
+existing SSH channel. The importer validates the `app.proxiware.com` origin,
+encrypts the cookie blob immediately, stores only safe expiry metadata, and
+prints no cookie value:
 
 ```powershell
 agent-browser --cdp 9222 cookies get --json |

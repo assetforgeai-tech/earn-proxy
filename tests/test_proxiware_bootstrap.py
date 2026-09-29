@@ -47,7 +47,7 @@ def test_fresh_app_bootstraps_all_provider_tables_and_canonical_settings(tmp_pat
     }.issubset(keys)
     assert app.config["PROXIWARE_ACTION_RATE_LIMIT"] == 10
     assert app.config["PROXIWARE_ACTION_RATE_WINDOW_SECONDS"] == 60
-    assert app.config["PROXIWARE_LOGIN_URL"] == "https://app.proxiware.com/login"
+    assert app.config["PROXIWARE_LOGIN_URL"] == "https://app.proxiware.com/auth/login?redirect=%2F"
     assert app.config["PROXIWARE_HCAPTCHA_SITE_KEY"] == ""
 
 
@@ -97,3 +97,14 @@ def test_swap_schema_does_not_require_core_proxies_table(tmp_path):
         is None
     )
     connection.close()
+
+
+def test_provider_session_schema_contains_all_renewal_backoff_columns(tmp_path):
+    app = _app(tmp_path / "renewal-columns.db")
+    with app.app_context():
+        columns = {
+            row["name"]
+            for row in get_db().execute("PRAGMA table_info('provider_sessions')").fetchall()
+        }
+
+    assert {"renew_attempted_at", "renew_next_attempt_at", "renewal_failures"}.issubset(columns)

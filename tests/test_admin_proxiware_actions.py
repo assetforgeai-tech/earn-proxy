@@ -259,11 +259,86 @@ def test_renew_session_uses_injected_adapters(client, app):
     }
 
 
+def test_renew_session_discovers_site_key_when_not_configured(client, app):
+    login_admin(client)
+    client.post(
+        "/admin/providers/proxiware/credentials",
+        data={
+            "proxiware_email": "owner@example.com",
+            "proxiware_password": "provider-password",
+            "twocaptcha_api_key": "captcha-key",
+            "ui": "1",
+        },
+    )
+    seen = {}
+
+    class FakeBrowser:
+        def discover_hcaptcha_site_key(self, *, page_url):
+            seen["discovery_url"] = page_url
+            return "discovered-site-key"
+
+        def renew(self, **kwargs):
+            seen.update(kwargs)
+            return {
+                "cookies": [{"name": "session", "value": "opaque"}],
+                "fingerprint_observed": True,
+            }
+
+    class FakeCaptcha:
+        def solve_hcaptcha(self, *, site_key, page_url):
+            seen.update(site_key=site_key, page_url=page_url)
+            return "captcha-token"
+
+    app.config["PROXIWARE_HCAPTCHA_SITE_KEY"] = ""
+    app.extensions["proxiware_browser_adapter_factory"] = lambda: FakeBrowser()
+    app.extensions["proxiware_captcha_adapter_factory"] = lambda _key: FakeCaptcha()
+
+    response = client.post("/admin/providers/proxiware/renew-session")
+
+    assert response.status_code == 200
+    assert seen["discovery_url"] == "https://app.proxiware.com/auth/login?redirect=%2F"
+    assert seen["site_key"] == "discovered-site-key"
+
+
 def test_renew_session_without_browser_adapter_is_safe_503(client):
     login_admin(client)
     response = client.post("/admin/providers/proxiware/renew-session")
     assert response.status_code == 503
     assert b"adapter" in response.data.lower()
+
+
+def test_renew_session_closes_browser_adapter_after_attempt(client, app):
+    login_admin(client)
+    client.post(
+        "/admin/providers/proxiware/credentials",
+        data={
+            "proxiware_email": "owner@example.com",
+            "proxiware_password": "provider-password",
+            "twocaptcha_api_key": "captcha-key",
+            "ui": "1",
+        },
+    )
+    closed = []
+
+    class FakeBrowser:
+        def renew(self, **_kwargs):
+            return {"cookies": [{"name": "session", "value": "opaque"}], "fingerprint_observed": True}
+
+        def close(self):
+            closed.append(True)
+
+    class FakeCaptcha:
+        def solve_hcaptcha(self, **_kwargs):
+            return "captcha-token"
+
+    app.config["PROXIWARE_HCAPTCHA_SITE_KEY"] = "site-key"
+    app.extensions["proxiware_browser_adapter_factory"] = lambda: FakeBrowser()
+    app.extensions["proxiware_captcha_adapter_factory"] = lambda _key: FakeCaptcha()
+
+    response = client.post("/admin/providers/proxiware/renew-session")
+
+    assert response.status_code == 200
+    assert closed == [True]
 
 
 def _swap_job(db, state="blocked"):

@@ -6,7 +6,7 @@ from time import monotonic
 
 from app.db import get_db
 from app.services.proxiware_swap import ensure_proxiware_swap_schema, queue_eligible_swaps
-from app.services.settings import set_setting
+from app.services.settings import get_setting, set_setting
 
 
 def _seed(db):
@@ -274,6 +274,27 @@ def test_swap_runner_does_not_claim_jobs_when_auto_swap_is_off(app):
     assert tuple(row) == ("pending", 0)
 
 
+def test_runtime_pause_with_live_session_does_not_restore_auto_swap_intent(app):
+    from app.services.proxiware_credentials import store_provider_session
+
+    _queue(app)
+    with app.app_context():
+        store_provider_session(
+            get_db(), [{"name": "session", "value": "opaque"}], expires_at=datetime.now(UTC) + timedelta(hours=1)
+        )
+        set_setting(get_db(), "proxiware_auto_swap", "0")
+        set_setting(get_db(), "proxiware_auto_swap_intent", "1")
+    app.config.update(PROXIWARE_BROWSER_ENABLED=True, PROXIWARE_BROWSER_ALLOW_MUTATION=True)
+
+    result = __import__("app.proxiware_swap_service", fromlist=["ProxiwareSwapRunner"]).ProxiwareSwapRunner(
+        app=app
+    ).run_once()
+
+    assert result == {"status": "disabled"}
+    with app.app_context():
+        assert get_db().execute("SELECT value FROM settings WHERE key='proxiware_auto_swap'").fetchone()[0] == "0"
+
+
 def test_configured_swap_runner_does_not_claim_when_mutation_adapter_is_disabled(app):
     _queue(app)
     app.config.update(PROXIWARE_BROWSER_ENABLED=True, PROXIWARE_BROWSER_ALLOW_MUTATION=False)
@@ -358,6 +379,7 @@ def test_configured_swap_runner_builds_the_guarded_browser_adapter(app, monkeypa
             "enabled": True,
             "cdp_url": "http://127.0.0.1:9222",
             "dashboard_url": "https://app.proxiware.com/static/proxy/isp",
+            "login_url": "https://app.proxiware.com/auth/login?redirect=%2F",
             "allow_mutation": True,
         }
     ]
@@ -365,7 +387,11 @@ def test_configured_swap_runner_builds_the_guarded_browser_adapter(app, monkeypa
 
 def test_configured_swap_runner_requires_an_active_unexpired_session_before_claim(app):
     _queue(app)
-    app.config.update(PROXIWARE_BROWSER_ENABLED=True, PROXIWARE_BROWSER_ALLOW_MUTATION=True)
+    app.config.update(
+        PROXIWARE_BROWSER_ENABLED=True,
+        PROXIWARE_BROWSER_ALLOW_MUTATION=True,
+        PROXIWARE_HCAPTCHA_SITE_KEY="site-key",
+    )
 
     result = (
         __import__("app.proxiware_swap_service", fromlist=["ProxiwareSwapRunner"])
@@ -377,6 +403,98 @@ def test_configured_swap_runner_requires_an_active_unexpired_session_before_clai
     with app.app_context():
         row = get_db().execute("SELECT state,attempts FROM swap_jobs").fetchone()
     assert tuple(row) == ("pending", 0)
+
+
+def test_configured_swap_runner_preserves_renewal_error_during_cooldown(app):
+    _queue(app)
+    app.config.update(PROXIWARE_BROWSER_ENABLED=True, PROXIWARE_BROWSER_ALLOW_MUTATION=True)
+    with app.app_context():
+        db = get_db()
+        from app.services.proxiware_credentials import save_provider_credentials
+
+        app.config["PROXIWARE_WORKER_FERNET_KEY"] = app.config["FERNET_KEY"]
+        save_provider_credentials(
+            db,
+            {
+                "login_email": "owner@example.com",
+                "login_password": "provider-password",
+                "captcha_api_key": "captcha-key",
+            },
+        )
+        db.execute(
+            "INSERT INTO provider_sessions(provider,state,last_error_code,renew_next_attempt_at,updated_at) "
+            "VALUES(?,?,?,?,datetime('now')) ON CONFLICT(provider) DO UPDATE SET state=excluded.state,"
+            "last_error_code=excluded.last_error_code,renew_next_attempt_at=excluded.renew_next_attempt_at",
+            ("proxiware", "manual_action_required", "captcha_timeout", (datetime.now(UTC) + timedelta(minutes=5)).isoformat()),
+        )
+        db.commit()
+
+    result = (
+        __import__("app.proxiware_swap_service", fromlist=["ProxiwareSwapRunner"])
+        .ProxiwareSwapRunner(app=app)
+        .run_once()
+    )
+
+    assert result == {"status": "manual_action_required", "error_code": "captcha_timeout"}
+
+
+def test_configured_swap_runner_renews_when_runtime_gate_is_paused_but_intent_is_on(app, monkeypatch):
+    app.config.update(
+        PROXIWARE_BROWSER_ENABLED=True,
+        PROXIWARE_BROWSER_ALLOW_MUTATION=True,
+        PROXIWARE_HCAPTCHA_SITE_KEY="site-key",
+    )
+    calls = []
+    with app.app_context():
+        db = get_db()
+        from app.services.proxiware_credentials import save_provider_credentials
+
+        app.config["PROXIWARE_WORKER_FERNET_KEY"] = app.config["FERNET_KEY"]
+        save_provider_credentials(
+            db,
+            {
+                "login_email": "owner@example.com",
+                "login_password": "provider-password",
+                "captcha_api_key": "captcha-key",
+            },
+        )
+        db.execute(
+            "INSERT INTO provider_sessions(provider,state,expires_at,updated_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(provider) DO UPDATE SET state=excluded.state,expires_at=excluded.expires_at,updated_at=excluded.updated_at",
+            ("proxiware", "active", (datetime.now(UTC) - timedelta(minutes=1)).isoformat(), datetime.now(UTC).isoformat()),
+        )
+        set_setting(db, "proxiware_auto_swap", "0")
+        set_setting(db, "proxiware_auto_swap_intent", "1")
+
+    class Adapter:
+        allow_mutation = True
+
+        def renew(self, **_kwargs):
+            calls.append("renew")
+            return {"cookies": [{"name": "session", "value": "fresh"}], "fingerprint_observed": True}
+
+        def restore_session(self, _cookies):
+            calls.append("restore")
+
+        def close(self):
+            calls.append("close")
+
+    class Captcha:
+        def solve_hcaptcha(self, **_kwargs):
+            calls.append("captcha")
+            return "token"
+
+    monkeypatch.setattr("app.proxiware_swap_service.build_browser_adapter", lambda **_kwargs: Adapter())
+    app.extensions["proxiware_captcha_adapter_factory"] = lambda _key: Captcha()
+
+    result = __import__("app.proxiware_swap_service", fromlist=["ProxiwareSwapRunner"]).ProxiwareSwapRunner(
+        app=app
+    ).run_once()
+
+    assert result == {"status": "idle"}
+    assert calls[:3] == ["captcha", "renew", "restore"]
+    with app.app_context():
+        assert get_setting(get_db(), "proxiware_auto_swap", "0") == "1"
 
 
 def test_swap_runner_closes_configured_browser_adapter_after_attempt(app):

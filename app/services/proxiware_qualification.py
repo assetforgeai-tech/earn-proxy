@@ -26,6 +26,7 @@ _PRIVATE_EGRESS_NETWORKS = tuple(
 _TEST_EGRESS_NETWORKS = tuple(
     ipaddress.ip_network(value) for value in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
 )
+MAX_REPLACEMENT_QUICK_ATTEMPTS = 3
 
 
 def _now() -> str:
@@ -256,12 +257,21 @@ def qualify_proxiware_assignment(
     identity_generation = int(row["identity_generation"] or 1)
     identity = assignment_identity_from_row(row)
     identity_fingerprint = assignment_identity_fingerprint(*identity)
+    fresh_replacement = bool(
+        row["replacement_ready_at"]
+        and str(row["qualification"] or "").strip().lower() == "pending"
+        and datetime.fromisoformat(str(row["replacement_ready_at"])) <= datetime.fromisoformat(current)
+    )
+    retry_seconds = max(60, min(300, int(get_setting(db, "proxiware_replacement_retry_seconds", "60"))))
+    normal_next_check = next_check
     try:
         proxy = _proxy_from_row(row)
         probe_result = probe(proxy) or {}
     except Exception:  # noqa: BLE001 - one bad provider row must not kill a batch
         if not _identity_is_current(db, int(assignment_id), identity_generation, identity):
             raise LookupError("Provider assignment identity changed") from None
+        if fresh_replacement and int(row["qualification_attempts"] or 0) + 1 < MAX_REPLACEMENT_QUICK_ATTEMPTS:
+            next_check = (datetime.fromisoformat(current) + timedelta(seconds=retry_seconds)).isoformat()
         cursor = db.execute(
             "UPDATE provider_assignments SET live_status='inconclusive', qualification='pending', "
             "distribution_enabled=0, last_error_code='probe_error', last_checked_at=?, "
@@ -326,6 +336,15 @@ def qualify_proxiware_assignment(
     elif live_status == "blocked":
         qualification = "risk"
         reason = "provider_blocked"
+
+    if (
+        fresh_replacement
+        and qualification == "pending"
+        and int(row["qualification_attempts"] or 0) + 1 < MAX_REPLACEMENT_QUICK_ATTEMPTS
+    ):
+        next_check = (datetime.fromisoformat(current) + timedelta(seconds=retry_seconds)).isoformat()
+    else:
+        next_check = normal_next_check
 
     if not _identity_is_current(db, int(assignment_id), identity_generation, identity):
         raise LookupError("Provider assignment identity changed")

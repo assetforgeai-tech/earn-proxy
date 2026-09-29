@@ -117,7 +117,7 @@ class ProxiwareQualificationRunner:
                 "SELECT 1 FROM provider_assignments "
                 "WHERE provider='proxiware' AND missing_at IS NULL "
                 "AND status IN ('active','current') AND replacement_ready_at IS NOT NULL "
-                "AND qualification='pending' AND last_checked_at IS NULL LIMIT 1"
+                "AND qualification='pending' AND qualification_attempts<3 LIMIT 1"
             ).fetchone()
             is not None
         )

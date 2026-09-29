@@ -22,7 +22,14 @@ from app.services.proxiware_browser import (
     BrowserProviderResponseError,
     build_browser_adapter,
 )
-from app.services.proxiware_credentials import load_provider_session, mark_manual_action_required
+from app.services.proxiware_captcha import TwoCaptchaAdapter
+from app.services.proxiware_credentials import (
+    get_provider_secret,
+    load_provider_session,
+    mark_manual_action_required,
+    record_session_renewal_failure,
+    renew_provider_session,
+)
 from app.services.proxiware_dashboard import (
     DashboardAssignment,
     DashboardObservationError,
@@ -75,6 +82,12 @@ class ProxiwareBrowserRunner:
             dry_run=bool(self.app.config.get("PROXIWARE_BROWSER_DRY_RUN", False)),
             dashboard_url=str(
                 self.app.config.get("PROXIWARE_BROWSER_DASHBOARD_URL") or "https://app.proxiware.com/static/proxy/isp"
+            ),
+            login_url=str(
+                self.app.config.get("PROXIWARE_LOGIN_URL") or "https://app.proxiware.com/auth/login?redirect=%2F"
+            ),
+            fingerprint_public_key=str(
+                self.app.config.get("PROXIWARE_FINGERPRINT_PUBLIC_KEY") or "FifZsPA6O1gC5x2RsInJ"
             ),
             # The observer boundary is read-only; swap mutation is built only
             # by the separately guarded swap worker.
@@ -199,6 +212,48 @@ class ProxiwareBrowserRunner:
         record_worker_heartbeat(db, "browser_worker", "manual_action_required", error_code=code)
         return {"status": "manual_action_required", "observed": 0, "subscriptions": subscriptions}
 
+    def _renew_session(self, db, adapter: Any, current: datetime) -> str:
+        email = get_provider_secret(db, "login_email")
+        password = get_provider_secret(db, "login_password")
+        captcha_key = get_provider_secret(db, "captcha_api_key")
+        if not email or not password or not captcha_key:
+            return "session_expired"
+        row = db.execute(
+            "SELECT renew_next_attempt_at,last_error_code FROM provider_sessions WHERE provider='proxiware'"
+        ).fetchone()
+        if row and row["renew_next_attempt_at"]:
+            try:
+                if _utc(datetime.fromisoformat(str(row["renew_next_attempt_at"]))) > current:
+                    return str(row["last_error_code"] or "session_expired")
+            except ValueError:
+                pass
+        captcha_factory = self.app.extensions.get("proxiware_captcha_adapter_factory")
+        captcha = (
+            captcha_factory(captcha_key)
+            if callable(captcha_factory)
+            else TwoCaptchaAdapter(captcha_key)
+        )
+        result = renew_provider_session(
+            db,
+            adapter,
+            captcha,
+            site_key=str(self.app.config.get("PROXIWARE_HCAPTCHA_SITE_KEY") or ""),
+            page_url=str(
+                self.app.config.get("PROXIWARE_LOGIN_URL")
+                or "https://app.proxiware.com/auth/login?redirect=%2F"
+            ),
+            now=current,
+        )
+        if result.state == "active":
+            return ""
+        record_session_renewal_failure(
+            db,
+            result.error_code or "manual_action_required",
+            cooldown_seconds=int(self.app.config.get("PROXIWARE_SESSION_RENEW_COOLDOWN_SECONDS", 300)),
+            now=current,
+        )
+        return result.error_code or "manual_action_required"
+
     @staticmethod
     def _safe_degraded_code(exc: BaseException) -> str:
         if isinstance(exc, DashboardObservationError):
@@ -249,12 +304,19 @@ class ProxiwareBrowserRunner:
                     next_wake_at=current + timedelta(seconds=self.interval_seconds),
                 )
                 return {"status": "idle", "observed": 0, "subscriptions": 0}
+            session_error = ""
             try:
                 cookies = self._active_session(db, current)
             except BrowserAdapterUnavailable as exc:
-                return self._manual(db, exc.error_code, subscriptions=len(subscriptions))
-            if cookies is None:
-                return self._manual(db, "session_expired", subscriptions=len(subscriptions))
+                cookies = None
+                session_error = exc.error_code
+            if session_error == "invalid_session":
+                return self._manual(db, session_error, subscriptions=len(subscriptions))
+            if cookies is None and not all(
+                get_provider_secret(db, name)
+                for name in ("login_email", "login_password", "captcha_api_key")
+            ):
+                return self._manual(db, session_error or "session_expired", subscriptions=len(subscriptions))
             adapter = None
             heartbeat_stop = None
             heartbeat_thread = None
@@ -266,6 +328,13 @@ class ProxiwareBrowserRunner:
                 observe = getattr(adapter, "observe_dashboard", None)
                 if restore is None or observe is None:
                     raise BrowserAdapterUnavailable("manual_action_required")
+                if cookies is None:
+                    renewal_error = self._renew_session(db, adapter, current)
+                    if renewal_error:
+                        return self._manual(db, renewal_error, subscriptions=len(subscriptions))
+                    cookies = self._active_session(db, current)
+                    if cookies is None:
+                        return self._manual(db, "session_expired", subscriptions=len(subscriptions))
                 heartbeat_stop = Event()
                 heartbeat_thread = Thread(target=self._active_heartbeat, args=(heartbeat_stop,), daemon=True)
                 heartbeat_thread.start()

@@ -18,7 +18,15 @@ from typing import Any, Callable
 from app import create_worker_app
 from app.db import get_db
 from app.services.proxiware_browser import build_browser_adapter
-from app.services.proxiware_credentials import load_provider_session, mark_manual_action_required
+from app.services.proxiware_captcha import TwoCaptchaAdapter
+from app.services.proxiware_credentials import (
+    get_provider_secret,
+    load_provider_session,
+    mark_manual_action_required,
+    record_session_renewal_failure,
+    renew_provider_session,
+    restore_auto_swap_intent,
+)
 from app.services.proxiware_health import is_proxiware_automation_paused, record_worker_heartbeat
 from app.services.proxiware_swap import (
     MANUAL_ACTION_CODES,
@@ -91,14 +99,21 @@ class ProxiwareSwapRunner:
         self._adapter_call_timed_out = False
 
     def _configured_adapter(self):
-        return build_browser_adapter(
-            enabled=bool(self.app.config.get("PROXIWARE_BROWSER_ENABLED", False)),
-            cdp_url=str(self.app.config.get("PROXIWARE_CDP_URL") or "").strip() or None,
-            dashboard_url=str(
+        kwargs = {
+            "enabled": bool(self.app.config.get("PROXIWARE_BROWSER_ENABLED", False)),
+            "cdp_url": str(self.app.config.get("PROXIWARE_CDP_URL") or "").strip() or None,
+            "dashboard_url": str(
                 self.app.config.get("PROXIWARE_BROWSER_DASHBOARD_URL") or "https://app.proxiware.com/static/proxy/isp"
             ),
-            allow_mutation=bool(self.app.config.get("PROXIWARE_BROWSER_ALLOW_MUTATION", False)),
-        )
+            "allow_mutation": bool(self.app.config.get("PROXIWARE_BROWSER_ALLOW_MUTATION", False)),
+        }
+        configured_login = str(self.app.config.get("PROXIWARE_LOGIN_URL") or "").strip()
+        if configured_login and configured_login != "https://app.proxiware.com/login":
+            kwargs["login_url"] = configured_login
+        configured_fp = str(self.app.config.get("PROXIWARE_FINGERPRINT_PUBLIC_KEY") or "").strip()
+        if configured_fp and configured_fp != "FifZsPA6O1gC5x2RsInJ":
+            kwargs["fingerprint_public_key"] = configured_fp
+        return build_browser_adapter(**kwargs)
 
     @staticmethod
     def _configured_session(db) -> tuple[Any | None, str]:
@@ -119,6 +134,44 @@ class ProxiwareSwapRunner:
         except ValueError:
             return None, "invalid_session"
         return (cookies, "") if cookies else (None, "session_expired")
+
+    def _renew_configured_session(self, db, adapter) -> tuple[Any | None, str]:
+        email = get_provider_secret(db, "login_email")
+        password = get_provider_secret(db, "login_password")
+        captcha_key = get_provider_secret(db, "captcha_api_key")
+        if not email or not password or not captcha_key:
+            return None, "session_expired"
+        row = db.execute(
+            "SELECT renew_next_attempt_at,last_error_code FROM provider_sessions WHERE provider='proxiware'"
+        ).fetchone()
+        if row and row["renew_next_attempt_at"]:
+            try:
+                next_attempt = datetime.fromisoformat(str(row["renew_next_attempt_at"]))
+                next_attempt = next_attempt.astimezone(UTC) if next_attempt.tzinfo else next_attempt.replace(tzinfo=UTC)
+                if next_attempt > datetime.now(UTC):
+                    return None, str(row["last_error_code"] or "session_expired")
+            except ValueError:
+                pass
+        captcha_factory = self.app.extensions.get("proxiware_captcha_adapter_factory")
+        captcha = captcha_factory(captcha_key) if callable(captcha_factory) else TwoCaptchaAdapter(captcha_key)
+        result = renew_provider_session(
+            db,
+            adapter,
+            captcha,
+            site_key=str(self.app.config.get("PROXIWARE_HCAPTCHA_SITE_KEY") or ""),
+            page_url=str(
+                self.app.config.get("PROXIWARE_LOGIN_URL")
+                or "https://app.proxiware.com/auth/login?redirect=%2F"
+            ),
+        )
+        if result.state != "active":
+            record_session_renewal_failure(
+                db,
+                result.error_code or "manual_action_required",
+                cooldown_seconds=int(self.app.config.get("PROXIWARE_SESSION_RENEW_COOLDOWN_SECONDS", 300)),
+            )
+            return None, result.error_code or "manual_action_required"
+        return self._configured_session(db)
 
     @property
     def stopped(self) -> bool:
@@ -236,7 +289,9 @@ class ProxiwareSwapRunner:
             if get_setting(db, "proxiware_swap_worker_paused", "0") == "1":
                 record_worker_heartbeat(db, "swap_worker", "paused")
                 return {"status": "paused"}
-            if not allow_manual and get_setting(db, "proxiware_auto_swap", "0") != "1":
+            auto_swap_enabled = get_setting(db, "proxiware_auto_swap", "0") == "1"
+            auto_swap_intent = get_setting(db, "proxiware_auto_swap_intent", "0") == "1"
+            if not allow_manual and not auto_swap_enabled and not auto_swap_intent:
                 record_worker_heartbeat(db, "swap_worker", "disabled")
                 return {"status": "disabled"}
             configured_adapter = None
@@ -248,14 +303,33 @@ class ProxiwareSwapRunner:
                 ):
                     record_worker_heartbeat(db, "swap_worker", "manual_action_required", error_code="adapter_missing")
                     return {"status": "manual_action_required", "error_code": "adapter_missing"}
+                try:
+                    configured_adapter = self._adapter(None)
+                    adapter_holder["adapter"] = configured_adapter
+                except Exception as exc:  # noqa: BLE001 - adapter construction is a hard safety boundary
+                    code = safe_swap_error(exc)
+                    mark_manual_action_required(db, code)
+                    record_worker_heartbeat(db, "swap_worker", "manual_action_required", error_code=code)
+                    return {"status": "manual_action_required", "error_code": code}
                 cookies, session_error = self._configured_session(db)
+                if not allow_manual and not auto_swap_enabled and not session_error:
+                    # A live session plus a paused runtime gate means the
+                    # operator paused auto-swap for another reason. Do not
+                    # silently resume it merely because intent is retained.
+                    record_worker_heartbeat(db, "swap_worker", "disabled")
+                    return {"status": "disabled"}
+                if session_error:
+                    cookies, session_error = self._renew_configured_session(db, configured_adapter)
                 if session_error:
                     mark_manual_action_required(db, session_error)
                     record_worker_heartbeat(db, "swap_worker", "manual_action_required", error_code=session_error)
                     return {"status": "manual_action_required", "error_code": session_error}
+                if not allow_manual and auto_swap_intent:
+                    restore_auto_swap_intent(db)
+                if not allow_manual and get_setting(db, "proxiware_auto_swap", "0") != "1":
+                    record_worker_heartbeat(db, "swap_worker", "disabled")
+                    return {"status": "disabled"}
                 try:
-                    configured_adapter = self._adapter(None)
-                    adapter_holder["adapter"] = configured_adapter
                     restore = getattr(configured_adapter, "restore_session", None)
                     if not callable(restore):
                         raise RuntimeError("adapter_missing")
