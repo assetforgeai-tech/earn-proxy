@@ -693,3 +693,35 @@ def test_cdp_browser_site_key_discovery_checks_hcaptcha_iframe_url():
     )
 
     assert adapter.discover_hcaptcha_site_key() == "iframe-site-key"
+
+
+def test_cdp_browser_site_key_discovery_clears_authenticated_session_before_login():
+    class AuthenticatedSiteKeyClient(FakeCdp):
+        def __init__(self):
+            super().__init__(None)
+            self.cleared = False
+
+        def clear_provider_session(self):
+            self.cleared = True
+
+        def navigate(self, _url):
+            return None
+
+        @property
+        def url(self):
+            if self.cleared:
+                return "https://app.proxiware.com/auth/login"
+            return "https://app.proxiware.com/static/proxy/isp"
+
+        def evaluate(self, expression, arg=None):
+            self.calls.append(("evaluate", expression, arg))
+            return "iframe-site-key"
+
+    client = AuthenticatedSiteKeyClient()
+    adapter = CdpProxiwareBrowser(
+        "http://127.0.0.1:9222",
+        client_factory=lambda: client,
+    )
+
+    assert adapter.discover_hcaptcha_site_key(page_url="https://app.proxiware.com/auth/login") == "iframe-site-key"
+    assert client.cleared is True

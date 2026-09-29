@@ -311,6 +311,9 @@ class CdpProxiwareBrowser:
     def discover_hcaptcha_site_key(self, *, page_url: str | None = None) -> str:
         with self._client() as client:
             if page_url:
+                clear_session = getattr(client, "clear_provider_session", None)
+                if callable(clear_session):
+                    clear_session()
                 self._navigate_login(client)
             evaluate = getattr(client, "evaluate", None)
             if not callable(evaluate):
