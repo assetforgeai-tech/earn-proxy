@@ -337,9 +337,7 @@ def mark_manual_action_required(db, error_code: str, *, now: datetime | None = N
         db.execute("BEGIN IMMEDIATE")
     try:
         prior = db.execute("SELECT value FROM settings WHERE key='proxiware_auto_swap'").fetchone()
-        existing_intent = db.execute(
-            "SELECT 1 FROM settings WHERE key='proxiware_auto_swap_intent'"
-        ).fetchone()
+        existing_intent = db.execute("SELECT 1 FROM settings WHERE key='proxiware_auto_swap_intent'").fetchone()
         if existing_intent is None:
             db.execute(
                 "INSERT INTO settings(key,value,updated_at) VALUES('proxiware_auto_swap_intent',?,?)",
@@ -380,9 +378,7 @@ def record_session_renewal_failure(
     safe = candidate if candidate in SAFE_SESSION_ERROR_CODES else "manual_action_required"
     current = now or datetime.now(UTC)
     current = current.astimezone(UTC) if current.tzinfo else current.replace(tzinfo=UTC)
-    failures = db.execute(
-        "SELECT renewal_failures FROM provider_sessions WHERE provider=?", (PROVIDER,)
-    ).fetchone()
+    failures = db.execute("SELECT renewal_failures FROM provider_sessions WHERE provider=?", (PROVIDER,)).fetchone()
     count = int(failures["renewal_failures"] or 0) + 1 if failures else 1
     delay = min(3600, max(60, int(cooldown_seconds)) * (2 ** min(count - 1, 3)))
     next_attempt = (current + timedelta(seconds=delay)).isoformat()

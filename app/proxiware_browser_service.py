@@ -228,19 +228,14 @@ class ProxiwareBrowserRunner:
             except ValueError:
                 pass
         captcha_factory = self.app.extensions.get("proxiware_captcha_adapter_factory")
-        captcha = (
-            captcha_factory(captcha_key)
-            if callable(captcha_factory)
-            else TwoCaptchaAdapter(captcha_key)
-        )
+        captcha = captcha_factory(captcha_key) if callable(captcha_factory) else TwoCaptchaAdapter(captcha_key)
         result = renew_provider_session(
             db,
             adapter,
             captcha,
             site_key=str(self.app.config.get("PROXIWARE_HCAPTCHA_SITE_KEY") or ""),
             page_url=str(
-                self.app.config.get("PROXIWARE_LOGIN_URL")
-                or "https://app.proxiware.com/auth/login?redirect=%2F"
+                self.app.config.get("PROXIWARE_LOGIN_URL") or "https://app.proxiware.com/auth/login?redirect=%2F"
             ),
             now=current,
         )
@@ -313,8 +308,7 @@ class ProxiwareBrowserRunner:
             if session_error == "invalid_session":
                 return self._manual(db, session_error, subscriptions=len(subscriptions))
             if cookies is None and not all(
-                get_provider_secret(db, name)
-                for name in ("login_email", "login_password", "captcha_api_key")
+                get_provider_secret(db, name) for name in ("login_email", "login_password", "captcha_api_key")
             ):
                 return self._manual(db, session_error or "session_expired", subscriptions=len(subscriptions))
             adapter = None

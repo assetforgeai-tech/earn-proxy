@@ -39,7 +39,9 @@ def test_hcaptcha_adapter_polls_until_token_without_logging_secret():
         max_wait_seconds=1,
     )
 
-    assert adapter.solve_hcaptcha(site_key="site-key", page_url="https://app.proxiware.com/auth/login") == "solved-token"
+    assert (
+        adapter.solve_hcaptcha(site_key="site-key", page_url="https://app.proxiware.com/auth/login") == "solved-token"
+    )
     assert session.calls[0][1]["json"]["task"]["websiteKey"] == "site-key"
 
 

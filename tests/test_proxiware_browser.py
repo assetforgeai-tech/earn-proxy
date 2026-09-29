@@ -587,9 +587,7 @@ def test_cdp_browser_renews_login_with_fingerprint_and_cookies():
     result = adapter.renew(email="owner@example.com", password="provider-password", captcha_token="captcha-token")
 
     assert result["fingerprint_observed"] is True
-    assert result["cookies"] == [
-        {"name": "session", "value": "opaque", "domain": "app.proxiware.com", "path": "/"}
-    ]
+    assert result["cookies"] == [{"name": "session", "value": "opaque", "domain": "app.proxiware.com", "path": "/"}]
     assert client.navigated == ["https://app.proxiware.com/auth/login?redirect=%2F"]
 
 
@@ -608,9 +606,7 @@ def test_cdp_browser_clears_existing_provider_session_before_login():
         @property
         def url(self):
             return (
-                "https://app.proxiware.com/auth/login"
-                if self.cleared
-                else "https://app.proxiware.com/static/proxy/isp"
+                "https://app.proxiware.com/auth/login" if self.cleared else "https://app.proxiware.com/static/proxy/isp"
             )
 
         def cookies(self):

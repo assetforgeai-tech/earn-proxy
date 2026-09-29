@@ -62,9 +62,7 @@ def test_worker_profile_reads_provider_credentials_from_worker_ciphertext(app, d
 def test_worker_profile_reads_worker_ciphertext_when_legacy_ciphertext_is_empty(app, db):
     app.config["PROXIWARE_WORKER_FERNET_KEY"] = Fernet.generate_key().decode("ascii")
     save_provider_secret(db, "login_email", "owner@example.com")
-    db.execute(
-        "UPDATE provider_credentials SET secret_encrypted='' WHERE provider='proxiware' AND name='login_email'"
-    )
+    db.execute("UPDATE provider_credentials SET secret_encrypted='' WHERE provider='proxiware' AND name='login_email'")
     db.commit()
     app.config["RUNTIME_PROFILE"] = "proxiware_worker"
 
@@ -74,9 +72,7 @@ def test_worker_profile_reads_worker_ciphertext_when_legacy_ciphertext_is_empty(
 def test_worker_profile_metadata_uses_worker_ciphertext(app, db):
     app.config["PROXIWARE_WORKER_FERNET_KEY"] = Fernet.generate_key().decode("ascii")
     save_provider_secret(db, "api_key", "provider-api-key")
-    db.execute(
-        "UPDATE provider_credentials SET secret_encrypted='' WHERE provider='proxiware' AND name='api_key'"
-    )
+    db.execute("UPDATE provider_credentials SET secret_encrypted='' WHERE provider='proxiware' AND name='api_key'")
     db.commit()
     app.config["RUNTIME_PROFILE"] = "proxiware_worker"
 

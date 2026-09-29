@@ -160,8 +160,7 @@ class ProxiwareSwapRunner:
             captcha,
             site_key=str(self.app.config.get("PROXIWARE_HCAPTCHA_SITE_KEY") or ""),
             page_url=str(
-                self.app.config.get("PROXIWARE_LOGIN_URL")
-                or "https://app.proxiware.com/auth/login?redirect=%2F"
+                self.app.config.get("PROXIWARE_LOGIN_URL") or "https://app.proxiware.com/auth/login?redirect=%2F"
             ),
         )
         if result.state != "active":

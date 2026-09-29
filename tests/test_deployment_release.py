@@ -362,7 +362,10 @@ def test_release_generates_and_rolls_back_a_dedicated_worker_key_file():
 def test_release_worker_env_has_safe_defaults_for_optional_renewal_settings():
     installer = (ROOT / "deploy" / "release.sh").read_text()
 
-    assert 'EARN_PROXY_PROXIWARE_LOGIN_URL)\n          line="$key=https://app.proxiware.com/auth/login?redirect=%2F"' in installer
+    assert (
+        'EARN_PROXY_PROXIWARE_LOGIN_URL)\n          line="$key=https://app.proxiware.com/auth/login?redirect=%2F"'
+        in installer
+    )
     assert 'EARN_PROXY_PROXIWARE_HCAPTCHA_SITE_KEY)\n          line="$key="' in installer
     assert 'EARN_PROXY_PROXIWARE_FINGERPRINT_PUBLIC_KEY)\n          line="$key=FifZsPA6O1gC5x2RsInJ"' in installer
     assert 'EARN_PROXY_PROXIWARE_SESSION_RENEW_COOLDOWN_SECONDS)\n          line="$key=300"' in installer

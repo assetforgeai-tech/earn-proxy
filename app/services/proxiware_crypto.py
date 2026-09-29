@@ -157,8 +157,7 @@ def migrate_provider_worker_secrets(db) -> int:
         except (TypeError, ValueError):
             continue
         db.execute(
-            "UPDATE provider_credentials SET worker_secret_encrypted=? "
-            "WHERE provider='proxiware' AND name=?",
+            "UPDATE provider_credentials SET worker_secret_encrypted=? WHERE provider='proxiware' AND name=?",
             (worker_value, row["name"]),
         )
         migrated += 1

@@ -1539,12 +1539,10 @@ def _proxiware_browser_adapter():
         enabled=True,
         cdp_url=str(current_app.config.get("PROXIWARE_CDP_URL") or "").strip() or None,
         dashboard_url=str(
-            current_app.config.get("PROXIWARE_BROWSER_DASHBOARD_URL")
-            or "https://app.proxiware.com/static/proxy/isp"
+            current_app.config.get("PROXIWARE_BROWSER_DASHBOARD_URL") or "https://app.proxiware.com/static/proxy/isp"
         ),
         login_url=str(
-            current_app.config.get("PROXIWARE_LOGIN_URL")
-            or "https://app.proxiware.com/auth/login?redirect=%2F"
+            current_app.config.get("PROXIWARE_LOGIN_URL") or "https://app.proxiware.com/auth/login?redirect=%2F"
         ),
         fingerprint_public_key=str(
             current_app.config.get("PROXIWARE_FINGERPRINT_PUBLIC_KEY") or "FifZsPA6O1gC5x2RsInJ"
@@ -1685,8 +1683,7 @@ def proxiware_renew_session():
     ensure_proxiware_swap_schema(db)
     site_key = str(current_app.config.get("PROXIWARE_HCAPTCHA_SITE_KEY") or "").strip()
     page_url = str(
-        current_app.config.get("PROXIWARE_LOGIN_URL")
-        or "https://app.proxiware.com/auth/login?redirect=%2F"
+        current_app.config.get("PROXIWARE_LOGIN_URL") or "https://app.proxiware.com/auth/login?redirect=%2F"
     ).strip()
     captcha_key = get_provider_secret(db, "captcha_api_key")
     if not bool(current_app.config.get("PROXIWARE_BROWSER_ENABLED", False)) and not current_app.extensions.get(

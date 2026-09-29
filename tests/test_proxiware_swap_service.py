@@ -286,9 +286,11 @@ def test_runtime_pause_with_live_session_does_not_restore_auto_swap_intent(app):
         set_setting(get_db(), "proxiware_auto_swap_intent", "1")
     app.config.update(PROXIWARE_BROWSER_ENABLED=True, PROXIWARE_BROWSER_ALLOW_MUTATION=True)
 
-    result = __import__("app.proxiware_swap_service", fromlist=["ProxiwareSwapRunner"]).ProxiwareSwapRunner(
-        app=app
-    ).run_once()
+    result = (
+        __import__("app.proxiware_swap_service", fromlist=["ProxiwareSwapRunner"])
+        .ProxiwareSwapRunner(app=app)
+        .run_once()
+    )
 
     assert result == {"status": "disabled"}
     with app.app_context():
@@ -425,7 +427,12 @@ def test_configured_swap_runner_preserves_renewal_error_during_cooldown(app):
             "INSERT INTO provider_sessions(provider,state,last_error_code,renew_next_attempt_at,updated_at) "
             "VALUES(?,?,?,?,datetime('now')) ON CONFLICT(provider) DO UPDATE SET state=excluded.state,"
             "last_error_code=excluded.last_error_code,renew_next_attempt_at=excluded.renew_next_attempt_at",
-            ("proxiware", "manual_action_required", "captcha_timeout", (datetime.now(UTC) + timedelta(minutes=5)).isoformat()),
+            (
+                "proxiware",
+                "manual_action_required",
+                "captcha_timeout",
+                (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+            ),
         )
         db.commit()
 
@@ -461,7 +468,12 @@ def test_configured_swap_runner_renews_when_runtime_gate_is_paused_but_intent_is
         db.execute(
             "INSERT INTO provider_sessions(provider,state,expires_at,updated_at) VALUES(?,?,?,?) "
             "ON CONFLICT(provider) DO UPDATE SET state=excluded.state,expires_at=excluded.expires_at,updated_at=excluded.updated_at",
-            ("proxiware", "active", (datetime.now(UTC) - timedelta(minutes=1)).isoformat(), datetime.now(UTC).isoformat()),
+            (
+                "proxiware",
+                "active",
+                (datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
+                datetime.now(UTC).isoformat(),
+            ),
         )
         set_setting(db, "proxiware_auto_swap", "0")
         set_setting(db, "proxiware_auto_swap_intent", "1")
@@ -487,9 +499,11 @@ def test_configured_swap_runner_renews_when_runtime_gate_is_paused_but_intent_is
     monkeypatch.setattr("app.proxiware_swap_service.build_browser_adapter", lambda **_kwargs: Adapter())
     app.extensions["proxiware_captcha_adapter_factory"] = lambda _key: Captcha()
 
-    result = __import__("app.proxiware_swap_service", fromlist=["ProxiwareSwapRunner"]).ProxiwareSwapRunner(
-        app=app
-    ).run_once()
+    result = (
+        __import__("app.proxiware_swap_service", fromlist=["ProxiwareSwapRunner"])
+        .ProxiwareSwapRunner(app=app)
+        .run_once()
+    )
 
     assert result == {"status": "idle"}
     assert calls[:3] == ["captcha", "renew", "restore"]

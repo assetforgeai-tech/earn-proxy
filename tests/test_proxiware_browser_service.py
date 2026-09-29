@@ -238,9 +238,11 @@ def test_browser_runner_preserves_renewal_error_code_after_captcha_failure(app):
 
     assert result == {"status": "manual_action_required", "observed": 0, "subscriptions": 1}
     with app.app_context():
-        session = get_db().execute(
-            "SELECT state,last_error_code FROM provider_sessions WHERE provider='proxiware'"
-        ).fetchone()
+        session = (
+            get_db()
+            .execute("SELECT state,last_error_code FROM provider_sessions WHERE provider='proxiware'")
+            .fetchone()
+        )
     assert tuple(session) == ("manual_action_required", "captcha_timeout")
 
 

@@ -102,9 +102,6 @@ def test_swap_schema_does_not_require_core_proxies_table(tmp_path):
 def test_provider_session_schema_contains_all_renewal_backoff_columns(tmp_path):
     app = _app(tmp_path / "renewal-columns.db")
     with app.app_context():
-        columns = {
-            row["name"]
-            for row in get_db().execute("PRAGMA table_info('provider_sessions')").fetchall()
-        }
+        columns = {row["name"] for row in get_db().execute("PRAGMA table_info('provider_sessions')").fetchall()}
 
     assert {"renew_attempted_at", "renew_next_attempt_at", "renewal_failures"}.issubset(columns)
