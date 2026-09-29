@@ -85,6 +85,33 @@ def test_swap_schema_preserves_callers_transaction(tmp_path):
     database.close()
 
 
+def test_ready_swap_schema_does_not_write_when_another_connection_holds_lock(tmp_path):
+    """Schema checks on a ready database must stay read-only."""
+
+    database_path = tmp_path / "swap-schema-lock.db"
+    bootstrap = sqlite3.connect(database_path)
+    bootstrap.row_factory = sqlite3.Row
+    bootstrap.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)")
+    ensure_proxiware_swap_schema(bootstrap)
+    bootstrap.execute("DELETE FROM settings WHERE key='proxiware_schema_version'")
+    bootstrap.commit()
+    bootstrap.close()
+
+    holder = sqlite3.connect(database_path, timeout=0.1)
+    subject = sqlite3.connect(database_path, timeout=0.1)
+    holder.row_factory = sqlite3.Row
+    subject.row_factory = sqlite3.Row
+    holder.execute("PRAGMA journal_mode=WAL")
+    subject.execute("PRAGMA journal_mode=WAL")
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        ensure_proxiware_swap_schema(subject)
+    finally:
+        holder.rollback()
+        holder.close()
+        subject.close()
+
+
 def _seed_subscription(db, *, eligible_count=500, connections=100, quota=1, cooldown=None):
     ensure_proxiware_swap_schema(db)
     now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC).isoformat()

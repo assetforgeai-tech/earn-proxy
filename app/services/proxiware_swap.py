@@ -164,9 +164,82 @@ def _execute_sql_script(db, script: str) -> None:
         db.execute(pending)
 
 
+PROXIWARE_SCHEMA_VERSION = "2026-09-29-1"
+
+
+def _proxiware_swap_schema_is_current(db) -> bool:
+    if not _table_exists(db, "settings"):
+        return False
+    # Existing production databases predate the marker.  Treat a complete
+    # schema as ready without running DDL on every request; old/incomplete
+    # databases still take the migration path below.
+    required = {
+        "provider_subscriptions": {
+            "swap_quota",
+            "swap_used",
+            "last_swap_reason",
+            "last_swap_checked_at",
+            "last_swap_success_at",
+            "dashboard_next_observe_at",
+            "dashboard_observation_failures",
+            "dashboard_last_error_code",
+        },
+        "provider_assignments": {
+            "protocol",
+            "last_checked_at",
+            "egress_verified_at",
+            "duplicate_egress",
+            "distribution_enabled",
+            "qualification_next_check_at",
+            "qualification_claimed_until",
+            "qualification_claim_token",
+            "qualification_attempts",
+            "worker_username_encrypted",
+            "worker_password_encrypted",
+        },
+        "swap_jobs": {
+            "mutation_started_at",
+            "provider_applied_at",
+            "reconciliation_required_at",
+            "mutation_old_assignment_external_id",
+            "mutation_old_assignment_address",
+            "mutation_dashboard_assignment_id",
+            "mutation_subscription_external_id",
+            "mutation_new_assignment_external_id",
+            "mutation_new_assignment_address",
+        },
+        "provider_sessions": {"worker_cookie_encrypted"},
+        "provider_credentials": {"provider"},
+        "provider_action_attempts": {"provider"},
+        "swap_mappings": set(),
+        "provider_audit_events": set(),
+    }
+    if not all(
+        _table_exists(db, table) and required_columns.issubset(_column_names(db, table))
+        for table, required_columns in required.items()
+    ):
+        return False
+    legacy = db.execute(
+        "SELECT 1 FROM settings WHERE key IN ('proxiware_auto_swap_enabled','proxiware_eligibility_threshold') LIMIT 1"
+    ).fetchone()
+    if legacy is not None:
+        return False
+    # Keep one-time compatibility repairs available without making every
+    # request write to SQLite.  Normal ready databases take the read-only path.
+    pending_repair = db.execute(
+        "SELECT 1 FROM provider_assignments WHERE provider='proxiware' AND status='pending' "
+        "AND qualification='pending' AND live_status='pending' AND replacement_ready_at IS NOT NULL "
+        "AND id IN (SELECT new_assignment_id FROM swap_jobs WHERE provider='proxiware' "
+        "AND state='success' AND new_assignment_id IS NOT NULL) LIMIT 1"
+    ).fetchone()
+    return pending_repair is None
+
+
 def ensure_proxiware_swap_schema(db) -> None:
     """Create provider state tables without committing a caller transaction."""
 
+    if _proxiware_swap_schema_is_current(db):
+        return
     owns_transaction = not db.in_transaction
     if owns_transaction:
         db.execute("BEGIN")
@@ -558,6 +631,11 @@ def _ensure_proxiware_swap_schema(db) -> None:
     db.execute(
         "INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES('proxiware_automation_paused','0',?)",
         (now,),
+    )
+    db.execute(
+        "INSERT INTO settings(key,value,updated_at) VALUES('proxiware_schema_version',?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+        (PROXIWARE_SCHEMA_VERSION, now),
     )
     if owns_bootstrap_transaction and db.in_transaction:
         db.commit()

@@ -408,6 +408,8 @@ def _raise_if_sync_cancelled(
 def ensure_proxiware_inventory_schema(db) -> None:
     """Create inventory tables without committing a caller's transaction."""
 
+    if _proxiware_inventory_schema_is_current(db):
+        return
     owns_transaction = not db.in_transaction
     if owns_transaction:
         db.execute("BEGIN")
@@ -420,6 +422,39 @@ def ensure_proxiware_inventory_schema(db) -> None:
     else:
         if owns_transaction and db.in_transaction:
             db.commit()
+
+
+def _proxiware_inventory_schema_is_current(db) -> bool:
+    required = {
+        "provider_subscriptions": {"metadata_json", "raw_metadata", "missing_at"},
+        "provider_assignments": {
+            "protocol",
+            "identity_fingerprint",
+            "identity_generation",
+            "dashboard_assignment_id",
+            "dashboard_eligible",
+            "dashboard_connections",
+            "dashboard_observed_at",
+            "dashboard_source",
+            "dashboard_error_code",
+        },
+        "provider_sync_runs": {
+            "claim_token",
+            "claimed_until",
+            "cancel_requested",
+            "total_count",
+            "processed_count",
+        },
+        "provider_sessions": {"worker_cookie_encrypted"},
+    }
+    for table, columns in required.items():
+        rows = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+        if rows is None:
+            return False
+        existing = {str(row[0]) for row in db.execute(f'PRAGMA table_info("{table}")').fetchall()}
+        if not columns.issubset(existing):
+            return False
+    return True
 
 
 def _ensure_proxiware_inventory_schema(db) -> None:
