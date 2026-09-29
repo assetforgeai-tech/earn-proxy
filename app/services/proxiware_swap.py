@@ -150,12 +150,44 @@ def _ensure_columns(db, table: str, definitions: dict[str, str]) -> None:
             db.execute(f'ALTER TABLE "{table}" ADD COLUMN "{name}" {definition}')
 
 
+def _execute_sql_script(db, script: str) -> None:
+    """Execute DDL without executescript's implicit caller-transaction commit."""
+
+    pending = ""
+    for line in str(script).splitlines(keepends=True):
+        pending += line
+        if sqlite3.complete_statement(pending):
+            if pending.strip():
+                db.execute(pending)
+            pending = ""
+    if pending.strip():
+        db.execute(pending)
+
+
 def ensure_proxiware_swap_schema(db) -> None:
+    """Create provider state tables without committing a caller transaction."""
+
+    owns_transaction = not db.in_transaction
+    if owns_transaction:
+        db.execute("BEGIN")
+    try:
+        _ensure_proxiware_swap_schema(db)
+    except Exception:
+        if owns_transaction and db.in_transaction:
+            db.rollback()
+        raise
+    else:
+        if owns_transaction and db.in_transaction:
+            db.commit()
+
+
+def _ensure_proxiware_swap_schema(db) -> None:
     """Create the provider state tables and compatibility columns idempotently."""
 
     owns_bootstrap_transaction = not db.in_transaction
 
-    db.executescript(
+    _execute_sql_script(
+        db,
         """
         CREATE TABLE IF NOT EXISTS provider_subscriptions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -291,7 +323,7 @@ def ensure_proxiware_swap_schema(db) -> None:
             ON provider_audit_events(provider, created_at);
         CREATE INDEX IF NOT EXISTS provider_action_attempts_idx
             ON provider_action_attempts(actor_id, action, attempted_at);
-        """
+        """,
     )
     # Task 2 may have created the provider tables with a narrower column set.
     if _column_names(db, "provider_subscriptions"):
@@ -404,6 +436,20 @@ def ensure_proxiware_swap_schema(db) -> None:
             "ON swap_jobs(subscription_id) "
             "WHERE state IN ('pending','running','mutating','provider_applied','reconciliation_required')"
         )
+        # Older releases marked a reconciled replacement as ``pending``. That
+        # state is not claimable by the qualification batch, so repair only
+        # rows proven to be successful swap targets. The cooldown timestamp
+        # remains the gate for when probing may begin.
+        repair_timestamp = _iso()
+        db.execute(
+            "UPDATE provider_assignments SET status='active', "
+            "qualification_next_check_at=COALESCE(qualification_next_check_at,replacement_ready_at,updated_at), "
+            "updated_at=? WHERE provider='proxiware' AND status='pending' "
+            "AND qualification='pending' AND live_status='pending' AND replacement_ready_at IS NOT NULL "
+            "AND id IN (SELECT new_assignment_id FROM swap_jobs WHERE provider='proxiware' "
+            "AND state='success' AND new_assignment_id IS NOT NULL)",
+            (repair_timestamp,),
+        )
     _ensure_columns(db, "provider_credentials", {"provider": "TEXT NOT NULL DEFAULT 'proxiware'"})
     _ensure_columns(db, "provider_action_attempts", {"provider": "TEXT NOT NULL DEFAULT 'proxiware'"})
     ensure_worker_columns(db)
@@ -417,7 +463,8 @@ def ensure_proxiware_swap_schema(db) -> None:
     # table and required columns are present.
     proxy_columns = _column_names(db, "proxies") if _table_exists(db, "proxies") else set()
     if {"archived_at", "exit_ip", "egress_attestation_source"}.issubset(proxy_columns):
-        db.executescript(
+        _execute_sql_script(
+            db,
             """
             CREATE TRIGGER IF NOT EXISTS provider_egress_user_conflict_insert
             AFTER INSERT ON proxies
@@ -463,7 +510,7 @@ def ensure_proxiware_swap_schema(db) -> None:
                 WHERE provider='proxiware' AND missing_at IS NULL
                   AND exit_ip IS NOT NULL AND (exit_ip=NEW.exit_ip OR exit_ip=OLD.exit_ip);
             END;
-            """
+            """,
         )
     # Settings are part of the existing core schema.  INSERT OR IGNORE keeps
     # auto-swap fail-closed on every fresh installation.
@@ -1084,6 +1131,12 @@ def mark_provider_applied(
                 PROVIDER,
             ),
         )
+    # A confirmed mutation needs fresh official credentials before any probe.
+    # Queue read-only inventory sync; an existing queued/running sync already
+    # satisfies the request.
+    from app.services.proxiware import enqueue_sync_run
+
+    enqueue_sync_run(db, now=current, allow_during_running=True)
 
 
 def mark_reconciliation_required(
@@ -1241,10 +1294,11 @@ def mark_swap_success(
         ready_base = max(current, mutation_time)
         ready_at = (ready_base + timedelta(seconds=cooldown_seconds)).isoformat()
         db.execute(
-            "UPDATE provider_assignments SET replacement_ready_at=?, status='pending', "
-            "qualification='pending', provider_eligible=0, live_status='pending', "
-            "distribution_enabled=0, egress_verified_at=NULL, last_checked_at=NULL, updated_at=? WHERE id=?",
-            (ready_at, current.isoformat(), int(new["id"])),
+            "UPDATE provider_assignments SET replacement_ready_at=?, status='active', "
+            "qualification='pending', live_status='pending', "
+            "qualification_next_check_at=?, distribution_enabled=0, egress_verified_at=NULL, "
+            "last_checked_at=NULL, updated_at=? WHERE id=?",
+            (ready_at, ready_at, current.isoformat(), int(new["id"])),
         )
         # Mapping is written first.  Any failure rolls back the whole state
         # transition, so a success can never be reported without lineage.

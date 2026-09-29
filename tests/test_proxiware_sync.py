@@ -156,10 +156,14 @@ def test_official_sync_runs_read_only_swap_reconciliation_after_inventory_commit
         replacement = db.execute(
             "SELECT last_seen_at,username_encrypted FROM provider_assignments WHERE external_id='101'"
         ).fetchone()
+        subscription = db.execute(
+            "SELECT dashboard_next_observe_at FROM provider_subscriptions WHERE external_id='10'"
+        ).fetchone()
 
     assert reconciled == [(False, {"now": mutation_at + timedelta(minutes=1)})]
     assert replacement["last_seen_at"] == (mutation_at + timedelta(minutes=1)).isoformat()
     assert replacement["username_encrypted"]
+    assert subscription["dashboard_next_observe_at"] == (mutation_at + timedelta(minutes=1)).isoformat()
 
 
 def test_sync_accepts_provider_string_payload_after_client_normalization(app):
@@ -447,6 +451,33 @@ def test_only_one_queued_or_running_sync_is_allowed(app):
 
     assert first is not None
     assert second is None
+
+
+def test_followup_sync_can_queue_behind_a_running_sync(app):
+    with app.app_context():
+        db = get_db()
+        running = claim_sync_run(db, create_if_missing=True)
+        assert running is not None
+        followup = enqueue_sync_run(db, allow_during_running=True)
+        duplicate = enqueue_sync_run(db, allow_during_running=True)
+
+    assert followup is not None
+    assert duplicate is None
+
+
+def test_sync_queue_preserves_callers_transaction(app):
+    with app.app_context():
+        db = get_db()
+        db.execute("DELETE FROM settings WHERE key='sync-transaction'")
+        db.execute("INSERT INTO settings(key,value,updated_at) VALUES('sync-transaction','before',datetime('now'))")
+        queued = enqueue_sync_run(db)
+        db.execute("UPDATE settings SET value='after' WHERE key='sync-transaction'")
+        db.rollback()
+        setting = db.execute("SELECT value FROM settings WHERE key='sync-transaction'").fetchone()
+        run = db.execute("SELECT status FROM provider_sync_runs WHERE id=?", (queued["run_id"],)).fetchone()
+
+    assert setting is None
+    assert run is None
 
 
 def test_queued_sync_can_be_canceled_before_worker_claims_it(app):

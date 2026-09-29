@@ -69,6 +69,22 @@ def test_security_schema_migrates_legacy_unscoped_tables(tmp_path):
     assert "provider_action_attempts_provider_idx" in indexes
 
 
+def test_swap_schema_preserves_callers_transaction(tmp_path):
+    database = sqlite3.connect(tmp_path / "swap-transaction.db")
+    database.row_factory = sqlite3.Row
+    database.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)")
+    database.execute("INSERT INTO settings(key,value,updated_at) VALUES('sentinel','before','now')")
+    database.commit()
+
+    database.execute("UPDATE settings SET value='after' WHERE key='sentinel'")
+    ensure_proxiware_swap_schema(database)
+    database.rollback()
+
+    row = database.execute("SELECT value FROM settings WHERE key='sentinel'").fetchone()
+    assert row["value"] == "before"
+    database.close()
+
+
 def _seed_subscription(db, *, eligible_count=500, connections=100, quota=1, cooldown=None):
     ensure_proxiware_swap_schema(db)
     now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC).isoformat()
@@ -282,13 +298,16 @@ def test_success_persists_mapping_and_enforces_sixty_second_cooldown(app):
         stored_job = db.execute("SELECT * FROM swap_jobs WHERE id=?", (job["id"],)).fetchone()
         mapping = db.execute("SELECT * FROM swap_mappings WHERE swap_job_id=?", (job["id"],)).fetchone()
         assignment = db.execute(
-            "SELECT replacement_ready_at FROM provider_assignments WHERE external_id='assignment-2'"
+            "SELECT status,qualification,live_status,replacement_ready_at,qualification_next_check_at "
+            "FROM provider_assignments WHERE external_id='assignment-2'"
         ).fetchone()
     assert stored_job["state"] == "success"
     assert mapping["old_assignment_external_id"] == "assignment-1"
     assert mapping["new_assignment_external_id"] == "assignment-2"
     assert assignment is not None
+    assert tuple(assignment[:3]) == ("active", "pending", "pending")
     assert assignment["replacement_ready_at"] == (reconciled_at + timedelta(seconds=60)).isoformat()
+    assert assignment["qualification_next_check_at"] == assignment["replacement_ready_at"]
 
 
 def test_success_uses_configured_cooldown_but_never_less_than_sixty_seconds(app):
@@ -344,7 +363,80 @@ def test_success_disables_distribution_until_replacement_is_requalified(app):
         ).fetchall()
 
     assert tuple(rows[0]) == ("assignment-1", "replaced", "risk", "live", 1, 0)
-    assert tuple(rows[1]) == ("assignment-2", "pending", "pending", "pending", 0, 0)
+    assert tuple(rows[1]) == ("assignment-2", "active", "pending", "pending", 1, 0)
+
+
+def test_schema_repairs_a_successful_replacement_left_pending(app):
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db)
+        db.execute(
+            "INSERT INTO provider_assignments(subscription_id,provider,external_id,host,port,status,qualification,"
+            "provider_eligible,live_status,replacement_ready_at,created_at,updated_at) "
+            "VALUES(?,'proxiware','stuck-replacement','new.example',8080,'pending','pending',1,'pending',?,?,?)",
+            (
+                sub_id,
+                datetime(2026, 9, 24, 12, 1, tzinfo=UTC).isoformat(),
+                "2026-09-24T12:00:00+00:00",
+                "2026-09-24T12:00:00+00:00",
+            ),
+        )
+        replacement_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.execute(
+            "INSERT INTO swap_jobs(provider,subscription_id,new_assignment_id,state,created_at,updated_at) "
+            "VALUES('proxiware',?,?,'success',?,?)",
+            (sub_id, replacement_id, "2026-09-24T12:00:00+00:00", "2026-09-24T12:00:00+00:00"),
+        )
+        db.commit()
+
+        ensure_proxiware_swap_schema(db)
+        row = db.execute(
+            "SELECT status,qualification_next_check_at FROM provider_assignments WHERE id=?", (replacement_id,)
+        ).fetchone()
+
+    assert row["status"] == "active"
+    assert row["qualification_next_check_at"] == "2026-09-24T12:01:00+00:00"
+
+
+def test_requalified_risk_replacement_can_queue_the_next_auto_swap(app):
+    from app.services.proxiware_qualification import qualify_proxiware_assignment
+
+    mutation_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    reconciled_at = mutation_at + timedelta(seconds=1)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db, quota=2)
+        job = _advance_to_provider_applied(db, now=mutation_at)
+        _seed_replacement_evidence(db, sub_id, observed_at=reconciled_at)
+        mark_swap_success(
+            db,
+            job["id"],
+            old_assignment_external_id="assignment-1",
+            new_assignment_external_id="assignment-2",
+            success_at=reconciled_at,
+            claim_token=job["claim_token"],
+        )
+        replacement_id = db.execute("SELECT id FROM provider_assignments WHERE external_id='assignment-2'").fetchone()[
+            "id"
+        ]
+        qualification_at = reconciled_at + timedelta(seconds=61)
+        result = qualify_proxiware_assignment(
+            db,
+            replacement_id,
+            probe=lambda _proxy: {
+                "status": "live",
+                "protocol": "socks5",
+                "exit_ip": "198.51.100.92",
+                "egress_trusted": True,
+            },
+            eligibility=lambda _proxy: {"verdict": "BLACKLIST", "reason": "earnapp_blacklist"},
+            now=qualification_at,
+            check_interval_seconds=3600,
+        )
+        queued = queue_eligible_swaps(db, now=qualification_at)
+
+    assert result.qualification == "risk"
+    assert queued == 1
 
 
 def test_success_requires_worker_claim_and_decryptable_replacement_credentials(app):

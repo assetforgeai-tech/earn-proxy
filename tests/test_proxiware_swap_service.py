@@ -74,8 +74,14 @@ def test_swap_runner_waits_for_read_only_reconciliation_after_provider_response(
     with app.app_context():
         row = get_db().execute("SELECT state FROM swap_jobs").fetchone()
         mapping = get_db().execute("SELECT * FROM swap_mappings").fetchone()
+        sync = (
+            get_db()
+            .execute("SELECT status FROM provider_sync_runs WHERE provider='proxiware' ORDER BY id DESC LIMIT 1")
+            .fetchone()
+        )
     assert row["state"] == "provider_applied"
     assert mapping is None
+    assert sync["status"] == "queued"
 
 
 def test_auto_swap_runner_queues_an_eligible_subscription_before_claiming(app):

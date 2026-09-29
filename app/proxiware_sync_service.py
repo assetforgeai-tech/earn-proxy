@@ -20,6 +20,7 @@ from app.services.proxiware import ProxiwareClient, SyncAlreadyRunning, load_api
 from app.services.proxiware_health import is_proxiware_automation_paused, record_worker_heartbeat
 
 logger = logging.getLogger(__name__)
+QUEUE_POLL_SECONDS = 5.0
 
 
 def safe_error_code(exc: BaseException) -> str:
@@ -149,11 +150,37 @@ class ProxiwareSyncRunner:
     def run_forever(self, *, max_cycles: int | None = None) -> int:
         cycles = 0
         while not self.stopped and (max_cycles is None or cycles < max_cycles):
+            with self.app.app_context():
+                queued_before = (
+                    get_db()
+                    .execute(
+                        "SELECT id FROM provider_sync_runs WHERE provider='proxiware' AND status='queued' "
+                        "ORDER BY id DESC LIMIT 1"
+                    )
+                    .fetchone()
+                )
+                queued_before_id = int(queued_before["id"]) if queued_before is not None else 0
             self.run_once()
             cycles += 1
             if max_cycles is not None and cycles >= max_cycles:
                 break
-            self._stop.wait(self.interval_seconds)
+            remaining = float(self.interval_seconds)
+            while remaining > 0 and not self.stopped:
+                step = min(QUEUE_POLL_SECONDS, remaining)
+                if self._stop.wait(step):
+                    break
+                with self.app.app_context():
+                    queued = (
+                        get_db()
+                        .execute(
+                            "SELECT id FROM provider_sync_runs WHERE provider='proxiware' AND status='queued' "
+                            "ORDER BY id DESC LIMIT 1"
+                        )
+                        .fetchone()
+                    )
+                if queued is not None and int(queued["id"]) > queued_before_id:
+                    break
+                remaining -= step
         return cycles
 
 

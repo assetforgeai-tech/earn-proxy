@@ -389,3 +389,85 @@ def test_browser_service_disabled_does_not_initialize_application(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["proxiware_browser_service", "--once"])
 
     assert service.main() == 0
+
+
+def test_browser_runner_polls_due_reconciliation_when_auto_swap_is_enabled(app):
+    from app.services.settings import set_setting
+
+    with app.app_context():
+        db = get_db()
+        set_setting(db, "proxiware_auto_swap", "1")
+        current = datetime.now(UTC)
+        now = current.isoformat()
+        db.execute(
+            "INSERT INTO provider_subscriptions(provider,external_id,status,first_seen_at,last_seen_at,"
+            "dashboard_next_observe_at,created_at,updated_at) "
+            "VALUES('proxiware','poll-sub','active',?,?,?,?,?)",
+            (now, now, (current - timedelta(seconds=1)).isoformat(), now, now),
+        )
+        subscription_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.execute(
+            "INSERT INTO swap_jobs(provider,subscription_id,state,created_at,updated_at) "
+            "VALUES('proxiware',?,'provider_applied',?,?)",
+            (subscription_id, now, now),
+        )
+        db.commit()
+
+    waits: list[float] = []
+    runner = ProxiwareBrowserRunner(app=app, adapter_factory=lambda: None, interval_seconds=300)
+    runner.run_once = lambda: {"status": "idle", "observed": 0, "subscriptions": 0}
+    runner._wait_for_handoff = lambda seconds: waits.append(seconds)
+
+    assert runner.run_forever(max_cycles=2) == 2
+    assert waits == [5.0]
+
+
+def test_browser_runner_wakes_when_reconciliation_arrives_during_idle_wait(app):
+    from app.services.settings import set_setting
+
+    with app.app_context():
+        set_setting(get_db(), "proxiware_auto_swap", "1")
+
+    waits: list[float] = []
+
+    def wait(seconds):
+        waits.append(seconds)
+        if len(waits) == 1:
+            with app.app_context():
+                db = get_db()
+                now = datetime.now(UTC).isoformat()
+                db.execute(
+                    "INSERT INTO provider_subscriptions(provider,external_id,status,first_seen_at,last_seen_at,"
+                    "dashboard_next_observe_at,created_at,updated_at) "
+                    "VALUES('proxiware','arrived-sub','active',?,?,?,?,?)",
+                    (now, now, now, now, now),
+                )
+                subscription_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+                db.execute(
+                    "INSERT INTO swap_jobs(provider,subscription_id,state,created_at,updated_at) "
+                    "VALUES('proxiware',?,'provider_applied',?,?)",
+                    (subscription_id, now, now),
+                )
+                db.commit()
+        return len(waits) > 1
+
+    runner = ProxiwareBrowserRunner(app=app, adapter_factory=lambda: None, interval_seconds=300)
+    runner.run_once = lambda: {"status": "idle", "observed": 0, "subscriptions": 0}
+    runner._stop.wait = wait
+
+    assert runner.run_forever(max_cycles=2) == 2
+    assert waits == [5.0]
+
+
+def test_browser_runner_keeps_periodic_interval_without_reconciliation(app):
+    from app.services.settings import set_setting
+
+    with app.app_context():
+        set_setting(get_db(), "proxiware_auto_swap", "1")
+
+    waits: list[float] = []
+    runner = ProxiwareBrowserRunner(app=app, adapter_factory=lambda: None, interval_seconds=300)
+    runner._wait_for_handoff = lambda seconds: waits.append(seconds)
+
+    assert runner.run_forever(max_cycles=2) == 2
+    assert waits == [300.0]

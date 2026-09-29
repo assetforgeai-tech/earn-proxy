@@ -144,6 +144,12 @@ script. Keep auto-swap disabled until a fresh dry-run passes.
   inventory is current from a successful HTTP response alone.
 - `blocked`: inspect `Swap queue`, `Session`, and `Policy`; never blind-retry a
   provider or challenge error.
+- With auto-swap enabled, a confirmed mutation queues official read-only sync.
+  Sync schedules fresh dashboard observation; the reconciled replacement waits
+  at least the configured 60-second cooldown, then enters the bounded
+  qualification batch. `Allow` stops replacement. Only a conclusive live
+  `Risk` result may queue the next guarded swap; pending, dead, inconclusive,
+  duplicate, stale, or unverified rows remain excluded.
 - `inconclusive` or `unknown`: keep the assignment out of distribution and swap
   until a bounded qualification run produces a trusted result.
 - `manual_action_required`: the browser adapter is unavailable or the provider

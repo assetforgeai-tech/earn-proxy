@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_INTERVAL_SECONDS = 3600
 DEFAULT_CLAIM_SECONDS = 900
 MAX_CONCURRENCY = 20
+NEW_ASSIGNMENT_POLL_SECONDS = 5
 
 
 def _utc_now() -> datetime:
@@ -102,6 +103,51 @@ class ProxiwareQualificationRunner:
             if self._stop.wait(step):
                 break
             remaining -= step
+
+    @staticmethod
+    def _handoff_pending(db) -> bool:
+        pending = db.execute(
+            "SELECT 1 FROM swap_jobs WHERE provider='proxiware' "
+            "AND state IN ('provider_applied','reconciliation_required') LIMIT 1"
+        ).fetchone()
+        if pending is not None:
+            return True
+        return (
+            db.execute(
+                "SELECT 1 FROM provider_assignments "
+                "WHERE provider='proxiware' AND missing_at IS NULL "
+                "AND status IN ('active','current') AND replacement_ready_at IS NOT NULL "
+                "AND qualification='pending' AND last_checked_at IS NULL LIMIT 1"
+            ).fetchone()
+            is not None
+        )
+
+    def _wait_for_handoff(self, seconds: float) -> None:
+        """Sleep until the interval or wake when auto-swap handoff work appears."""
+
+        remaining = max(0.0, float(seconds))
+        heartbeat_remaining = 0.0
+        while remaining > 0 and not self.stopped:
+            with self.app.app_context():
+                db = get_db()
+                auto_swap = get_setting(db, "proxiware_auto_swap", "0") == "1"
+                if heartbeat_remaining <= 0:
+                    record_worker_heartbeat(
+                        db,
+                        "qualification_worker",
+                        "sleeping",
+                        next_wake_at=_utc_now() + timedelta(seconds=remaining),
+                    )
+                    heartbeat_remaining = 60.0
+            step = min(NEW_ASSIGNMENT_POLL_SECONDS if auto_swap else 60.0, remaining)
+            if self._stop.wait(step):
+                break
+            remaining -= step
+            heartbeat_remaining -= step
+            if auto_swap:
+                with self.app.app_context():
+                    if self._handoff_pending(get_db()):
+                        break
 
     def _active_heartbeat(self, stop: Event) -> None:
         """Keep the worker observable while provider probes are in flight."""
@@ -293,11 +339,32 @@ class ProxiwareQualificationRunner:
     def run_forever(self, *, max_cycles: int | None = None) -> int:
         cycles = 0
         while not self.stopped and (max_cycles is None or cycles < max_cycles):
-            self.run_once()
+            outcome = self.run_once()
             cycles += 1
             if max_cycles is not None and cycles >= max_cycles:
                 break
-            self._wait_with_heartbeat(self.interval_seconds)
+            try:
+                claimed = int(outcome.get("claimed", 0))
+                concurrency = max(1, int(outcome.get("concurrency", 1)))
+            except (AttributeError, TypeError, ValueError):
+                claimed = 0
+                concurrency = 1
+            # Keep the batch size as the concurrency ceiling, but poll often
+            # enough to pick up a reconciled replacement after its cooldown.
+            # A full batch is drained without adding an hourly delay.
+            if claimed >= concurrency:
+                wait_seconds = 0
+            else:
+                with self.app.app_context():
+                    db = get_db()
+                    auto_swap = get_setting(db, "proxiware_auto_swap", "0") == "1"
+                    handoff_pending = self._handoff_pending(db)
+                wait_seconds = (
+                    min(self.interval_seconds, NEW_ASSIGNMENT_POLL_SECONDS)
+                    if auto_swap and handoff_pending
+                    else self.interval_seconds
+                )
+            self._wait_for_handoff(wait_seconds)
         return cycles
 
 

@@ -29,9 +29,11 @@ from app.services.proxiware_dashboard import (
     apply_dashboard_snapshot,
 )
 from app.services.proxiware_health import is_proxiware_automation_paused, record_worker_heartbeat
+from app.services.settings import get_setting
 
 logger = logging.getLogger(__name__)
 DEFAULT_INTERVAL_SECONDS = 300
+AUTO_SWAP_POLL_SECONDS = 5.0
 
 
 def _utc(value: datetime) -> datetime:
@@ -102,6 +104,48 @@ class ProxiwareBrowserRunner:
             if self._stop.wait(step):
                 break
             remaining -= step
+
+    @staticmethod
+    def _handoff_pending(db) -> bool:
+        return (
+            db.execute(
+                "SELECT 1 FROM swap_jobs sj JOIN provider_subscriptions ps "
+                "ON ps.id=sj.subscription_id AND ps.provider='proxiware' "
+                "WHERE sj.provider='proxiware' "
+                "AND sj.state IN ('provider_applied','reconciliation_required') "
+                "AND ps.status IN ('active','ready') AND ps.missing_at IS NULL LIMIT 1"
+            ).fetchone()
+            is not None
+        )
+
+    def _wait_for_handoff(self, seconds: float) -> None:
+        """Sleep until the interval or wake when a swap needs observation."""
+
+        remaining = max(0.0, float(seconds))
+        heartbeat_remaining = 0.0
+        while remaining > 0 and not self.stopped:
+            with self.app.app_context():
+                db = get_db()
+                auto_swap = get_setting(db, "proxiware_auto_swap", "0") == "1"
+                current = _utc(self.now())
+                if heartbeat_remaining <= 0:
+                    record_worker_heartbeat(
+                        db,
+                        "browser_worker",
+                        "sleeping",
+                        now=current,
+                        next_wake_at=current + timedelta(seconds=remaining),
+                    )
+                    heartbeat_remaining = 60.0
+            step = min(AUTO_SWAP_POLL_SECONDS if auto_swap else 60.0, remaining)
+            if self._stop.wait(step):
+                break
+            remaining -= step
+            heartbeat_remaining -= step
+            if auto_swap:
+                with self.app.app_context():
+                    if self._handoff_pending(get_db()):
+                        break
 
     def _active_session(self, db, current: datetime):
         row = db.execute("SELECT state,expires_at FROM provider_sessions WHERE provider='proxiware'").fetchone()
@@ -290,7 +334,18 @@ class ProxiwareBrowserRunner:
             cycles += 1
             if max_cycles is not None and cycles >= max_cycles:
                 break
-            self._wait_with_heartbeat(self.interval_seconds)
+            with self.app.app_context():
+                db = get_db()
+                auto_swap = get_setting(db, "proxiware_auto_swap", "0") == "1"
+                handoff_pending = self._handoff_pending(db)
+            # A mutation can be recorded just after this cycle checks the DB.
+            # Poll cheaply while auto-swap is enabled; _subscriptions still
+            # filters observations by durable due timestamps.
+            self._wait_for_handoff(
+                min(self.interval_seconds, AUTO_SWAP_POLL_SECONDS)
+                if auto_swap and handoff_pending
+                else self.interval_seconds
+            )
         return cycles
 
 

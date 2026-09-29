@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import secrets
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -246,7 +247,9 @@ class SyncResult:
     errors: int
 
 
-def enqueue_sync_run(db, *, now: datetime | None = None) -> dict[str, object] | None:
+def enqueue_sync_run(
+    db, *, now: datetime | None = None, allow_during_running: bool = False
+) -> dict[str, object] | None:
     """Queue one durable sync request without contacting the provider."""
 
     ensure_proxiware_inventory_schema(db)
@@ -254,25 +257,39 @@ def enqueue_sync_run(db, *, now: datetime | None = None) -> dict[str, object] | 
     if current.tzinfo is None:
         current = current.replace(tzinfo=UTC)
     timestamp = current.astimezone(UTC).isoformat()
-    db.execute("BEGIN IMMEDIATE")
+    owns_transaction = not db.in_transaction
+    if owns_transaction:
+        db.execute("BEGIN IMMEDIATE")
     try:
         active = db.execute(
             "SELECT id,status FROM provider_sync_runs WHERE provider='proxiware' "
             "AND status IN ('queued','running') ORDER BY id DESC LIMIT 1"
         ).fetchone()
-        if active is not None:
-            db.rollback()
+        if active is not None and not (allow_during_running and str(active["status"]) == "running"):
+            if owns_transaction:
+                db.rollback()
             return None
+        if active is not None:
+            queued = db.execute(
+                "SELECT id FROM provider_sync_runs WHERE provider='proxiware' AND status='queued' "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if queued is not None:
+                if owns_transaction:
+                    db.rollback()
+                return None
         cursor = db.execute(
             "INSERT INTO provider_sync_runs(provider,started_at,status,error_code,error_message) "
             "VALUES('proxiware',?,'queued','','')",
             (timestamp,),
         )
         run_id = int(cursor.lastrowid)
-        db.commit()
+        if owns_transaction:
+            db.commit()
         return {"run_id": run_id, "status": "queued"}
     except Exception:
-        db.rollback()
+        if owns_transaction and db.in_transaction:
+            db.rollback()
         raise
 
 
@@ -389,8 +406,27 @@ def _raise_if_sync_cancelled(
 
 
 def ensure_proxiware_inventory_schema(db) -> None:
-    """Create the read/sync tables without requiring a separate migration CLI."""
-    db.executescript(
+    """Create inventory tables without committing a caller's transaction."""
+
+    owns_transaction = not db.in_transaction
+    if owns_transaction:
+        db.execute("BEGIN")
+    try:
+        _ensure_proxiware_inventory_schema(db)
+    except Exception:
+        if owns_transaction and db.in_transaction:
+            db.rollback()
+        raise
+    else:
+        if owns_transaction and db.in_transaction:
+            db.commit()
+
+
+def _ensure_proxiware_inventory_schema(db) -> None:
+    """Apply inventory DDL and additive columns inside the caller's transaction."""
+
+    _execute_sql_script(
+        db,
         """
         CREATE TABLE IF NOT EXISTS provider_subscriptions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -465,7 +501,7 @@ def ensure_proxiware_inventory_schema(db) -> None:
             processed_count INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS provider_sync_runs_idx ON provider_sync_runs(provider, started_at);
-        """
+        """,
     )
     ensure_worker_columns(db)
     # The swap service may create an older compatible shape first. Add only
@@ -504,7 +540,20 @@ def ensure_proxiware_inventory_schema(db) -> None:
         for name, definition in definitions.items():
             if name not in existing:
                 db.execute(f'ALTER TABLE "{table}" ADD COLUMN "{name}" {definition}')
-    db.commit()
+
+
+def _execute_sql_script(db, script: str) -> None:
+    """Execute DDL statements without executescript's implicit commit."""
+
+    pending = ""
+    for line in str(script).splitlines(keepends=True):
+        pending += line
+        if sqlite3.complete_statement(pending):
+            if pending.strip():
+                db.execute(pending)
+            pending = ""
+    if pending.strip():
+        db.execute(pending)
 
 
 def _iso(now: datetime | None) -> str:
@@ -951,6 +1000,15 @@ def sync_proxiware_inventory(db, client: ProxiwareClient, *, now: datetime | Non
         )
         if cursor.rowcount != 1:
             raise SyncLeaseLost("Proxiware sync lease is no longer owned")
+        # A swap waiting for reconciliation needs a fresh dashboard snapshot
+        # as soon as official inventory exposes the replacement.
+        db.execute(
+            "UPDATE provider_subscriptions SET dashboard_next_observe_at=?, updated_at=? "
+            "WHERE provider='proxiware' AND id IN ("
+            "SELECT subscription_id FROM swap_jobs WHERE provider='proxiware' "
+            "AND state IN ('provider_applied','reconciliation_required'))",
+            (finished, finished),
+        )
         db.commit()
         # Reconciliation is read-only provider truth processing.  Run only
         # after the inventory transaction is committed, never mid-sync.

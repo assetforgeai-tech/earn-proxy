@@ -246,6 +246,36 @@ def test_runner_does_not_claim_replacement_before_cooldown(app):
     assert runner.run_once()["status"] == "idle"
 
 
+def test_runner_claims_reconciled_replacement_after_cooldown(app):
+    with app.app_context():
+        db = get_db()
+        assignment_id = _assignment(db, "qual-worker-replacement")
+        db.execute(
+            "UPDATE provider_assignments SET status='active', replacement_ready_at=? WHERE id=?",
+            ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(), assignment_id),
+        )
+        db.commit()
+
+    runner = ProxiwareQualificationRunner(
+        app=app,
+        probe=lambda _proxy: {
+            "status": "live",
+            "protocol": "socks5",
+            "exit_ip": "198.51.100.91",
+            "egress_trusted": True,
+        },
+        eligibility=lambda _proxy: {"verdict": "CID_SET"},
+        concurrency=1,
+    )
+
+    outcome = runner.run_once()
+
+    assert outcome["checked"] == 1
+    with app.app_context():
+        row = get_db().execute("SELECT qualification FROM provider_assignments WHERE id=?", (assignment_id,)).fetchone()
+    assert row["qualification"] == "allow"
+
+
 def test_runner_stop_releases_claims_that_never_started(app):
     with app.app_context():
         db = get_db()
@@ -313,3 +343,105 @@ def test_runner_persists_next_wake_before_idle_sleep(app):
             .fetchall()
         )
     assert values["proxiware_qualification_worker_next_wake_at"]
+
+
+def test_runner_polls_for_new_replacements_when_auto_swap_is_enabled(app):
+    from app.services.settings import set_setting
+
+    with app.app_context():
+        db = get_db()
+        set_setting(db, "proxiware_auto_swap", "1")
+        assignment_id = _assignment(db, "qual-worker-poll")
+        db.execute(
+            "UPDATE provider_assignments SET replacement_ready_at=? WHERE id=?",
+            ((datetime.now(UTC) + timedelta(minutes=1)).isoformat(), assignment_id),
+        )
+        db.commit()
+
+    waits: list[float] = []
+    runner = ProxiwareQualificationRunner(app=app, interval_seconds=3600)
+    runner._wait_for_handoff = lambda seconds: waits.append(seconds)
+
+    assert runner.run_forever(max_cycles=2) == 2
+    assert waits == [5.0]
+
+
+def test_runner_wakes_when_replacement_arrives_during_idle_wait(app):
+    from app.services.settings import set_setting
+
+    with app.app_context():
+        set_setting(get_db(), "proxiware_auto_swap", "1")
+
+    waits: list[float] = []
+
+    def wait(seconds):
+        waits.append(seconds)
+        if len(waits) == 1:
+            with app.app_context():
+                db = get_db()
+                assignment_id = _assignment(db, "qual-worker-arrived")
+                db.execute(
+                    "UPDATE provider_assignments SET replacement_ready_at=? WHERE id=?",
+                    ((datetime.now(UTC) + timedelta(minutes=1)).isoformat(), assignment_id),
+                )
+                db.commit()
+        return len(waits) > 1
+
+    runner = ProxiwareQualificationRunner(app=app, interval_seconds=3600)
+    runner._stop.wait = wait
+
+    assert runner.run_forever(max_cycles=2) == 2
+    assert waits == [5.0]
+
+
+def test_runner_keeps_hourly_idle_schedule_when_auto_swap_is_disabled(app):
+    waits: list[float] = []
+    runner = ProxiwareQualificationRunner(app=app, interval_seconds=3600)
+    runner._wait_for_handoff = lambda seconds: waits.append(seconds)
+
+    assert runner.run_forever(max_cycles=2) == 2
+    assert waits == [3600]
+
+
+def test_runner_does_not_fast_poll_after_replacement_check(app):
+    from app.services.settings import set_setting
+
+    with app.app_context():
+        db = get_db()
+        set_setting(db, "proxiware_auto_swap", "1")
+        assignment_id = _assignment(db, "qual-worker-checked")
+        now = datetime.now(UTC)
+        db.execute(
+            "UPDATE provider_assignments SET replacement_ready_at=?, last_checked_at=?, "
+            "qualification_next_check_at=? WHERE id=?",
+            (
+                (now - timedelta(minutes=1)).isoformat(),
+                now.isoformat(),
+                (now + timedelta(hours=1)).isoformat(),
+                assignment_id,
+            ),
+        )
+        db.commit()
+
+    waits: list[float] = []
+    runner = ProxiwareQualificationRunner(app=app, interval_seconds=3600)
+    runner._wait_for_handoff = lambda seconds: waits.append(seconds)
+
+    assert runner.run_forever(max_cycles=2) == 2
+    assert waits == [3600]
+
+
+def test_runner_drains_full_batches_without_poll_delay(app):
+    waits: list[float] = []
+    outcomes = iter(
+        [
+            {"status": "ok", "claimed": 2, "concurrency": 2},
+            {"status": "idle", "checked": 0},
+        ]
+    )
+    runner = ProxiwareQualificationRunner(app=app, interval_seconds=3600)
+    runner.run_once = lambda: next(outcomes)
+    runner._wait_for_handoff = lambda seconds: waits.append(seconds)
+
+    assert runner.run_forever(max_cycles=2) == 2
+    assert waits == [0.0]

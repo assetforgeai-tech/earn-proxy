@@ -206,3 +206,67 @@ def test_global_proxiware_pause_stops_sync_without_consuming_queue(app, monkeypa
         setting = get_db().execute("SELECT value FROM settings WHERE key='proxiware_sync_worker_status'").fetchone()
     assert row["status"] == "queued"
     assert setting["value"] == "paused"
+
+
+def test_sync_runner_polls_a_new_queue_without_waiting_for_periodic_interval(app, monkeypatch):
+    from app.services.proxiware import enqueue_sync_run
+
+    runs: list[str] = []
+
+    def sync(db, _client, **_kwargs):
+        runs.append("sync")
+        queued = db.execute(
+            "SELECT id FROM provider_sync_runs WHERE provider='proxiware' AND status='queued' ORDER BY id LIMIT 1"
+        ).fetchone()
+        if queued is not None:
+            db.execute("UPDATE provider_sync_runs SET status='success' WHERE id=?", (queued["id"],))
+            db.commit()
+        return {"added": 0}
+
+    monkeypatch.setattr("app.proxiware_sync_service.sync_proxiware_inventory", sync)
+    runner = ProxiwareSyncRunner(
+        app=app,
+        client_factory=FakeClient,
+        api_key_provider=lambda _db: "key",
+        interval_seconds=3600,
+    )
+    waits: list[float] = []
+
+    def wait(seconds):
+        waits.append(seconds)
+        if len(runs) == 1:
+            with app.app_context():
+                enqueue_sync_run(get_db())
+        return False
+
+    runner._stop.wait = wait
+
+    assert runner.run_forever(max_cycles=2) == 2
+    assert runs == ["sync", "sync"]
+    assert waits == [5.0]
+
+
+def test_sync_runner_wakes_queued_followup_after_failed_run(app):
+    from app.services.proxiware import enqueue_sync_run
+
+    outcomes = iter([{"status": "error"}, {"status": "ok"}])
+    runner = ProxiwareSyncRunner(
+        app=app,
+        client_factory=FakeClient,
+        api_key_provider=lambda _db: "key",
+        interval_seconds=10,
+    )
+    runner.run_once = lambda: next(outcomes)
+    waits: list[float] = []
+
+    def wait(seconds):
+        waits.append(seconds)
+        if len(waits) == 1:
+            with app.app_context():
+                assert enqueue_sync_run(get_db()) is not None
+        return False
+
+    runner._stop.wait = wait
+
+    assert runner.run_forever(max_cycles=2) == 2
+    assert waits == [5.0]
