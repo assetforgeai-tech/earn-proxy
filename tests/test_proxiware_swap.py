@@ -688,7 +688,7 @@ def test_success_uses_configured_cooldown_but_never_less_than_sixty_seconds(app)
     assert assignment["replacement_ready_at"] == (reconciled_at + timedelta(seconds=120)).isoformat()
 
 
-def test_success_disables_distribution_until_replacement_is_requalified(app):
+def test_success_deletes_old_assignment_and_keeps_swap_audit(app):
     success_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
     reconciled_at = success_at + timedelta(seconds=1)
     with app.app_context():
@@ -698,6 +698,9 @@ def test_success_disables_distribution_until_replacement_is_requalified(app):
             "UPDATE provider_assignments SET distribution_enabled=1 WHERE subscription_id=?",
             (sub_id,),
         )
+        old_assignment_id = db.execute(
+            "SELECT id FROM provider_assignments WHERE external_id='assignment-1'"
+        ).fetchone()["id"]
         db.commit()
         job = _advance_to_provider_applied(db, now=success_at)
         _seed_replacement_evidence(db, sub_id, observed_at=reconciled_at)
@@ -711,14 +714,25 @@ def test_success_disables_distribution_until_replacement_is_requalified(app):
             claim_token=job["claim_token"],
         )
 
-        rows = db.execute(
-            "SELECT external_id,status,qualification,live_status,provider_eligible,distribution_enabled "
-            "FROM provider_assignments WHERE subscription_id=? ORDER BY id",
-            (sub_id,),
-        ).fetchall()
+        old_assignment = db.execute("SELECT id FROM provider_assignments WHERE id=?", (old_assignment_id,)).fetchone()
+        replacement = db.execute(
+            "SELECT id,external_id,status,qualification,live_status,provider_eligible,distribution_enabled "
+            "FROM provider_assignments WHERE external_id='assignment-2'"
+        ).fetchone()
+        stored_job = db.execute(
+            "SELECT state,old_assignment_id,new_assignment_id,mutation_old_assignment_external_id,"
+            "mutation_new_assignment_external_id FROM swap_jobs WHERE id=?",
+            (job["id"],),
+        ).fetchone()
+        mapping = db.execute(
+            "SELECT old_assignment_external_id,new_assignment_external_id FROM swap_mappings WHERE swap_job_id=?",
+            (job["id"],),
+        ).fetchone()
 
-    assert tuple(rows[0]) == ("assignment-1", "replaced", "risk", "live", 1, 0)
-    assert tuple(rows[1]) == ("assignment-2", "active", "pending", "pending", 1, 0)
+    assert old_assignment is None
+    assert tuple(replacement[1:]) == ("assignment-2", "active", "pending", "pending", 1, 0)
+    assert tuple(stored_job) == ("success", old_assignment_id, replacement["id"], "assignment-1", "assignment-2")
+    assert tuple(mapping) == ("assignment-1", "assignment-2")
 
 
 def test_schema_repairs_a_successful_replacement_left_pending(app):

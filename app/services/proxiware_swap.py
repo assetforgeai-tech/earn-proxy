@@ -1568,11 +1568,7 @@ def mark_swap_success(
             "VALUES(?,?,?,?,?)",
             (int(job_id), old_external, new_external, current.isoformat(), current.isoformat()),
         )
-        db.execute(
-            "UPDATE provider_assignments SET status='replaced', replacement_ready_at=NULL, "
-            "distribution_enabled=0, updated_at=? WHERE id=?",
-            (current.isoformat(), int(old["id"])),
-        )
+        db.execute("DELETE FROM provider_assignments WHERE id=?", (int(old["id"]),))
         db.execute(
             "UPDATE swap_jobs SET state='success', reason='swapped', error_code='', old_assignment_id=?, "
             "new_assignment_id=?, claim_token=NULL, claimed_until=NULL, updated_at=? WHERE id=? AND provider=?",
