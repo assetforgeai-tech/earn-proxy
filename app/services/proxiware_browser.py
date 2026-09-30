@@ -8,6 +8,8 @@ provider mutation.
 
 from __future__ import annotations
 
+import os
+import stat
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -68,6 +70,56 @@ class BrowserProviderResponseError(RuntimeError):
             else "provider_error"
         )
         super().__init__(self.error_code)
+
+
+def _acquire_browser_lock(path: str):
+    descriptor = None
+    handle = None
+    try:
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(str(path), flags, 0o660)
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            os.close(descriptor)
+            descriptor = None
+            raise OSError("browser lock is not a regular file")
+        handle = os.fdopen(descriptor, "r+b", buffering=0)
+        descriptor = None
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        return handle
+    except Exception as exc:
+        if handle is not None:
+            handle.close()
+        elif descriptor is not None:
+            os.close(descriptor)
+        raise BrowserAdapterUnavailable("browser_transport_missing") from exc
+
+
+def _release_browser_lock(handle: Any | None) -> None:
+    if handle is None:
+        return
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
 
 
 def _validate_cdp_url(value: str | None) -> str | None:
@@ -203,9 +255,11 @@ class CdpProxiwareBrowser:
     dashboard_url: str = "https://app.proxiware.com/static/proxy/isp"
     login_url: str = "https://app.proxiware.com/auth/login?redirect=%2F"
     fingerprint_public_key: str = "FifZsPA6O1gC5x2RsInJ"
+    lock_path: str | None = None
     client_factory: Callable[[], Any] | None = None
     allow_mutation: bool = False
     _session_client: Any | None = field(default=None, init=False, repr=False)
+    _lock_handle: Any | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         parsed = urlparse(self.dashboard_url)
@@ -226,17 +280,28 @@ class CdpProxiwareBrowser:
     @contextmanager
     def _client(self) -> Iterator[Any]:
         if self._session_client is None:
-            factory = self.client_factory or (
-                lambda: _PlaywrightCdpClient(self.cdp_url, dashboard_url=self.dashboard_url)
-            )
-            self._session_client = factory()
+            if self.lock_path and self._lock_handle is None:
+                self._lock_handle = _acquire_browser_lock(self.lock_path)
+            try:
+                factory = self.client_factory or (
+                    lambda: _PlaywrightCdpClient(self.cdp_url, dashboard_url=self.dashboard_url)
+                )
+                self._session_client = factory()
+            except Exception:
+                lock, self._lock_handle = self._lock_handle, None
+                _release_browser_lock(lock)
+                raise
         yield self._session_client
 
     def close(self) -> None:
         client, self._session_client = self._session_client, None
-        close = getattr(client, "close", None) if client is not None else None
-        if callable(close):
-            close()
+        lock, self._lock_handle = self._lock_handle, None
+        try:
+            close = getattr(client, "close", None) if client is not None else None
+            if callable(close):
+                close()
+        finally:
+            _release_browser_lock(lock)
 
     def _navigate(self, client: Any) -> None:
         navigate = getattr(client, "navigate", None)
@@ -604,6 +669,7 @@ def build_browser_adapter(
     dashboard_url: str = "https://app.proxiware.com/static/proxy/isp",
     login_url: str = "https://app.proxiware.com/auth/login?redirect=%2F",
     fingerprint_public_key: str = "FifZsPA6O1gC5x2RsInJ",
+    lock_path: str | None = None,
     allow_mutation: bool = False,
 ) -> UnavailableProxiwareBrowser | DryRunProxiwareBrowser | CdpProxiwareBrowser:
     """Build only the explicitly enabled adapter; default is fail-closed."""
@@ -617,6 +683,7 @@ def build_browser_adapter(
             dashboard_url=dashboard_url,
             login_url=login_url,
             fingerprint_public_key=fingerprint_public_key,
+            lock_path=str(lock_path).strip() if lock_path else None,
             allow_mutation=bool(allow_mutation),
         )
     return UnavailableProxiwareBrowser(endpoint)

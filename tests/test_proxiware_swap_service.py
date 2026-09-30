@@ -385,6 +385,7 @@ def test_configured_swap_runner_builds_the_guarded_browser_adapter(app, monkeypa
         PROXIWARE_BROWSER_ENABLED=True,
         PROXIWARE_BROWSER_ALLOW_MUTATION=True,
         PROXIWARE_CDP_URL="http://127.0.0.1:9222",
+        PROXIWARE_CDP_LOCK_PATH="swap.lock",
     )
     built = []
 
@@ -416,6 +417,7 @@ def test_configured_swap_runner_builds_the_guarded_browser_adapter(app, monkeypa
             "cdp_url": "http://127.0.0.1:9222",
             "dashboard_url": "https://app.proxiware.com/static/proxy/isp",
             "login_url": "https://app.proxiware.com/auth/login?redirect=%2F",
+            "lock_path": "swap.lock",
             "allow_mutation": True,
         }
     ]

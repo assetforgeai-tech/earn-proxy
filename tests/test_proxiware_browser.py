@@ -725,3 +725,64 @@ def test_cdp_browser_site_key_discovery_clears_authenticated_session_before_logi
 
     assert adapter.discover_hcaptcha_site_key(page_url="https://app.proxiware.com/auth/login") == "iframe-site-key"
     assert client.cleared is True
+
+
+def test_cdp_browser_holds_process_lock_for_adapter_lifetime(monkeypatch):
+    import app.services.proxiware_browser as browser_module
+
+    events = []
+    lock_token = object()
+
+    monkeypatch.setattr(
+        browser_module,
+        "_acquire_browser_lock",
+        lambda path: events.append(("acquire", path)) or lock_token,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        browser_module,
+        "_release_browser_lock",
+        lambda token: events.append(("release", token)),
+        raising=False,
+    )
+
+    class LockClient:
+        url = "https://app.proxiware.com/static/proxy/isp"
+
+        def add_cookies(self, _cookies):
+            return None
+
+        def navigate(self, url):
+            self.url = url
+
+        def evaluate(self, _expression, _arg=None):
+            return {
+                "status": 200,
+                "origin": "https://app.proxiware.com",
+                "response_origin": "https://app.proxiware.com",
+                "path": "/static/proxy/isp",
+                "response_path": "/api/static/networks/isp/proxies",
+                "payload": {"proxies": []},
+            }
+
+        def close(self):
+            events.append(("client_close",))
+
+    client = LockClient()
+    adapter = CdpProxiwareBrowser(
+        "http://127.0.0.1:9222",
+        lock_path="/var/lib/earn-proxy/proxiware-cdp.lock",
+        client_factory=lambda: events.append(("client",)) or client,
+    )
+
+    adapter.restore_session([{"name": "session", "value": "opaque"}])
+    adapter.observe_dashboard(subscription_id="39277")
+
+    assert events == [
+        ("acquire", "/var/lib/earn-proxy/proxiware-cdp.lock"),
+        ("client",),
+    ]
+
+    adapter.close()
+
+    assert events[-2:] == [("client_close",), ("release", lock_token)]

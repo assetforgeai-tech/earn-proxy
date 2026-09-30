@@ -96,6 +96,7 @@ def test_browser_observer_never_builds_a_mutation_capable_adapter(app, monkeypat
     app.config.update(
         PROXIWARE_BROWSER_ENABLED=True,
         PROXIWARE_BROWSER_ALLOW_MUTATION=True,
+        PROXIWARE_CDP_LOCK_PATH="observer.lock",
     )
     captured = {}
 
@@ -108,6 +109,7 @@ def test_browser_observer_never_builds_a_mutation_capable_adapter(app, monkeypat
     ProxiwareBrowserRunner(app=app)._configured_adapter()
 
     assert captured["allow_mutation"] is False
+    assert captured["lock_path"] == "observer.lock"
 
 
 def test_browser_runner_blocks_expired_provider_session(app):

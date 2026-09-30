@@ -89,6 +89,7 @@ class ProxiwareBrowserRunner:
             fingerprint_public_key=str(
                 self.app.config.get("PROXIWARE_FINGERPRINT_PUBLIC_KEY") or "FifZsPA6O1gC5x2RsInJ"
             ),
+            lock_path=str(self.app.config.get("PROXIWARE_CDP_LOCK_PATH") or "").strip() or None,
             # The observer boundary is read-only; swap mutation is built only
             # by the separately guarded swap worker.
             allow_mutation=False,

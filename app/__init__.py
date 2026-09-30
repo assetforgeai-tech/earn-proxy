@@ -95,6 +95,9 @@ def create_app(test_config: dict | None = None) -> Flask:
         PROXIWARE_BROWSER_DRY_RUN=os.environ.get("EARN_PROXY_PROXIWARE_BROWSER_DRY_RUN", "0") == "1",
         PROXIWARE_BROWSER_ALLOW_MUTATION=os.environ.get("EARN_PROXY_PROXIWARE_BROWSER_ALLOW_MUTATION", "0") == "1",
         PROXIWARE_CDP_URL=os.environ.get("EARN_PROXY_PROXIWARE_CDP_URL", "http://127.0.0.1:9222"),
+        PROXIWARE_CDP_LOCK_PATH=os.environ.get(
+            "EARN_PROXY_PROXIWARE_CDP_LOCK_PATH", os.path.join(app.instance_path, "proxiware-cdp.lock")
+        ),
         PROXIWARE_BROWSER_DASHBOARD_URL=os.environ.get(
             "EARN_PROXY_PROXIWARE_BROWSER_DASHBOARD_URL", "https://app.proxiware.com/static/proxy/isp"
         ),

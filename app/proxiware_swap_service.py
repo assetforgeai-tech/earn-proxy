@@ -105,6 +105,7 @@ class ProxiwareSwapRunner:
             "dashboard_url": str(
                 self.app.config.get("PROXIWARE_BROWSER_DASHBOARD_URL") or "https://app.proxiware.com/static/proxy/isp"
             ),
+            "lock_path": str(self.app.config.get("PROXIWARE_CDP_LOCK_PATH") or "").strip() or None,
             "allow_mutation": bool(self.app.config.get("PROXIWARE_BROWSER_ALLOW_MUTATION", False)),
         }
         configured_login = str(self.app.config.get("PROXIWARE_LOGIN_URL") or "").strip()
