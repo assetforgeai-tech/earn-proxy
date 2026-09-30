@@ -372,9 +372,10 @@ class ProxiwareSwapRunner:
                     claim_token=job["claim_token"],
                 )
                 if not decision.allowed:
-                    record_worker_heartbeat(db, "swap_worker", "blocked", error_code=decision.reason)
+                    status = "deferred" if decision.reason == "dashboard_stale" and not allow_manual else "rejected"
+                    record_worker_heartbeat(db, "swap_worker", status, error_code=decision.reason)
                     return {
-                        "status": "rejected",
+                        "status": status,
                         "job_id": int(job["id"]),
                         "error_code": decision.reason,
                     }
@@ -392,9 +393,10 @@ class ProxiwareSwapRunner:
                     enter_mutation=True,
                 )
                 if not decision.allowed:
-                    record_worker_heartbeat(db, "swap_worker", "blocked", error_code=decision.reason)
+                    status = "deferred" if decision.reason == "dashboard_stale" and not allow_manual else "rejected"
+                    record_worker_heartbeat(db, "swap_worker", status, error_code=decision.reason)
                     return {
-                        "status": "rejected",
+                        "status": status,
                         "job_id": int(job["id"]),
                         "error_code": decision.reason,
                     }

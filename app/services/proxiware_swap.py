@@ -1212,6 +1212,24 @@ def revalidate_swap_job(
                 )
             return decision
         reason = decision.reason if decision.allowed is False else "manual_action_required"
+        if reason == "dashboard_stale" and not allow_manual:
+            retry_at = current + timedelta(seconds=30)
+            db.execute(
+                "UPDATE swap_jobs SET state='pending', reason='awaiting_dashboard', error_code=?, blocked_at=NULL, "
+                "claim_token=NULL, claimed_until=?, updated_at=? WHERE id=? AND provider=? AND state='running'",
+                (
+                    reason,
+                    retry_at.isoformat(),
+                    current.isoformat(),
+                    int(job_id),
+                    PROVIDER,
+                ),
+            )
+            db.execute(
+                "UPDATE provider_subscriptions SET dashboard_next_observe_at=?, updated_at=? WHERE id=? AND provider=?",
+                (current.isoformat(), current.isoformat(), int(job["subscription_id"]), PROVIDER),
+            )
+            return SwapDecision(False, reason, int(job["subscription_id"]), decision.assignment_id)
         db.execute(
             "UPDATE swap_jobs SET state='blocked', reason='guard_failed', error_code=?, blocked_at=?, "
             "claim_token=NULL, claimed_until=NULL, updated_at=? WHERE id=? AND provider=? AND state='running'",

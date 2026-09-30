@@ -104,6 +104,40 @@ def test_auto_swap_runner_queues_an_eligible_subscription_before_claiming(app):
     assert tuple(row) == ("provider_applied", 1)
 
 
+def test_swap_runner_defers_stale_dashboard_job_and_requests_refresh(app):
+    from app.proxiware_swap_service import ProxiwareSwapRunner
+
+    _queue(app)
+    stale_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    with app.app_context():
+        db = get_db()
+        db.execute("UPDATE provider_assignments SET dashboard_observed_at=?", (stale_at,))
+        db.commit()
+
+    calls = []
+
+    class Adapter:
+        def swap(self, _job):
+            calls.append("swap")
+            return {"old_assignment_external_id": "old-worker", "new_assignment_external_id": "new-worker"}
+
+    result = ProxiwareSwapRunner(app=app, adapter_factory=lambda: Adapter()).run_once()
+
+    assert result == {"status": "deferred", "job_id": 1, "error_code": "dashboard_stale"}
+    assert calls == []
+    with app.app_context():
+        db = get_db()
+        job = db.execute("SELECT state,error_code,claim_token,claimed_until FROM swap_jobs WHERE id=1").fetchone()
+        subscription = db.execute(
+            "SELECT dashboard_next_observe_at FROM provider_subscriptions WHERE provider='proxiware'"
+        ).fetchone()
+    assert job["state"] == "pending"
+    assert job["error_code"] == "dashboard_stale"
+    assert job["claim_token"] is None
+    assert datetime.fromisoformat(job["claimed_until"]) > datetime.now(UTC)
+    assert datetime.fromisoformat(subscription["dashboard_next_observe_at"]) <= datetime.now(UTC)
+
+
 def test_swap_runner_passes_scoped_dashboard_identity_to_adapter(app):
     from app.proxiware_swap_service import ProxiwareSwapRunner
 

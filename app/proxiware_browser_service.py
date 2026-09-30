@@ -118,15 +118,16 @@ class ProxiwareBrowserRunner:
                 break
             remaining -= step
 
-    @staticmethod
-    def _handoff_pending(db) -> bool:
+    def _observation_due(self, db) -> bool:
+        current = _utc(self.now()).isoformat()
         return (
             db.execute(
-                "SELECT 1 FROM swap_jobs sj JOIN provider_subscriptions ps "
-                "ON ps.id=sj.subscription_id AND ps.provider='proxiware' "
-                "WHERE sj.provider='proxiware' "
-                "AND sj.state IN ('provider_applied','reconciliation_required') "
-                "AND ps.status IN ('active','ready') AND ps.missing_at IS NULL LIMIT 1"
+                "SELECT 1 FROM provider_subscriptions ps WHERE ps.provider='proxiware' "
+                "AND ps.status IN ('active','ready') AND ps.missing_at IS NULL AND ("
+                "ps.dashboard_next_observe_at IS NULL OR ps.dashboard_next_observe_at<=? OR EXISTS ("
+                "SELECT 1 FROM swap_jobs sj WHERE sj.provider='proxiware' AND sj.subscription_id=ps.id "
+                "AND sj.state IN ('provider_applied','reconciliation_required'))) LIMIT 1",
+                (current,),
             ).fetchone()
             is not None
         )
@@ -157,7 +158,7 @@ class ProxiwareBrowserRunner:
             heartbeat_remaining -= step
             if auto_swap:
                 with self.app.app_context():
-                    if self._handoff_pending(get_db()):
+                    if self._observation_due(get_db()):
                         break
 
     def _active_session(self, db, current: datetime):
@@ -400,13 +401,13 @@ class ProxiwareBrowserRunner:
             with self.app.app_context():
                 db = get_db()
                 auto_swap = get_setting(db, "proxiware_auto_swap", "0") == "1"
-                handoff_pending = self._handoff_pending(db)
+                observation_due = self._observation_due(db)
             # A mutation can be recorded just after this cycle checks the DB.
             # Poll cheaply while auto-swap is enabled; _subscriptions still
             # filters observations by durable due timestamps.
             self._wait_for_handoff(
                 min(self.interval_seconds, AUTO_SWAP_POLL_SECONDS)
-                if auto_swap and handoff_pending
+                if auto_swap and observation_due
                 else self.interval_seconds
             )
         return cycles
