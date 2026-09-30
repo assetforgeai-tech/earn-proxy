@@ -616,6 +616,55 @@ def test_success_persists_mapping_and_enforces_sixty_second_cooldown(app):
     assert assignment["qualification_next_check_at"] == assignment["replacement_ready_at"]
 
 
+def test_success_invalidates_qualification_claim_taken_before_reconciliation(app):
+    from app.services.proxiware_qualification import qualify_proxiware_assignment
+
+    mutation_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    reconciled_at = mutation_at + timedelta(seconds=1)
+    stale_claim = "pre-reconciliation-claim"
+    probe_calls: list[str] = []
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db)
+        job = _advance_to_provider_applied(db, now=mutation_at)
+        _seed_replacement_evidence(db, sub_id, observed_at=reconciled_at)
+        replacement_id = db.execute("SELECT id FROM provider_assignments WHERE external_id='assignment-2'").fetchone()[
+            "id"
+        ]
+        db.execute(
+            "UPDATE provider_assignments SET qualification_claim_token=?, qualification_claimed_until=? WHERE id=?",
+            (stale_claim, (reconciled_at + timedelta(minutes=15)).isoformat(), replacement_id),
+        )
+        db.commit()
+
+        mark_swap_success(
+            db,
+            job["id"],
+            old_assignment_external_id="assignment-1",
+            new_assignment_external_id="assignment-2",
+            success_at=reconciled_at,
+            claim_token=job["claim_token"],
+        )
+
+        with pytest.raises(LookupError):
+            qualify_proxiware_assignment(
+                db,
+                replacement_id,
+                probe=lambda _proxy: probe_calls.append("probe") or {"status": "dead"},
+                eligibility=lambda _proxy: {},
+                now=reconciled_at + timedelta(seconds=2),
+                claim_token=stale_claim,
+            )
+        row = db.execute(
+            "SELECT qualification,live_status,qualification_claim_token,qualification_claimed_until "
+            "FROM provider_assignments WHERE id=?",
+            (replacement_id,),
+        ).fetchone()
+
+    assert probe_calls == []
+    assert tuple(row) == ("pending", "pending", None, None)
+
+
 def test_success_uses_configured_cooldown_but_never_less_than_sixty_seconds(app):
     success_at = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
     reconciled_at = success_at + timedelta(seconds=1)

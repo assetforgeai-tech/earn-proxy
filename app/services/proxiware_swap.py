@@ -1556,7 +1556,8 @@ def mark_swap_success(
         db.execute(
             "UPDATE provider_assignments SET replacement_ready_at=?, status='active', "
             "qualification='pending', live_status='pending', "
-            "qualification_next_check_at=?, distribution_enabled=0, egress_verified_at=NULL, "
+            "qualification_next_check_at=?, qualification_claimed_until=NULL, qualification_claim_token=NULL, "
+            "qualification_attempts=0, distribution_enabled=0, egress_verified_at=NULL, "
             "last_checked_at=NULL, updated_at=? WHERE id=?",
             (ready_at, ready_at, current.isoformat(), int(new["id"])),
         )
