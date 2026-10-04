@@ -316,6 +316,236 @@ def test_cdp_swap_returns_provider_address_evidence_without_inventing_external_i
     assert "assignment_ids" in str(client.calls)
 
 
+def test_cdp_swap_assignments_submits_one_multi_id_request_and_maps_results():
+    class MultiScopedSwapCdp(ScopedSwapCdp):
+        def evaluate(self, expression, arg=None):
+            if arg["path"] == "/api/static/networks/isp/proxies":
+                self.calls.append(("evaluate", expression, arg))
+                return {
+                    "status": 200,
+                    "origin": "https://app.proxiware.com",
+                    "response_origin": "https://app.proxiware.com",
+                    "path": "/static/proxy/isp",
+                    "response_path": "/api/static/networks/isp/proxies",
+                    "payload": {
+                        "proxies": [
+                            {
+                                "assignment_id": 141943,
+                                "subscription_id": 39277,
+                                "addr": "old-1:1337",
+                                "eligible": True,
+                                "connections": 2,
+                            },
+                            {
+                                "assignment_id": 141944,
+                                "subscription_id": 39277,
+                                "addr": "old-2:1337",
+                                "eligible": True,
+                                "connections": 2,
+                            },
+                        ]
+                    },
+                }
+            return super().evaluate(expression, arg)
+
+    client = MultiScopedSwapCdp(
+        {
+            "status": 200,
+            "origin": "https://app.proxiware.com",
+            "response_origin": "https://app.proxiware.com",
+            "path": "/static/proxy/isp",
+            "response_path": "/api/static/networks/isp/proxies/swap",
+            "payload": {
+                "swaps": [
+                    {"assignment_id": 141943, "new_addr": "51.194.85.9"},
+                    {"assignment_id": 141944, "new_addr": "51.194.85.10"},
+                ]
+            },
+        }
+    )
+    adapter = CdpProxiwareBrowser("http://127.0.0.1:9222", client_factory=lambda: client, allow_mutation=True)
+
+    result = adapter.swap_assignments(
+        [
+            {
+                "dashboard_assignment_id": "141943",
+                "old_assignment_external_id": "old-1",
+                "subscription_external_id": "39277",
+            },
+            {
+                "dashboard_assignment_id": "141944",
+                "old_assignment_external_id": "old-2",
+                "subscription_external_id": "39277",
+            },
+        ]
+    )
+
+    requests = [call[2] for call in client.calls if call[2]["path"] == "/api/static/networks/isp/proxies/swap"]
+    assert len(requests) == 1
+    assert requests[0]["body"]["assignment_ids"] == [141943, 141944]
+    assert result == {
+        "confirmed": {
+            "141943": {"old_assignment_external_id": "old-1", "new_assignment_address": "51.194.85.9"},
+            "141944": {"old_assignment_external_id": "old-2", "new_assignment_address": "51.194.85.10"},
+        },
+        "unconfirmed": [],
+    }
+
+
+def test_cdp_swap_assignments_marks_partial_response_items_unconfirmed():
+    class MultiScopedSwapCdp(ScopedSwapCdp):
+        def evaluate(self, expression, arg=None):
+            if arg["path"] == "/api/static/networks/isp/proxies":
+                self.calls.append(("evaluate", expression, arg))
+                return {
+                    "status": 200,
+                    "origin": "https://app.proxiware.com",
+                    "response_origin": "https://app.proxiware.com",
+                    "path": "/static/proxy/isp",
+                    "response_path": "/api/static/networks/isp/proxies",
+                    "payload": {
+                        "proxies": [
+                            {
+                                "assignment_id": 141943,
+                                "subscription_id": 39277,
+                                "addr": "old-1:1337",
+                                "eligible": True,
+                                "connections": 2,
+                            },
+                            {
+                                "assignment_id": 141944,
+                                "subscription_id": 39277,
+                                "addr": "old-2:1337",
+                                "eligible": True,
+                                "connections": 2,
+                            },
+                        ]
+                    },
+                }
+            return super().evaluate(expression, arg)
+
+    client = MultiScopedSwapCdp(
+        {
+            "status": 200,
+            "origin": "https://app.proxiware.com",
+            "response_origin": "https://app.proxiware.com",
+            "path": "/static/proxy/isp",
+            "response_path": "/api/static/networks/isp/proxies/swap",
+            "payload": {"swaps": [{"assignment_id": 141943, "new_addr": "51.194.85.9"}]},
+        }
+    )
+    adapter = CdpProxiwareBrowser("http://127.0.0.1:9222", client_factory=lambda: client, allow_mutation=True)
+
+    result = adapter.swap_assignments(
+        [
+            {
+                "dashboard_assignment_id": "141943",
+                "old_assignment_external_id": "old-1",
+                "subscription_external_id": "39277",
+            },
+            {
+                "dashboard_assignment_id": "141944",
+                "old_assignment_external_id": "old-2",
+                "subscription_external_id": "39277",
+            },
+        ]
+    )
+
+    assert result["confirmed"]["141943"]["new_assignment_address"] == "51.194.85.9"
+    assert result["unconfirmed"] == ["141944"]
+    assert len([call for call in client.calls if call[2]["path"] == "/api/static/networks/isp/proxies/swap"]) == 1
+
+
+def test_cdp_swap_assignments_rejects_mixed_subscription_before_provider_call():
+    client = FakeCdp({})
+    adapter = CdpProxiwareBrowser("http://127.0.0.1:9222", client_factory=lambda: client, allow_mutation=True)
+
+    with pytest.raises(BrowserAdapterUnavailable, match="subscription_scope_mismatch"):
+        adapter.swap_assignments(
+            [
+                {
+                    "dashboard_assignment_id": "141943",
+                    "old_assignment_external_id": "old-1",
+                    "subscription_external_id": "39277",
+                },
+                {
+                    "dashboard_assignment_id": "141944",
+                    "old_assignment_external_id": "old-2",
+                    "subscription_external_id": "39278",
+                },
+            ]
+        )
+    assert client.calls == []
+
+
+def test_cdp_swap_assignments_marks_duplicate_and_malformed_results_unconfirmed():
+    class MultiScopedSwapCdp(ScopedSwapCdp):
+        def evaluate(self, expression, arg=None):
+            if arg["path"] == "/api/static/networks/isp/proxies":
+                self.calls.append(("evaluate", expression, arg))
+                return {
+                    "status": 200,
+                    "origin": "https://app.proxiware.com",
+                    "response_origin": "https://app.proxiware.com",
+                    "path": "/static/proxy/isp",
+                    "response_path": "/api/static/networks/isp/proxies",
+                    "payload": {
+                        "proxies": [
+                            {
+                                "assignment_id": 141943,
+                                "subscription_id": 39277,
+                                "addr": "old-1:1337",
+                                "eligible": True,
+                                "connections": 2,
+                            },
+                            {
+                                "assignment_id": 141944,
+                                "subscription_id": 39277,
+                                "addr": "old-2:1337",
+                                "eligible": True,
+                                "connections": 2,
+                            },
+                        ]
+                    },
+                }
+            return super().evaluate(expression, arg)
+
+    client = MultiScopedSwapCdp(
+        {
+            "status": 200,
+            "origin": "https://app.proxiware.com",
+            "response_origin": "https://app.proxiware.com",
+            "path": "/static/proxy/isp",
+            "response_path": "/api/static/networks/isp/proxies/swap",
+            "payload": {
+                "swaps": [
+                    {"assignment_id": 141943, "new_addr": "51.194.85.9"},
+                    {"assignment_id": 141943, "new_addr": "51.194.85.11"},
+                    {"assignment_id": 141944, "new_addr": "not a host"},
+                ]
+            },
+        }
+    )
+    adapter = CdpProxiwareBrowser("http://127.0.0.1:9222", client_factory=lambda: client, allow_mutation=True)
+
+    result = adapter.swap_assignments(
+        [
+            {
+                "dashboard_assignment_id": "141943",
+                "old_assignment_external_id": "old-1",
+                "subscription_external_id": "39277",
+            },
+            {
+                "dashboard_assignment_id": "141944",
+                "old_assignment_external_id": "old-2",
+                "subscription_external_id": "39277",
+            },
+        ]
+    )
+
+    assert result == {"confirmed": {}, "unconfirmed": ["141943", "141944"]}
+
+
 def test_cdp_swap_request_uses_provider_xhr_header():
     client = ScopedSwapCdp(
         {

@@ -24,6 +24,7 @@ DEFAULT_ELIGIBLE_THRESHOLD = 1000
 DEFAULT_COOLDOWN_SECONDS = 60
 DEFAULT_DASHBOARD_MAX_AGE_SECONDS = 900
 DEFAULT_CLAIM_SECONDS = 300
+MUTATION_RECOVERY_GRACE_SECONDS = 30
 DEFAULT_RETRY_LIMIT = 3
 PRE_MUTATION_SWAP_STATES = frozenset({"pending", "running"})
 MUTATION_SWAP_STATES = frozenset({"mutating", "provider_applied", "reconciliation_required"})
@@ -47,6 +48,7 @@ SAFE_ERROR_CODES = frozenset(
         "provider_response_unconfirmed",
         "provider_timeout",
         "provider_error",
+        "worker_restart_during_mutation",
         "dashboard_stale",
         "reconciliation_required",
         "reconciled_no_provider_change",
@@ -174,16 +176,31 @@ def _active_swap_index_is_current(db) -> bool:
     ]
     if columns != ["provider", "old_assignment_id"]:
         return False
-    mutation_index = db.execute(
-        "SELECT sql FROM sqlite_master WHERE type='index' AND name='swap_jobs_one_mutation_subscription_idx'"
-    ).fetchone()
-    if mutation_index is None or not str(mutation_index["sql"] or "").strip():
+    if "batch_id" not in _column_names(db, "swap_jobs") or not _table_exists(db, "swap_batches"):
         return False
+    mutation_index = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='swap_jobs_one_mutation_subscription_idx'"
+    ).fetchone()
     mutation_columns = [
         str(row["name"])
         for row in db.execute('PRAGMA index_info("swap_jobs_one_mutation_subscription_idx")').fetchall()
     ]
-    if mutation_columns != ["provider", "subscription_id"]:
+    mutation_meta = next(
+        (
+            row
+            for row in db.execute('PRAGMA index_list("swap_jobs")').fetchall()
+            if row["name"] == "swap_jobs_one_mutation_subscription_idx"
+        ),
+        None,
+    )
+    if mutation_index is None or mutation_columns != ["provider", "subscription_id"]:
+        return False
+    if mutation_meta is None or int(mutation_meta["unique"]):
+        return False
+    batch_fence = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='swap_batches_one_active_subscription_idx'"
+    ).fetchone()
+    if batch_fence is None:
         return False
     legacy = db.execute(
         "SELECT 1 FROM sqlite_master WHERE type='index' "
@@ -213,7 +230,7 @@ def _execute_sql_script(db, script: str) -> None:
         db.execute(pending)
 
 
-PROXIWARE_SCHEMA_VERSION = "2026-10-04-1"
+PROXIWARE_SCHEMA_VERSION = "2026-10-04-2"
 
 
 def _proxiware_swap_schema_is_current(db) -> bool:
@@ -249,6 +266,7 @@ def _proxiware_swap_schema_is_current(db) -> bool:
             "worker_password_encrypted",
         },
         "swap_jobs": {
+            "batch_id",
             "mutation_started_at",
             "provider_applied_at",
             "reconciliation_required_at",
@@ -268,6 +286,7 @@ def _proxiware_swap_schema_is_current(db) -> bool:
         "provider_credentials": {"provider", "worker_secret_encrypted"},
         "provider_action_attempts": {"provider"},
         "swap_mappings": set(),
+        "swap_batches": {"provider", "subscription_id", "state", "claim_token", "claimed_until"},
         "provider_audit_events": set(),
     }
     if not all(
@@ -375,6 +394,16 @@ def _ensure_proxiware_swap_schema(db) -> None:
             updated_at TEXT NOT NULL,
             UNIQUE(provider, external_id)
         );
+        CREATE TABLE IF NOT EXISTS swap_batches (
+            id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL DEFAULT 'proxiware',
+            subscription_id INTEGER NOT NULL REFERENCES provider_subscriptions(id) ON DELETE CASCADE,
+            state TEXT NOT NULL DEFAULT 'active',
+            claim_token TEXT NOT NULL,
+            claimed_until TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS swap_jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             provider TEXT NOT NULL DEFAULT 'proxiware',
@@ -385,6 +414,7 @@ def _ensure_proxiware_swap_schema(db) -> None:
             reason TEXT NOT NULL DEFAULT 'queued',
             error_code TEXT NOT NULL DEFAULT '',
             attempts INTEGER NOT NULL DEFAULT 0,
+            batch_id TEXT REFERENCES swap_batches(id),
             claim_token TEXT,
             claimed_until TEXT,
             blocked_at TEXT,
@@ -522,6 +552,7 @@ def _ensure_proxiware_swap_schema(db) -> None:
                 "mutation_subscription_external_id": "TEXT",
                 "mutation_new_assignment_external_id": "TEXT",
                 "mutation_new_assignment_address": "TEXT",
+                "batch_id": "TEXT",
             },
         )
         # Older releases fenced by subscription. Preserve only duplicate jobs
@@ -567,8 +598,8 @@ def _ensure_proxiware_swap_schema(db) -> None:
         # one provider mutation starts. Quarantine legacy duplicates before
         # creating that second safety index.
         mutation_rows = db.execute(
-            "SELECT id,subscription_id,state FROM swap_jobs "
-            "WHERE state IN ('mutating','provider_applied','reconciliation_required') "
+            "SELECT id,provider,subscription_id,state,claim_token FROM swap_jobs "
+            "WHERE state IN ('running','mutating','provider_applied','reconciliation_required') "
             "ORDER BY subscription_id,id"
         ).fetchall()
         keep_mutation_by_subscription: dict[int, int] = {}
@@ -578,7 +609,13 @@ def _ensure_proxiware_swap_schema(db) -> None:
             if current_id is None:
                 keep_mutation_by_subscription[subscription_id] = int(row["id"])
                 continue
-            current = db.execute("SELECT state FROM swap_jobs WHERE id=?", (current_id,)).fetchone()
+            current = db.execute("SELECT state,claim_token FROM swap_jobs WHERE id=?", (current_id,)).fetchone()
+            if (
+                current is not None
+                and str(row["claim_token"] or "").strip()
+                and str(row["claim_token"] or "") == str(current["claim_token"] or "")
+            ):
+                continue
             if current is not None and priority.get(str(row["state"]), 0) > priority.get(str(current["state"]), 0):
                 db.execute(
                     "UPDATE swap_jobs SET state='blocked',reason='migration_conflict',"
@@ -605,9 +642,43 @@ def _ensure_proxiware_swap_schema(db) -> None:
             "AND state IN ('pending','running','mutating','provider_applied','reconciliation_required')"
         )
         db.execute(
-            "CREATE UNIQUE INDEX swap_jobs_one_mutation_subscription_idx "
+            "CREATE INDEX swap_jobs_one_mutation_subscription_idx "
             "ON swap_jobs(provider, subscription_id) "
             "WHERE state IN ('mutating','provider_applied','reconciliation_required')"
+        )
+        batch_ids: dict[tuple[int, str], str] = {}
+        for row in db.execute(
+            "SELECT id,provider,subscription_id,claim_token,claimed_until,state,created_at,updated_at "
+            "FROM swap_jobs WHERE state IN ('running','mutating','provider_applied','reconciliation_required') "
+            "AND batch_id IS NULL ORDER BY subscription_id,id"
+        ).fetchall():
+            subscription_id = int(row["subscription_id"])
+            claim_token = str(row["claim_token"] or "").strip()
+            batch_key = (subscription_id, claim_token or f"job-{int(row['id'])}")
+            batch_id = batch_ids.get(batch_key)
+            if batch_id is None:
+                batch_id = f"legacy-{int(row['id'])}"
+                batch_ids[batch_key] = batch_id
+                db.execute(
+                    "INSERT OR IGNORE INTO swap_batches(id,provider,subscription_id,state,claim_token,claimed_until,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        batch_id,
+                        str(row["provider"]),
+                        subscription_id,
+                        "claimed" if str(row["state"]) == "running" else "mutating",
+                        claim_token or batch_id,
+                        row["claimed_until"],
+                        str(row["created_at"]),
+                        str(row["updated_at"]),
+                    ),
+                )
+            db.execute("UPDATE swap_jobs SET batch_id=? WHERE id=?", (batch_id, int(row["id"])))
+        for batch_id in set(batch_ids.values()):
+            _refresh_swap_batch(db, batch_id, now=_now())
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS swap_batches_one_active_subscription_idx "
+            "ON swap_batches(provider,subscription_id) WHERE state IN ('claimed','mutating','reconciling')"
         )
         # Older releases marked a reconciled replacement as ``pending``. That
         # state is not claimable by the qualification batch, so repair only
@@ -798,6 +869,7 @@ class SwapDecision:
         cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS,
         assignment_id: int | None = None,
         exclude_job_id: int | None = None,
+        batch_id: str | None = None,
     ) -> "SwapDecision":
         current = _now(now)
         subscription = db.execute(
@@ -909,6 +981,9 @@ class SwapDecision:
             "AND state IN ('pending','running','mutating','provider_applied','reconciliation_required')"
         )
         reserved_params: list[object] = [PROVIDER, int(subscription_id)]
+        if batch_id:
+            reserved_query += " AND (batch_id IS NULL OR batch_id<>?)"
+            reserved_params.append(str(batch_id))
         if exclude_job_id is not None:
             reserved_query += " AND id<>?"
             reserved_params.append(int(exclude_job_id))
@@ -948,7 +1023,7 @@ def queue_eligible_swaps(
     db,
     *,
     now: datetime | None = None,
-    limit: int = 20,
+    limit: int | None = None,
     threshold: int | None = None,
 ) -> int:
     """Queue only guarded replacements; never performs a provider mutation."""
@@ -976,7 +1051,7 @@ def queue_eligible_swaps(
         dashboard_max_age = DEFAULT_DASHBOARD_MAX_AGE_SECONDS
     dashboard_cutoff = (current - timedelta(seconds=dashboard_max_age)).isoformat()
     dashboard_future = (current + timedelta(seconds=60)).isoformat()
-    rows = db.execute(
+    queue_sql = (
         "SELECT pa.id AS assignment_id, pa.subscription_id "
         "FROM provider_assignments pa "
         "JOIN provider_subscriptions ps ON ps.id=pa.subscription_id "
@@ -994,17 +1069,20 @@ def queue_eligible_swaps(
         "AND NOT EXISTS (SELECT 1 FROM swap_jobs sj WHERE sj.provider=pa.provider "
         "AND sj.old_assignment_id=pa.id "
         "AND sj.state IN ('pending','running','mutating','provider_applied','reconciliation_required')) "
-        "ORDER BY ps.updated_at, pa.updated_at, pa.id LIMIT ?",
-        (
-            PROVIDER,
-            PROVIDER,
-            dashboard_cutoff,
-            dashboard_future,
-            current.isoformat(),
-            effective_threshold,
-            max(0, int(limit)),
-        ),
-    ).fetchall()
+        "ORDER BY ps.updated_at, pa.updated_at, pa.id"
+    )
+    queue_params: list[object] = [
+        PROVIDER,
+        PROVIDER,
+        dashboard_cutoff,
+        dashboard_future,
+        current.isoformat(),
+        effective_threshold,
+    ]
+    if limit is not None:
+        queue_sql += " LIMIT ?"
+        queue_params.append(max(0, int(limit)))
+    rows = db.execute(queue_sql, tuple(queue_params)).fetchall()
     queued = 0
     with _write_transaction(db):
         for row in rows:
@@ -1060,9 +1138,23 @@ def claim_next_swap(
     with _write_transaction(db):
         # Recover a lease abandoned by a crashed worker before claiming the
         # next job. This makes restart behavior durable without a cleanup loop.
+        expired = db.execute(
+            "SELECT id FROM swap_batches WHERE state='claimed' AND claimed_until<=?",
+            (current.isoformat(),),
+        ).fetchall()
+        for batch in expired:
+            db.execute(
+                "UPDATE swap_jobs SET state='pending',batch_id=NULL,claim_token=NULL,claimed_until=NULL,updated_at=? "
+                "WHERE batch_id=? AND state='running'",
+                (current.isoformat(), str(batch["id"])),
+            )
+            db.execute(
+                "UPDATE swap_batches SET state='complete',updated_at=? WHERE id=?",
+                (current.isoformat(), str(batch["id"])),
+            )
         db.execute(
-            "UPDATE swap_jobs SET state='pending', claim_token=NULL, claimed_until=NULL, updated_at=? "
-            "WHERE provider=? AND state='running' AND claimed_until IS NOT NULL AND claimed_until<=?",
+            "UPDATE swap_jobs SET state='pending',batch_id=NULL,claim_token=NULL,claimed_until=NULL,updated_at=? "
+            "WHERE provider=? AND batch_id IS NULL AND state='running' AND claimed_until IS NOT NULL AND claimed_until<=?",
             (current.isoformat(), PROVIDER, current.isoformat()),
         )
         if job_id is None:
@@ -1073,6 +1165,8 @@ def claim_next_swap(
                 "SELECT 1 FROM swap_jobs active WHERE active.provider=swap_jobs.provider "
                 "AND active.subscription_id=swap_jobs.subscription_id AND active.id<>swap_jobs.id "
                 "AND active.state IN ('running','mutating','provider_applied','reconciliation_required')"
+                ") AND NOT EXISTS (SELECT 1 FROM swap_batches sb WHERE sb.provider=swap_jobs.provider "
+                "AND sb.subscription_id=swap_jobs.subscription_id AND sb.state IN ('claimed','mutating','reconciling')"
                 ") ORDER BY created_at,id LIMIT 1",
                 (PROVIDER, current.isoformat()),
             ).fetchone()
@@ -1084,6 +1178,8 @@ def claim_next_swap(
                 "SELECT 1 FROM swap_jobs active WHERE active.provider=swap_jobs.provider "
                 "AND active.subscription_id=swap_jobs.subscription_id AND active.id<>swap_jobs.id "
                 "AND active.state IN ('running','mutating','provider_applied','reconciliation_required')"
+                ") AND NOT EXISTS (SELECT 1 FROM swap_batches sb WHERE sb.provider=swap_jobs.provider "
+                "AND sb.subscription_id=swap_jobs.subscription_id AND sb.state IN ('claimed','mutating','reconciling')"
                 ") LIMIT 1",
                 (int(job_id), PROVIDER, current.isoformat()),
             ).fetchone()
@@ -1096,10 +1192,271 @@ def claim_next_swap(
         )
         if cursor.rowcount != 1:
             return None
+        batch_id = secrets.token_urlsafe(18)
+        db.execute(
+            "INSERT INTO swap_batches(id,provider,subscription_id,state,claim_token,claimed_until,created_at,updated_at) "
+            "SELECT ?,provider,subscription_id,'claimed',?,?,?,? FROM swap_jobs WHERE id=?",
+            (batch_id, token, claimed_until.isoformat(), current.isoformat(), current.isoformat(), int(row["id"])),
+        )
+        db.execute("UPDATE swap_jobs SET batch_id=? WHERE id=?", (batch_id, int(row["id"])))
         return db.execute(
             "SELECT * FROM swap_jobs WHERE id=? AND provider=?",
             (int(row["id"]), PROVIDER),
         ).fetchone()
+
+
+def claim_next_swap_batch(
+    db, *, now: datetime | None = None, claim_seconds: int = DEFAULT_CLAIM_SECONDS
+) -> list[sqlite3.Row]:
+    """Claim all pending sibling jobs under one subscription-scoped lease."""
+
+    ensure_proxiware_swap_schema(db)
+    current = _now(now)
+    timestamp = current.isoformat()
+    claimed_until = (current + timedelta(seconds=max(30, int(claim_seconds)))).isoformat()
+    with _write_transaction(db):
+        expired = db.execute(
+            "SELECT id FROM swap_batches WHERE state='claimed' AND claimed_until<=?", (timestamp,)
+        ).fetchall()
+        for row in expired:
+            batch_id = str(row["id"])
+            db.execute(
+                "UPDATE swap_jobs SET state='pending',batch_id=NULL,claim_token=NULL,claimed_until=NULL,updated_at=? "
+                "WHERE batch_id=? AND state='running'",
+                (timestamp, batch_id),
+            )
+            db.execute("UPDATE swap_batches SET state='complete',updated_at=? WHERE id=?", (timestamp, batch_id))
+        candidate = db.execute(
+            "SELECT sj.subscription_id FROM swap_jobs sj WHERE sj.provider=? AND sj.state='pending' "
+            "AND sj.batch_id IS NULL AND (sj.claimed_until IS NULL OR sj.claimed_until<=?) "
+            "AND NOT EXISTS (SELECT 1 FROM swap_batches sb WHERE sb.provider=sj.provider "
+            "AND sb.subscription_id=sj.subscription_id AND sb.state IN ('claimed','mutating','reconciling')) "
+            "AND NOT EXISTS (SELECT 1 FROM swap_jobs active WHERE active.provider=sj.provider "
+            "AND active.subscription_id=sj.subscription_id AND active.batch_id IS NULL "
+            "AND active.state IN ('running','mutating','provider_applied','reconciliation_required')) "
+            "ORDER BY sj.created_at,sj.id LIMIT 1",
+            (PROVIDER, timestamp),
+        ).fetchone()
+        if candidate is None:
+            return []
+        subscription_id = int(candidate["subscription_id"])
+        batch_id = secrets.token_urlsafe(18)
+        token = secrets.token_urlsafe(18)
+        db.execute(
+            "INSERT INTO swap_batches(id,provider,subscription_id,state,claim_token,claimed_until,created_at,updated_at) "
+            "VALUES(?,?,?,'claimed',?,?,?,?)",
+            (batch_id, PROVIDER, subscription_id, token, claimed_until, timestamp, timestamp),
+        )
+        db.execute(
+            "UPDATE swap_jobs SET state='running',batch_id=?,claim_token=?,claimed_until=?,attempts=attempts+1,updated_at=? "
+            "WHERE provider=? AND subscription_id=? AND state='pending' AND batch_id IS NULL "
+            "AND (claimed_until IS NULL OR claimed_until<=?)",
+            (batch_id, token, claimed_until, timestamp, PROVIDER, subscription_id, timestamp),
+        )
+        return db.execute(
+            "SELECT * FROM swap_jobs WHERE provider=? AND batch_id=? AND state='running' ORDER BY id",
+            (PROVIDER, batch_id),
+        ).fetchall()
+
+
+def begin_swap_batch_mutation(
+    db,
+    *,
+    batch_id: str,
+    claim_token: str,
+    now: datetime | None = None,
+    lease_seconds: int = DEFAULT_CLAIM_SECONDS,
+) -> list[dict[str, object]]:
+    """Revalidate all child jobs and freeze their identities in one transaction."""
+
+    ensure_proxiware_swap_schema(db)
+    current = _now(now)
+    timestamp = current.isoformat()
+    mutation_lease_until = (current + timedelta(seconds=max(30, int(lease_seconds)))).isoformat()
+    with _write_transaction(db):
+        batch = db.execute(
+            "SELECT * FROM swap_batches WHERE id=? AND provider=? AND state='claimed' AND claim_token=?",
+            (str(batch_id), PROVIDER, str(claim_token)),
+        ).fetchone()
+        if batch is None or (_parse_timestamp(batch["claimed_until"]) or datetime.min.replace(tzinfo=UTC)) <= current:
+            raise ValueError("Swap batch claim is stale")
+        if (
+            is_proxiware_automation_paused(db)
+            or get_setting(db, "proxiware_swap_worker_paused", "0") == "1"
+            or get_setting(db, "proxiware_auto_swap", "0") != "1"
+            or get_setting(db, "proxiware_allow_mutation", "0") != "1"
+        ):
+            raise ValueError("mutation_disabled")
+        rows = db.execute(
+            "SELECT sj.*,pa.external_id AS old_assignment_external_id,pa.host,pa.port,"
+            "pa.dashboard_assignment_id,ps.external_id AS subscription_external_id "
+            "FROM swap_jobs sj JOIN provider_assignments pa ON pa.id=sj.old_assignment_id "
+            "JOIN provider_subscriptions ps ON ps.id=sj.subscription_id "
+            "WHERE sj.provider=? AND sj.batch_id=? AND sj.state='running' AND sj.claim_token=? ORDER BY sj.id",
+            (PROVIDER, str(batch_id), str(claim_token)),
+        ).fetchall()
+        if not rows:
+            db.execute("UPDATE swap_batches SET state='complete',updated_at=? WHERE id=?", (timestamp, str(batch_id)))
+            return []
+        allowed = []
+        for row in rows:
+            decision = SwapDecision.for_subscription(
+                db,
+                int(row["subscription_id"]),
+                now=current,
+                threshold=max(1, int(get_setting(db, "proxiware_eligible_threshold", str(DEFAULT_ELIGIBLE_THRESHOLD)))),
+                assignment_id=int(row["old_assignment_id"]),
+                batch_id=str(batch_id),
+            )
+            if not decision.allowed or decision.assignment_id != int(row["old_assignment_id"]):
+                code = _safe_guard_code(decision.reason)
+                if decision.reason == "dashboard_stale":
+                    db.execute(
+                        "UPDATE swap_jobs SET state='pending',reason='awaiting_dashboard',error_code=?,batch_id=NULL,"
+                        "claim_token=NULL,claimed_until=?,updated_at=? WHERE id=? AND claim_token=?",
+                        (
+                            decision.reason,
+                            (current + timedelta(seconds=30)).isoformat(),
+                            timestamp,
+                            int(row["id"]),
+                            str(claim_token),
+                        ),
+                    )
+                    db.execute(
+                        "UPDATE provider_subscriptions SET dashboard_next_observe_at=?,updated_at=? WHERE id=? AND provider=?",
+                        (timestamp, timestamp, int(row["subscription_id"]), PROVIDER),
+                    )
+                else:
+                    db.execute(
+                        "UPDATE swap_jobs SET state='blocked',reason='guard_failed',error_code=?,blocked_at=?,"
+                        "batch_id=NULL,claim_token=NULL,claimed_until=NULL,updated_at=? WHERE id=? AND claim_token=?",
+                        (code, timestamp, timestamp, int(row["id"]), str(claim_token)),
+                    )
+                continue
+            if (
+                not row["old_assignment_external_id"]
+                or not row["dashboard_assignment_id"]
+                or not row["subscription_external_id"]
+            ):
+                db.execute(
+                    "UPDATE swap_jobs SET state='blocked',reason='guard_failed',error_code='manual_action_required',"
+                    "blocked_at=?,batch_id=NULL,claim_token=NULL,claimed_until=NULL,updated_at=? WHERE id=?",
+                    (timestamp, timestamp, int(row["id"])),
+                )
+                continue
+            allowed.append(row)
+        if allowed:
+            sub = db.execute(
+                "SELECT swap_quota,swap_used FROM provider_subscriptions WHERE id=? AND provider=?",
+                (int(batch["subscription_id"]), PROVIDER),
+            ).fetchone()
+            quota, used = int(sub["swap_quota"] or 0), int(sub["swap_used"] or 0)
+            if quota >= 0:
+                reserved = int(
+                    db.execute(
+                        "SELECT COUNT(*) FROM swap_jobs WHERE provider=? AND subscription_id=? AND batch_id<>? "
+                        "AND state IN ('pending','running','mutating','provider_applied','reconciliation_required')",
+                        (PROVIDER, int(batch["subscription_id"]), str(batch_id)),
+                    ).fetchone()[0]
+                )
+                if used + reserved + len(allowed) > quota:
+                    for row in allowed:
+                        db.execute(
+                            "UPDATE swap_jobs SET state='blocked',reason='guard_failed',error_code='quota_exhausted',"
+                            "blocked_at=?,batch_id=NULL,claim_token=NULL,claimed_until=NULL,updated_at=? WHERE id=?",
+                            (timestamp, timestamp, int(row["id"])),
+                        )
+                    allowed = []
+        result = []
+        for row in allowed:
+            frozen_address = f"{str(row['host'] or '').strip()}:{int(row['port'] or 0)}"
+            db.execute(
+                "UPDATE swap_jobs SET state='mutating',mutation_started_at=?,claimed_until=NULL,reason='provider_mutation',"
+                "mutation_old_assignment_external_id=?,mutation_old_assignment_address=?,mutation_dashboard_assignment_id=?,"
+                "mutation_subscription_external_id=?,updated_at=? WHERE id=? AND provider=? AND batch_id=? "
+                "AND state='running' AND claim_token=?",
+                (
+                    timestamp,
+                    str(row["old_assignment_external_id"]),
+                    frozen_address,
+                    str(row["dashboard_assignment_id"]),
+                    str(row["subscription_external_id"]),
+                    timestamp,
+                    int(row["id"]),
+                    PROVIDER,
+                    str(batch_id),
+                    str(claim_token),
+                ),
+            )
+            db.execute(
+                "UPDATE provider_assignments SET dashboard_assignment_id=NULL,dashboard_eligible=NULL,"
+                "dashboard_connections=NULL,dashboard_observed_at=NULL,dashboard_source='',"
+                "dashboard_error_code='reconciliation_required',distribution_enabled=0,updated_at=? "
+                "WHERE id=? AND provider=? AND subscription_id=?",
+                (timestamp, int(row["old_assignment_id"]), PROVIDER, int(row["subscription_id"])),
+            )
+            result.append(
+                dict(row)
+                | {
+                    "state": "mutating",
+                    "mutation_started_at": timestamp,
+                    "mutation_old_assignment_external_id": str(row["old_assignment_external_id"]),
+                    "mutation_old_assignment_address": frozen_address,
+                    "mutation_dashboard_assignment_id": str(row["dashboard_assignment_id"]),
+                    "mutation_subscription_external_id": str(row["subscription_external_id"]),
+                }
+            )
+        db.execute(
+            "UPDATE swap_batches SET state=?,claimed_until=?,updated_at=? WHERE id=? AND claim_token=?",
+            (
+                "mutating" if result else "complete",
+                mutation_lease_until if result else None,
+                timestamp,
+                str(batch_id),
+                str(claim_token),
+            ),
+        )
+        return result
+
+
+def release_swap_batch(
+    db,
+    *,
+    batch_id: str,
+    claim_token: str,
+    error_code: str = "manual_action_required",
+    now: datetime | None = None,
+) -> None:
+    """Release an unmutated batch; uncertain provider work is never released here."""
+
+    ensure_proxiware_swap_schema(db)
+    current = _now(now)
+    code = _safe_code(error_code, default="manual_action_required")
+    blocked = code in MANUAL_ACTION_CODES
+    with _write_transaction(db):
+        batch = db.execute(
+            "SELECT state FROM swap_batches WHERE id=? AND provider=? AND claim_token=?",
+            (str(batch_id), PROVIDER, str(claim_token)),
+        ).fetchone()
+        if batch is None or str(batch["state"] or "") != "claimed":
+            return
+        if blocked:
+            db.execute(
+                "UPDATE swap_jobs SET state='blocked',reason='manual_action_required',error_code=?,blocked_at=?,"
+                "batch_id=NULL,claim_token=NULL,claimed_until=NULL,updated_at=? WHERE batch_id=? AND state='running'",
+                (code, current.isoformat(), current.isoformat(), str(batch_id)),
+            )
+            _pause_auto_swap_no_commit(db, now=current)
+        else:
+            db.execute(
+                "UPDATE swap_jobs SET state='pending',reason='batch_retry',error_code=?,batch_id=NULL,"
+                "claim_token=NULL,claimed_until=?,updated_at=? WHERE batch_id=? AND state='running'",
+                (code, (current + timedelta(seconds=30)).isoformat(), current.isoformat(), str(batch_id)),
+            )
+        db.execute(
+            "UPDATE swap_batches SET state='complete',claimed_until=NULL,updated_at=? WHERE id=?",
+            (current.isoformat(), str(batch_id)),
+        )
 
 
 def revalidate_swap_job(
@@ -1111,6 +1468,7 @@ def revalidate_swap_job(
     require_mutation: bool = False,
     claim_token: str | None = None,
     enter_mutation: bool = False,
+    mutation_lease_seconds: int = DEFAULT_CLAIM_SECONDS,
 ) -> SwapDecision:
     """Recheck guards and optionally acquire the non-reclaimable mutation fence."""
 
@@ -1118,7 +1476,7 @@ def revalidate_swap_job(
     current = _now(now)
     with _write_transaction(db):
         job = db.execute(
-            "SELECT state,subscription_id,old_assignment_id,claim_token,claimed_until FROM swap_jobs WHERE id=? AND provider=?",
+            "SELECT state,subscription_id,old_assignment_id,batch_id,claim_token,claimed_until FROM swap_jobs WHERE id=? AND provider=?",
             (int(job_id), PROVIDER),
         ).fetchone()
         if job is None:
@@ -1157,8 +1515,9 @@ def revalidate_swap_job(
         if decision is None:
             mutation_in_progress = db.execute(
                 "SELECT 1 FROM swap_jobs WHERE provider=? AND subscription_id=? "
-                "AND id<>? AND state IN ('running','mutating','provider_applied','reconciliation_required') LIMIT 1",
-                (PROVIDER, int(job["subscription_id"]), int(job_id)),
+                "AND id<>? AND state IN ('running','mutating','provider_applied','reconciliation_required') "
+                "AND (? IS NULL OR batch_id IS NULL OR batch_id<>?) LIMIT 1",
+                (PROVIDER, int(job["subscription_id"]), int(job_id), job["batch_id"], job["batch_id"]),
             ).fetchone()
             if mutation_in_progress is not None:
                 decision = SwapDecision(
@@ -1181,6 +1540,7 @@ def revalidate_swap_job(
                 token = str(job["claim_token"] or claim_token or "").strip()
                 if not token:
                     raise ValueError("Swap mutation requires a claim token")
+                mutation_lease_until = (current + timedelta(seconds=max(30, int(mutation_lease_seconds)))).isoformat()
                 identity = db.execute(
                     "SELECT pa.external_id AS old_external_id,pa.dashboard_assignment_id,"
                     "pa.host,pa.port,"
@@ -1217,6 +1577,11 @@ def revalidate_swap_job(
                 if cursor.rowcount != 1:
                     raise ValueError("Swap job claim is stale")
                 db.execute(
+                    "UPDATE swap_batches SET state='mutating',claimed_until=?,updated_at=? "
+                    "WHERE id=? AND claim_token=? AND state='claimed'",
+                    (mutation_lease_until, current.isoformat(), str(job["batch_id"] or ""), token),
+                )
+                db.execute(
                     "UPDATE provider_assignments SET dashboard_assignment_id=NULL, dashboard_eligible=NULL, "
                     "dashboard_connections=NULL, dashboard_observed_at=NULL, dashboard_source='', "
                     "dashboard_error_code='reconciliation_required', distribution_enabled=0, updated_at=? "
@@ -1228,7 +1593,7 @@ def revalidate_swap_job(
         if reason == "dashboard_stale" and not allow_manual:
             retry_at = current + timedelta(seconds=30)
             db.execute(
-                "UPDATE swap_jobs SET state='pending', reason='awaiting_dashboard', error_code=?, blocked_at=NULL, "
+                "UPDATE swap_jobs SET state='pending', reason='awaiting_dashboard', error_code=?, batch_id=NULL,blocked_at=NULL, "
                 "claim_token=NULL, claimed_until=?, updated_at=? WHERE id=? AND provider=? AND state='running'",
                 (
                     reason,
@@ -1242,9 +1607,10 @@ def revalidate_swap_job(
                 "UPDATE provider_subscriptions SET dashboard_next_observe_at=?, updated_at=? WHERE id=? AND provider=?",
                 (current.isoformat(), current.isoformat(), int(job["subscription_id"]), PROVIDER),
             )
+            _refresh_swap_batch(db, job["batch_id"], now=current)
             return SwapDecision(False, reason, int(job["subscription_id"]), decision.assignment_id)
         db.execute(
-            "UPDATE swap_jobs SET state='blocked', reason='guard_failed', error_code=?, blocked_at=?, "
+            "UPDATE swap_jobs SET state='blocked', reason='guard_failed', error_code=?, blocked_at=?, batch_id=NULL, "
             "claim_token=NULL, claimed_until=NULL, updated_at=? WHERE id=? AND provider=? AND state='running'",
             (
                 _safe_guard_code(reason),
@@ -1254,6 +1620,7 @@ def revalidate_swap_job(
                 PROVIDER,
             ),
         )
+        _refresh_swap_batch(db, job["batch_id"], now=current)
         return SwapDecision(False, reason, int(job["subscription_id"]), decision.assignment_id)
 
 
@@ -1319,6 +1686,72 @@ def _resolve_replacement_by_address(
     return fresh[0]
 
 
+def _refresh_swap_batch(db, batch_id: object, *, now: datetime) -> None:
+    key = str(batch_id or "").strip()
+    if not key:
+        return
+    states = {
+        str(row["state"] or "") for row in db.execute("SELECT state FROM swap_jobs WHERE batch_id=?", (key,)).fetchall()
+    }
+    active = states & ACTIVE_SWAP_STATES
+    if not active:
+        state = "complete"
+    elif "mutating" in active:
+        state = "mutating"
+    elif active & {"provider_applied", "reconciliation_required"}:
+        state = "reconciling"
+    else:
+        state = "claimed"
+    db.execute(
+        "UPDATE swap_batches SET state=?,claimed_until=CASE WHEN ? IN ('claimed','mutating') "
+        "THEN claimed_until ELSE NULL END,updated_at=? "
+        "WHERE id=?",
+        (state, state, _iso(now), key),
+    )
+
+
+def recover_interrupted_swap_batches(db, *, now: datetime | None = None) -> dict[str, int]:
+    """Freeze provider mutations abandoned beyond the worker's maximum I/O timeout."""
+
+    ensure_proxiware_swap_schema(db)
+    current = _now(now)
+    recovery_before = (current - timedelta(seconds=MUTATION_RECOVERY_GRACE_SECONDS)).isoformat()
+    legacy_recovery_before = (
+        current - timedelta(seconds=DEFAULT_CLAIM_SECONDS + MUTATION_RECOVERY_GRACE_SECONDS)
+    ).isoformat()
+    recovered_batches = 0
+    recovered_jobs = 0
+    with _write_transaction(db):
+        batches = db.execute(
+            "SELECT id FROM swap_batches WHERE provider=? AND state='mutating' "
+            "AND ((claimed_until IS NOT NULL AND claimed_until<=?) OR "
+            "(claimed_until IS NULL AND updated_at<=?)) "
+            "AND EXISTS (SELECT 1 FROM swap_jobs sj WHERE sj.batch_id=swap_batches.id AND sj.state='mutating') "
+            "ORDER BY updated_at,id",
+            (PROVIDER, recovery_before, legacy_recovery_before),
+        ).fetchall()
+        for batch in batches:
+            batch_id = str(batch["id"])
+            cursor = db.execute(
+                "UPDATE swap_jobs SET state='reconciliation_required',reason='reconciliation_required',"
+                "error_code='worker_restart_during_mutation',reconciliation_required_at=COALESCE("
+                "reconciliation_required_at,?),claimed_until=NULL,updated_at=? "
+                "WHERE provider=? AND batch_id=? AND state='mutating'",
+                (current.isoformat(), current.isoformat(), PROVIDER, batch_id),
+            )
+            if cursor.rowcount:
+                recovered_batches += 1
+                recovered_jobs += cursor.rowcount
+                _refresh_swap_batch(db, batch_id, now=current)
+        if recovered_jobs:
+            _pause_auto_swap_no_commit(db, now=current)
+    if recovered_jobs:
+        from app.services.proxiware import enqueue_sync_run
+
+        enqueue_sync_run(db, now=current, allow_during_running=True)
+    return {"batches": recovered_batches, "jobs": recovered_jobs}
+
+
 def _require_claim(job, claim_token: str | None) -> None:
     if not str(claim_token or "").strip() or not str(job["claim_token"] or "").strip():
         raise ValueError("Swap job claim is stale")
@@ -1335,6 +1768,7 @@ def mark_provider_applied(
     new_assignment_address: str | None = None,
     applied_at: datetime | None = None,
     claim_token: str | None = None,
+    enqueue_sync: bool = True,
 ) -> None:
     """Record a confirmed provider mutation without claiming reconciliation success."""
 
@@ -1404,12 +1838,14 @@ def mark_provider_applied(
                 PROVIDER,
             ),
         )
+        _refresh_swap_batch(db, job["batch_id"], now=current)
     # A confirmed mutation needs fresh official credentials before any probe.
     # Queue read-only inventory sync; an existing queued/running sync already
     # satisfies the request.
-    from app.services.proxiware import enqueue_sync_run
+    if enqueue_sync:
+        from app.services.proxiware import enqueue_sync_run
 
-    enqueue_sync_run(db, now=current, allow_during_running=True)
+        enqueue_sync_run(db, now=current, allow_during_running=True)
 
 
 def mark_reconciliation_required(
@@ -1443,6 +1879,7 @@ def mark_reconciliation_required(
             "WHERE id=? AND provider=? AND state IN ('mutating','provider_applied','reconciliation_required')",
             (safe_error, current.isoformat(), current.isoformat(), int(job_id), PROVIDER),
         )
+        _refresh_swap_batch(db, job["batch_id"], now=current)
         _pause_auto_swap_no_commit(db, now=current)
 
 
@@ -1587,6 +2024,7 @@ def mark_swap_success(
             "new_assignment_id=?, claim_token=NULL, claimed_until=NULL, updated_at=? WHERE id=? AND provider=?",
             (int(old["id"]), int(new["id"]), current.isoformat(), int(job_id), PROVIDER),
         )
+        _refresh_swap_batch(db, job["batch_id"], now=current)
         db.execute(
             "UPDATE provider_subscriptions SET swap_used=swap_used+1, last_swap_reason='swapped', "
             "last_swap_checked_at=?, last_swap_success_at=?, updated_at=? WHERE id=? AND provider=?",
@@ -1670,6 +2108,7 @@ def _reconcile_no_provider_change(db, job, *, now: datetime) -> bool:
                 PROVIDER,
             ),
         )
+        _refresh_swap_batch(db, job["batch_id"], now=now)
     return True
 
 
@@ -1732,7 +2171,7 @@ def reconcile_provider_applied_swaps(db, *, now: datetime | None = None, limit: 
     ensure_proxiware_swap_schema(db)
     current = _now(now)
     rows = db.execute(
-        "SELECT id,subscription_id,state,claim_token,mutation_started_at,provider_applied_at,"
+        "SELECT id,subscription_id,state,claim_token,batch_id,mutation_started_at,provider_applied_at,"
         "mutation_old_assignment_external_id,mutation_old_assignment_address,mutation_dashboard_assignment_id,"
         "mutation_new_assignment_external_id,mutation_new_assignment_address "
         "FROM swap_jobs WHERE provider=? AND state IN ('provider_applied','reconciliation_required') "
@@ -1807,19 +2246,18 @@ def mark_swap_blocked(
     safe_error = _safe_code(error_code)
     reason = "manual_action_required" if safe_error in MANUAL_ACTION_CODES else "provider_blocked"
     with _write_transaction(db):
-        if claim_token is not None:
-            active = db.execute(
-                "SELECT claim_token,state FROM swap_jobs WHERE id=? AND provider=?",
-                (int(job_id), PROVIDER),
-            ).fetchone()
-            if (
-                active is None
-                or str(active["state"]) not in PRE_MUTATION_SWAP_STATES
-                or str(active["claim_token"] or "") != str(claim_token)
-            ):
-                raise ValueError("Swap job claim is stale")
+        active = db.execute(
+            "SELECT claim_token,state,batch_id FROM swap_jobs WHERE id=? AND provider=?",
+            (int(job_id), PROVIDER),
+        ).fetchone()
+        if claim_token is not None and (
+            active is None
+            or str(active["state"]) not in PRE_MUTATION_SWAP_STATES
+            or str(active["claim_token"] or "") != str(claim_token)
+        ):
+            raise ValueError("Swap job claim is stale")
         cursor = db.execute(
-            "UPDATE swap_jobs SET state='blocked', reason=?, error_code=?, blocked_at=?, claim_token=NULL, "
+            "UPDATE swap_jobs SET state='blocked', reason=?, error_code=?, blocked_at=?, batch_id=NULL,claim_token=NULL, "
             "claimed_until=NULL, updated_at=? WHERE id=? AND provider=? AND state IN ('pending','running')",
             (reason, safe_error, current.isoformat(), current.isoformat(), int(job_id), PROVIDER),
         )
@@ -1827,6 +2265,7 @@ def mark_swap_blocked(
             raise LookupError("Swap job not found or already terminal")
         if safe_error in MANUAL_ACTION_CODES:
             _pause_auto_swap_no_commit(db, now=current)
+        _refresh_swap_batch(db, active["batch_id"] if active else None, now=current)
 
 
 def mark_swap_failed(
@@ -1849,7 +2288,7 @@ def mark_swap_failed(
     maximum = max(1, int(retry_limit or configured_limit))
     with _write_transaction(db):
         job = db.execute(
-            "SELECT attempts,state FROM swap_jobs WHERE id=? AND provider=?",
+            "SELECT attempts,state,batch_id FROM swap_jobs WHERE id=? AND provider=?",
             (int(job_id), PROVIDER),
         ).fetchone()
         if job is None:
@@ -1873,12 +2312,13 @@ def mark_swap_failed(
             state = "pending"
             blocked_at = None
         db.execute(
-            "UPDATE swap_jobs SET state=?, reason=?, error_code=?, blocked_at=?, claim_token=NULL, claimed_until=NULL, "
+            "UPDATE swap_jobs SET state=?, reason=?, error_code=?, blocked_at=?, batch_id=NULL,claim_token=NULL, claimed_until=NULL, "
             "updated_at=? WHERE id=? AND provider=?",
             (state, reason, safe_error, blocked_at, current.isoformat(), int(job_id), PROVIDER),
         )
         if terminal and safe_error in MANUAL_ACTION_CODES:
             _pause_auto_swap_no_commit(db, now=current)
+        _refresh_swap_batch(db, job["batch_id"], now=current)
         return state
 
 
@@ -1886,13 +2326,15 @@ def cancel_swap(db, job_id: int, *, now: datetime | None = None) -> None:
     ensure_proxiware_swap_schema(db)
     current = _now(now)
     with _write_transaction(db):
+        row = db.execute("SELECT batch_id FROM swap_jobs WHERE id=? AND provider=?", (int(job_id), PROVIDER)).fetchone()
         cursor = db.execute(
-            "UPDATE swap_jobs SET state='canceled', reason='canceled', claim_token=NULL, claimed_until=NULL, updated_at=? "
+            "UPDATE swap_jobs SET state='canceled', reason='canceled', batch_id=NULL,claim_token=NULL, claimed_until=NULL, updated_at=? "
             "WHERE id=? AND provider=? AND state IN ('pending','running')",
             (current.isoformat(), int(job_id), PROVIDER),
         )
         if cursor.rowcount != 1:
             raise LookupError("Swap job not found or already terminal")
+        _refresh_swap_batch(db, row["batch_id"] if row else None, now=current)
 
 
 def retry_swap(db, job_id: int, *, now: datetime | None = None) -> None:
@@ -1902,7 +2344,7 @@ def retry_swap(db, job_id: int, *, now: datetime | None = None) -> None:
     current = _now(now)
     with _write_transaction(db):
         row = db.execute(
-            "SELECT state FROM swap_jobs WHERE id=? AND provider=?",
+            "SELECT state,batch_id FROM swap_jobs WHERE id=? AND provider=?",
             (int(job_id), PROVIDER),
         ).fetchone()
         if row is None:
@@ -1910,10 +2352,11 @@ def retry_swap(db, job_id: int, *, now: datetime | None = None) -> None:
         if str(row["state"] or "") not in {"failed", "blocked", "canceled"}:
             raise ValueError("Swap job is not retryable")
         db.execute(
-            "UPDATE swap_jobs SET state='pending', reason='manual_retry', error_code='', "
+            "UPDATE swap_jobs SET state='pending', reason='manual_retry', error_code='',batch_id=NULL, "
             "blocked_at=NULL, claim_token=NULL, claimed_until=NULL, updated_at=? WHERE id=? AND provider=?",
             (current.isoformat(), int(job_id), PROVIDER),
         )
+        _refresh_swap_batch(db, row["batch_id"], now=current)
 
 
 def request_manual_swap(db, job_id: int, *, now: datetime | None = None) -> None:
@@ -1970,6 +2413,7 @@ __all__ = [
     "mark_reconciliation_required",
     "mark_swap_success",
     "queue_eligible_swaps",
+    "recover_interrupted_swap_batches",
     "reconcile_provider_applied_swaps",
     "revalidate_swap_job",
     "retry_swap",

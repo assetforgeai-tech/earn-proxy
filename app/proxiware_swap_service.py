@@ -13,6 +13,7 @@ import logging
 import signal
 import threading
 from datetime import UTC, datetime
+from math import ceil
 from typing import Any, Callable
 
 from app import create_worker_app
@@ -34,12 +35,16 @@ from app.services.proxiware_health import (
 )
 from app.services.proxiware_swap import (
     MANUAL_ACTION_CODES,
+    begin_swap_batch_mutation,
     claim_next_swap,
+    claim_next_swap_batch,
     mark_provider_applied,
     mark_reconciliation_required,
     mark_swap_blocked,
     mark_swap_failed,
     queue_eligible_swaps,
+    recover_interrupted_swap_batches,
+    release_swap_batch,
     revalidate_swap_job,
 )
 from app.services.settings import get_setting
@@ -99,6 +104,7 @@ class ProxiwareSwapRunner:
             else self.app.config.get("PROXIWARE_SWAP_MUTATION_TIMEOUT_SECONDS", 60.0)
         )
         self.mutation_timeout_seconds = max(0.01, min(300.0, float(configured_timeout)))
+        self.mutation_lease_seconds = max(self.claim_seconds, ceil(self.mutation_timeout_seconds))
         self._stop = threading.Event()
         self._adapter_call_timed_out = False
 
@@ -254,6 +260,169 @@ class ProxiwareSwapRunner:
             raise RuntimeError("provider response missing")
         return result[0]
 
+    def _execute_batch_with_timeout(self, adapter, jobs: list[dict[str, Any]]) -> dict[str, Any]:
+        method = getattr(adapter, "swap_assignments", None)
+        native = getattr(adapter, "swap_assignments_with_timeout", None)
+        if not callable(method) and not callable(native) and len(jobs) == 1:
+            result = self._execute_with_timeout(adapter, jobs[0])
+            assignment_id = str(jobs[0]["mutation_dashboard_assignment_id"])
+            return {"confirmed": {assignment_id: result}, "unconfirmed": []}
+        if not callable(method) and not callable(native):
+            raise RuntimeError("manual_action_required")
+        if callable(native):
+            raw = native(jobs, timeout_seconds=self.mutation_timeout_seconds)
+            return self._validate_batch_result(raw, jobs)
+        result: list[dict[str, Any]] = []
+        failure: list[BaseException] = []
+        finished = threading.Event()
+        timed_out = threading.Event()
+
+        def invoke() -> None:
+            try:
+                result.append(self._validate_batch_result(method(jobs), jobs))
+            except BaseException as exc:  # noqa: BLE001 - isolate the adapter worker boundary
+                failure.append(exc)
+            finally:
+                finished.set()
+                if timed_out.is_set():
+                    self._close_adapter(adapter)
+
+        threading.Thread(target=invoke, name="proxiware-swap-batch", daemon=True).start()
+        if not finished.wait(self.mutation_timeout_seconds):
+            timed_out.set()
+            self._adapter_call_timed_out = True
+            raise TimeoutError("provider batch timeout")
+        if failure:
+            raise failure[0]
+        if not result:
+            raise RuntimeError("provider response missing")
+        return result[0]
+
+    @staticmethod
+    def _validate_batch_result(result: Any, jobs: list[dict[str, Any]]) -> dict[str, Any]:
+        if (
+            not isinstance(result, dict)
+            or not isinstance(result.get("confirmed"), dict)
+            or not isinstance(result.get("unconfirmed"), list)
+        ):
+            raise RuntimeError("provider_response_unconfirmed")
+        submitted = {str(job["mutation_dashboard_assignment_id"]) for job in jobs}
+        confirmed = {str(key): value for key, value in result["confirmed"].items()}
+        unconfirmed = [str(value) for value in result["unconfirmed"]]
+        if (
+            len(unconfirmed) != len(set(unconfirmed))
+            or set(confirmed) & set(unconfirmed)
+            or set(confirmed) | set(unconfirmed) != submitted
+        ):
+            raise RuntimeError("provider_response_unconfirmed")
+        by_id = {str(job["mutation_dashboard_assignment_id"]): job for job in jobs}
+        for assignment_id, evidence in confirmed.items():
+            if (
+                assignment_id not in by_id
+                or not isinstance(evidence, dict)
+                or str(evidence.get("old_assignment_external_id") or "")
+                != str(by_id[assignment_id]["mutation_old_assignment_external_id"] or "")
+                or not (
+                    str(evidence.get("new_assignment_external_id") or "").strip()
+                    or str(evidence.get("new_assignment_address") or "").strip()
+                )
+            ):
+                raise RuntimeError("provider_response_unconfirmed")
+        return {"confirmed": confirmed, "unconfirmed": unconfirmed}
+
+    def _run_claimed_batch(self, db, claimed, configured_adapter, adapter_holder) -> dict[str, Any]:
+        batch_id = str(claimed[0]["batch_id"])
+        claim_token = str(claimed[0]["claim_token"])
+        single_job_id = int(claimed[0]["id"]) if len(claimed) == 1 else None
+
+        def response(status: str, **extra) -> dict[str, Any]:
+            if single_job_id is not None:
+                return {"status": status, "job_id": single_job_id, **extra}
+            return {"status": status, "batch_id": batch_id, "job_ids": [int(row["id"]) for row in claimed], **extra}
+
+        context = db.execute(
+            "SELECT sj.*,pa.external_id AS old_assignment_external_id,pa.dashboard_assignment_id,"
+            "ps.external_id AS subscription_external_id FROM swap_jobs sj "
+            "JOIN provider_assignments pa ON pa.id=sj.old_assignment_id "
+            "JOIN provider_subscriptions ps ON ps.id=sj.subscription_id "
+            "WHERE sj.provider='proxiware' AND sj.batch_id=? AND sj.state='running' ORDER BY sj.id",
+            (batch_id,),
+        ).fetchall()
+        adapter = configured_adapter or self._adapter(dict(context[0]) if context else None)
+        adapter_holder["adapter"] = adapter
+        has_batch_api = callable(getattr(adapter, "swap_assignments", None)) or callable(
+            getattr(adapter, "swap_assignments_with_timeout", None)
+        )
+        if (
+            adapter is None
+            or getattr(adapter, "allow_mutation", True) is not True
+            or (len(context) > 1 and not has_batch_api)
+            or (len(context) == 1 and not has_batch_api and not callable(getattr(adapter, "swap", None)))
+        ):
+            release_swap_batch(db, batch_id=batch_id, claim_token=claim_token, error_code="manual_action_required")
+            record_worker_heartbeat(db, "swap_worker", "blocked", error_code="manual_action_required")
+            return response("blocked", error_code="manual_action_required")
+        mutation_started = False
+        try:
+            jobs = begin_swap_batch_mutation(
+                db, batch_id=batch_id, claim_token=claim_token, lease_seconds=self.mutation_lease_seconds
+            )
+            if not jobs:
+                values = db.execute(
+                    "SELECT state,error_code FROM swap_jobs WHERE id IN ("
+                    + ",".join("?" for _ in claimed)
+                    + ") ORDER BY id",
+                    tuple(int(row["id"]) for row in claimed),
+                ).fetchall()
+                error_code = str(values[0]["error_code"] or "") if values else ""
+                status = "deferred" if error_code == "dashboard_stale" else "rejected" if values else "idle"
+                record_worker_heartbeat(db, "swap_worker", status, error_code=error_code)
+                return response(status, **({"error_code": error_code} if error_code else {}))
+            mutation_started = True
+            raw = self._execute_batch_with_timeout(adapter, jobs)
+            for job in jobs:
+                assignment_id = str(job["mutation_dashboard_assignment_id"])
+                evidence = raw["confirmed"].get(assignment_id)
+                if evidence is None:
+                    mark_reconciliation_required(
+                        db, int(job["id"]), error_code="provider_response_unconfirmed", claim_token=claim_token
+                    )
+                    continue
+                mark_provider_applied(
+                    db,
+                    int(job["id"]),
+                    old_assignment_external_id=evidence["old_assignment_external_id"],
+                    new_assignment_external_id=evidence.get("new_assignment_external_id"),
+                    new_assignment_address=evidence.get("new_assignment_address"),
+                    applied_at=datetime.now(UTC),
+                    claim_token=claim_token,
+                    enqueue_sync=False,
+                )
+            confirmed = len(raw["confirmed"])
+            unconfirmed = len(raw["unconfirmed"])
+            if confirmed or unconfirmed:
+                from app.services.proxiware import enqueue_sync_run
+
+                enqueue_sync_run(db, allow_during_running=True)
+            status = "reconciliation_required" if unconfirmed or confirmed else "idle"
+            record_worker_heartbeat(db, "swap_worker", "provider_applied" if confirmed else status)
+            return response(status, confirmed=confirmed, unconfirmed=unconfirmed)
+        except Exception as exc:  # noqa: BLE001 - after the fence, all outcomes require reconciliation
+            code = safe_swap_error(exc)
+            if not mutation_started:
+                release_swap_batch(db, batch_id=batch_id, claim_token=claim_token, error_code=code)
+                record_worker_heartbeat(db, "swap_worker", "blocked", error_code=code)
+                return response("blocked", error_code=code)
+            for job in jobs if "jobs" in locals() else []:
+                current = db.execute("SELECT state FROM swap_jobs WHERE id=?", (int(job["id"]),)).fetchone()
+                if current is not None and str(current["state"]) == "mutating":
+                    mark_reconciliation_required(db, int(job["id"]), error_code=code, claim_token=claim_token)
+            from app.services.proxiware import enqueue_sync_run
+
+            enqueue_sync_run(db, allow_during_running=True)
+            record_worker_heartbeat(db, "swap_worker", "reconciliation_required", error_code=code)
+            return response("reconciliation_required", error_code=code)
+
     @staticmethod
     def _close_adapter(adapter: Any | None) -> None:
         close = getattr(adapter, "close", None)
@@ -286,6 +455,12 @@ class ProxiwareSwapRunner:
             return {"status": "stopped"}
         with self.app.app_context():
             db = get_db()
+            recovered = recover_interrupted_swap_batches(db)
+            if recovered["jobs"]:
+                record_worker_heartbeat(
+                    db, "swap_worker", "reconciliation_required", error_code="worker_restart_during_mutation"
+                )
+                return {"status": "reconciliation_required", **recovered}
             record_worker_heartbeat(db, "swap_worker", "starting")
             if is_proxiware_automation_paused(db) and not allow_manual:
                 record_worker_heartbeat(db, "swap_worker", "paused")
@@ -367,6 +542,13 @@ class ProxiwareSwapRunner:
                     record_swap_mutation_readiness(db, True)
             if not allow_manual and job_id is None:
                 queue_eligible_swaps(db)
+                claimed_batch = claim_next_swap_batch(db, claim_seconds=self.claim_seconds)
+                if not claimed_batch:
+                    record_worker_heartbeat(db, "swap_worker", "idle")
+                    return {"status": "idle"}
+                return self._run_claimed_batch(
+                    db, [dict(row) for row in claimed_batch], configured_adapter, adapter_holder
+                )
             job = claim_next_swap(db, claim_seconds=self.claim_seconds, job_id=job_id)
             if job is None:
                 record_worker_heartbeat(db, "swap_worker", "idle")
@@ -418,6 +600,7 @@ class ProxiwareSwapRunner:
                     require_mutation=True,
                     claim_token=job["claim_token"],
                     enter_mutation=True,
+                    mutation_lease_seconds=self.mutation_lease_seconds,
                 )
                 if not decision.allowed:
                     status = "deferred" if decision.reason == "dashboard_stale" and not allow_manual else "rejected"

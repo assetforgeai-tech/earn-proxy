@@ -48,6 +48,50 @@ def _queue(app):
         return sub_id
 
 
+def test_worker_recovers_expired_mutating_batch_before_provider_call(app):
+    from app.proxiware_swap_service import ProxiwareSwapRunner
+    from app.services.proxiware_swap import begin_swap_batch_mutation, claim_next_swap_batch
+
+    _queue(app)
+    now = datetime.now(UTC).replace(microsecond=0)
+    with app.app_context():
+        db = get_db()
+        claimed = claim_next_swap_batch(db, now=now)[0]
+        assert begin_swap_batch_mutation(db, batch_id=claimed["batch_id"], claim_token=claimed["claim_token"], now=now)
+        db.execute(
+            "UPDATE swap_batches SET claimed_until=?,updated_at=? WHERE id=?",
+            (
+                (now - timedelta(seconds=31)).isoformat(),
+                (now - timedelta(seconds=331)).isoformat(),
+                claimed["batch_id"],
+            ),
+        )
+        db.commit()
+
+    calls = []
+
+    class Adapter:
+        def swap_batch(self, _jobs):
+            calls.append("swap")
+            raise AssertionError("recovered mutation must never be sent again")
+
+    result = ProxiwareSwapRunner(app=app, adapter_factory=lambda: Adapter()).run_once()
+
+    assert result["status"] == "reconciliation_required"
+    assert ProxiwareSwapRunner(app=app, adapter_factory=lambda: Adapter()).run_once()["status"] == "disabled"
+    assert calls == []
+    with app.app_context():
+        db = get_db()
+        state = db.execute("SELECT state FROM swap_jobs").fetchone()["state"]
+        runtime = get_setting(db, "proxiware_auto_swap", "")
+        queued_syncs = db.execute(
+            "SELECT COUNT(*) FROM provider_sync_runs WHERE provider='proxiware' AND status='queued'"
+        ).fetchone()[0]
+    assert state == "reconciliation_required"
+    assert runtime == "0"
+    assert queued_syncs == 1
+
+
 def test_safe_swap_error_preserves_provider_response_codes():
     from app.proxiware_swap_service import safe_swap_error
     from app.services.proxiware_browser import BrowserProviderResponseError
@@ -601,6 +645,107 @@ def test_swap_runner_closes_configured_browser_adapter_after_attempt(app):
 
     assert result["status"] == "reconciliation_required"
     assert closed == [True]
+
+
+def test_swap_runner_submits_one_provider_batch_for_all_risk_siblings(app):
+    from app.proxiware_swap_service import ProxiwareSwapRunner
+
+    sub_id = _queue(app)
+    now = datetime.now(UTC).replace(microsecond=0).isoformat()
+    with app.app_context():
+        db = get_db()
+        db.execute(
+            "INSERT INTO provider_assignments(subscription_id,provider,external_id,host,port,status,qualification,"
+            "provider_eligible,live_status,country,dashboard_assignment_id,dashboard_eligible,dashboard_connections,"
+            "dashboard_observed_at,dashboard_source,assigned_at,last_seen_at,created_at,updated_at) "
+            "VALUES(?,'proxiware','old-worker-2','proxy-2.example',8081,'active','risk',1,'live','US',"
+            "'dashboard-2',1,10,?,'provider_dashboard',?,?,?,?)",
+            (sub_id, now, now, now, now, now),
+        )
+        db.commit()
+
+    calls = []
+
+    class BatchAdapter:
+        allow_mutation = True
+
+        def swap_assignments(self, jobs):
+            calls.append([job["dashboard_assignment_id"] for job in jobs])
+            return {
+                "confirmed": {
+                    job["dashboard_assignment_id"]: {
+                        "old_assignment_external_id": job["old_assignment_external_id"],
+                        "new_assignment_address": f"198.51.100.{index + 10}",
+                    }
+                    for index, job in enumerate(jobs)
+                },
+                "unconfirmed": [],
+            }
+
+    result = ProxiwareSwapRunner(app=app, adapter_factory=lambda: BatchAdapter()).run_once()
+
+    assert result["status"] == "reconciliation_required"
+    assert len(calls) == 1
+    assert calls[0] == ["dashboard-worker", "dashboard-2"]
+    with app.app_context():
+        jobs = get_db().execute("SELECT state FROM swap_jobs ORDER BY id").fetchall()
+        sync_count = (
+            get_db()
+            .execute("SELECT COUNT(*) FROM provider_sync_runs WHERE provider='proxiware' AND status='queued'")
+            .fetchone()[0]
+        )
+    assert [row["state"] for row in jobs] == ["provider_applied", "provider_applied"]
+    assert sync_count == 1
+
+
+def test_partial_batch_response_reconciles_unknown_item_without_requeue(app):
+    from app.proxiware_swap_service import ProxiwareSwapRunner
+    from app.services.proxiware_swap import claim_next_swap_batch
+
+    sub_id = _queue(app)
+    now = datetime.now(UTC).replace(microsecond=0).isoformat()
+    with app.app_context():
+        db = get_db()
+        db.execute(
+            "INSERT INTO provider_assignments(subscription_id,provider,external_id,host,port,status,qualification,"
+            "provider_eligible,live_status,country,dashboard_assignment_id,dashboard_eligible,dashboard_connections,"
+            "dashboard_observed_at,dashboard_source,assigned_at,last_seen_at,created_at,updated_at) "
+            "VALUES(?,'proxiware','old-worker-2','proxy-2.example',8081,'active','risk',1,'live','US',"
+            "'dashboard-2',1,10,?,'provider_dashboard',?,?,?,?)",
+            (sub_id, now, now, now, now, now),
+        )
+        db.commit()
+
+    calls = []
+
+    class PartialAdapter:
+        allow_mutation = True
+
+        def swap_assignments(self, jobs):
+            calls.append(tuple(job["dashboard_assignment_id"] for job in jobs))
+            first = jobs[0]
+            return {
+                "confirmed": {
+                    first["dashboard_assignment_id"]: {
+                        "old_assignment_external_id": first["old_assignment_external_id"],
+                        "new_assignment_address": "198.51.100.10",
+                    }
+                },
+                "unconfirmed": [jobs[1]["dashboard_assignment_id"]],
+            }
+
+    runner = ProxiwareSwapRunner(app=app, adapter_factory=lambda: PartialAdapter())
+    result = runner.run_once()
+    assert result["status"] == "reconciliation_required"
+    assert result["confirmed"] == 1
+    assert result["unconfirmed"] == 1
+    assert len(calls) == 1
+    with app.app_context():
+        db = get_db()
+        states = [row["state"] for row in db.execute("SELECT state FROM swap_jobs ORDER BY id").fetchall()]
+        assert claim_next_swap_batch(db) == []
+    assert states == ["provider_applied", "reconciliation_required"]
+    assert len(calls) == 1
 
 
 def test_swap_runner_revalidates_assignment_before_calling_adapter(app):

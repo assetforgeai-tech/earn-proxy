@@ -528,6 +528,93 @@ class CdpProxiwareBrowser:
                 "fingerprint_observed": True,
             }
 
+    def swap_assignments(self, jobs: Any, *, timeout_seconds: float | None = None) -> dict[str, Any]:
+        if not self.allow_mutation:
+            raise BrowserAdapterUnavailable("manual_action_required")
+        if not isinstance(jobs, (list, tuple)) or not jobs:
+            raise BrowserAdapterUnavailable("swap_identity_missing")
+        identities: dict[str, str] = {}
+        old_ids: set[str] = set()
+        subscriptions: set[str] = set()
+        provider_ids: list[int] = []
+        for value in jobs:
+            job = dict(value) if not isinstance(value, dict) else value
+            assignment_id = str(job.get("dashboard_assignment_id") or "").strip().removeprefix("ip:")
+            old_external = str(job.get("old_assignment_external_id") or "").strip()
+            subscription = str(job.get("subscription_external_id") or "").strip()
+            if (
+                not assignment_id.isdigit()
+                or not old_external
+                or assignment_id in identities
+                or old_external in old_ids
+            ):
+                raise BrowserAdapterUnavailable("swap_identity_missing")
+            if not subscription:
+                raise BrowserAdapterUnavailable("subscription_scope_missing")
+            identities[assignment_id] = old_external
+            old_ids.add(old_external)
+            subscriptions.add(subscription)
+            provider_ids.append(int(assignment_id))
+        if len(subscriptions) != 1:
+            raise BrowserAdapterUnavailable("subscription_scope_mismatch")
+        subscription = next(iter(subscriptions))
+        with self._client() as client:
+            self._navigate(client)
+            scope = self._fetch(client, path="/api/static/networks/isp/proxies", timeout_seconds=timeout_seconds)
+            status = int(scope.get("status") or 0)
+            if status in {401, 403}:
+                raise BrowserAdapterUnavailable("session_expired")
+            if status != 200:
+                raise BrowserProviderResponseError("provider_read_failed")
+            rows = ProxiwareDashboardObserver(_PayloadTransport(scope.get("payload"))).observe(
+                subscription_id=subscription
+            )
+            scoped_ids = [str(row.assignment_id) for row in rows]
+            if any(scoped_ids.count(assignment_id) != 1 for assignment_id in identities):
+                raise BrowserAdapterUnavailable("subscription_scope_mismatch")
+            result = self._fetch(
+                client,
+                path="/api/static/networks/isp/proxies/swap",
+                method="POST",
+                body={"assignment_ids": provider_ids},
+                timeout_seconds=timeout_seconds,
+            )
+            if int(result.get("status") or 0) not in {200, 201, 202}:
+                raise BrowserProviderResponseError("provider_mutation_rejected")
+            payload = result.get("payload")
+            swaps = payload.get("swaps") if isinstance(payload, dict) else None
+            if not isinstance(swaps, list):
+                raise BrowserProviderResponseError("provider_response_unconfirmed")
+            returned: dict[str, list[dict[str, Any]]] = {}
+            unexpected = False
+            for swap in swaps:
+                if not isinstance(swap, dict):
+                    unexpected = True
+                    continue
+                key = str(swap.get("assignment_id") or "").strip()
+                if key not in identities:
+                    unexpected = True
+                else:
+                    returned.setdefault(key, []).append(swap)
+            confirmed = {}
+            unconfirmed = []
+            for key, old_external in identities.items():
+                matches = returned.get(key, [])
+                if unexpected or len(matches) != 1:
+                    unconfirmed.append(key)
+                    continue
+                try:
+                    address = normalize_dashboard_address(matches[0].get("new_addr"))
+                except (TypeError, ValueError):
+                    unconfirmed.append(key)
+                    continue
+                evidence = {"old_assignment_external_id": old_external, "new_assignment_address": address}
+                new_external = str(matches[0].get("new_assignment_external_id") or "").strip()
+                if new_external:
+                    evidence["new_assignment_external_id"] = new_external
+                confirmed[key] = evidence
+            return {"confirmed": confirmed, "unconfirmed": unconfirmed}
+
     def swap_assignment(self, job: Any, *, timeout_seconds: float | None = None) -> dict[str, Any]:
         if not self.allow_mutation:
             raise BrowserAdapterUnavailable("manual_action_required")
@@ -593,6 +680,9 @@ class CdpProxiwareBrowser:
                 evidence["new_assignment_external_id"] = explicit_external
             return evidence
 
+    def swap_assignments_with_timeout(self, jobs: Any, *, timeout_seconds: float) -> dict[str, Any]:
+        return self.swap_assignments(jobs, timeout_seconds=timeout_seconds)
+
     def swap(self, job: Any) -> dict[str, Any]:
         return self.swap_assignment(job)
 
@@ -605,6 +695,7 @@ class UnavailableProxiwareBrowser:
     """Placeholder used until an explicitly reviewed adapter is installed."""
 
     cdp_url: str | None = None
+    allow_mutation: bool = False
 
     def _fail(self) -> None:
         raise BrowserAdapterUnavailable("manual_action_required")

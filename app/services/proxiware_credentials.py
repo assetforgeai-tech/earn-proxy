@@ -415,6 +415,14 @@ def restore_auto_swap_intent(db, *, now: datetime | None = None) -> bool:
     from app.services.settings import get_setting
 
     enabled = get_setting(db, "proxiware_auto_swap_intent", "0") == "1"
+    unresolved = db.execute(
+        "SELECT 1 FROM swap_jobs WHERE provider=? AND state='reconciliation_required' LIMIT 1",
+        (PROVIDER,),
+    ).fetchone()
+    if enabled and unresolved is not None:
+        set_proxiware_runtime_mutation(db, False, now=now)
+        db.commit()
+        return False
     set_proxiware_runtime_mutation(db, enabled, now=now)
     db.commit()
     return enabled

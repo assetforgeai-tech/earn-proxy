@@ -11,8 +11,10 @@ from app.services.proxiware_swap import (
     ACTIVE_SWAP_STATES,
     SwapDecision,
     SwapReconciliationPending,
+    begin_swap_batch_mutation,
     cancel_swap,
     claim_next_swap,
+    claim_next_swap_batch,
     ensure_proxiware_swap_schema,
     get_provider_secret_metadata,
     mark_provider_applied,
@@ -122,6 +124,14 @@ def test_swap_schema_uses_assignment_scoped_active_job_fence(app):
         mutation_index = db.execute(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='swap_jobs_one_mutation_subscription_idx'"
         ).fetchone()
+        mutation_meta = next(
+            row
+            for row in db.execute('PRAGMA index_list("swap_jobs")').fetchall()
+            if row["name"] == "swap_jobs_one_mutation_subscription_idx"
+        )
+        batch_index = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='swap_batches_one_active_subscription_idx'"
+        ).fetchone()
 
     assert "swap_jobs_one_active_idx" not in indexes
     assert "swap_jobs_one_active_v2_idx" not in indexes
@@ -129,6 +139,8 @@ def test_swap_schema_uses_assignment_scoped_active_job_fence(app):
     assert "old_assignment_id" in str(assignment_index["sql"])
     assert mutation_index is not None
     assert "subscription_id" in str(mutation_index["sql"])
+    assert int(mutation_meta["unique"]) == 0
+    assert batch_index is not None
 
 
 def test_swap_schema_migrates_legacy_subscription_fence(app):
@@ -185,6 +197,40 @@ def test_swap_schema_quarantines_duplicate_mutations_per_subscription(app):
     assert [row["state"] for row in rows].count("mutating") == 1
     assert [row["state"] for row in rows].count("blocked") == 1
     assert rows[1]["reason"] == "migration_conflict"
+
+
+def test_swap_schema_migration_preserves_mixed_state_batch_reservation(app):
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC).isoformat()
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db, quota=-1)
+        db.execute(
+            "INSERT INTO provider_assignments(subscription_id,provider,external_id,host,port,status,qualification,"
+            "provider_eligible,live_status,created_at,updated_at) VALUES(?,'proxiware','assignment-2',"
+            "'proxy-2.example',8081,'active','risk',1,'live',?,?)",
+            (sub_id, now, now),
+        )
+        ids = [
+            row["id"]
+            for row in db.execute(
+                "SELECT id FROM provider_assignments WHERE subscription_id=? ORDER BY id", (sub_id,)
+            ).fetchall()
+        ]
+        for assignment_id, state in zip(ids, ("running", "mutating"), strict=True):
+            db.execute(
+                "INSERT INTO swap_jobs(provider,subscription_id,old_assignment_id,state,claim_token,created_at,updated_at) "
+                "VALUES('proxiware',?,?,?,?,?,?)",
+                (sub_id, assignment_id, state, "shared-batch-claim", now, now),
+            )
+        db.execute("DROP INDEX swap_batches_one_active_subscription_idx")
+        db.commit()
+
+        ensure_proxiware_swap_schema(db)
+        batch = db.execute("SELECT id,state FROM swap_batches WHERE subscription_id=?", (sub_id,)).fetchone()
+        rows = db.execute("SELECT batch_id FROM swap_jobs WHERE subscription_id=? ORDER BY id", (sub_id,)).fetchall()
+
+    assert batch["state"] == "mutating"
+    assert len({row["batch_id"] for row in rows}) == 1
 
 
 def _seed_subscription(db, *, eligible_count=500, connections=100, quota=1, cooldown=None):
@@ -344,6 +390,107 @@ def test_queue_batches_each_non_allow_assignment_in_a_subscription(app):
         ).fetchall()
 
     assert [int(row["old_assignment_id"]) for row in rows] == [1, 2]
+
+
+def test_default_scheduler_queues_more_than_twenty_eligible_siblings(app):
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    timestamp = now.isoformat()
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db, quota=-1)
+        for index in range(2, 22):
+            db.execute(
+                "INSERT INTO provider_assignments(subscription_id,provider,external_id,host,port,status,qualification,"
+                "provider_eligible,live_status,country,dashboard_assignment_id,dashboard_eligible,dashboard_connections,"
+                "dashboard_observed_at,dashboard_source,assigned_at,last_seen_at,created_at,updated_at) "
+                "VALUES(?,'proxiware',?, ?,8081,'active','risk',1,'live','US',?,1,10,?,'provider_dashboard',?,?,?,?)",
+                (
+                    sub_id,
+                    f"assignment-{index}",
+                    f"proxy-{index}.example",
+                    f"dashboard-{index}",
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        db.commit()
+        set_setting(db, "proxiware_auto_swap", "1")
+
+        assert queue_eligible_swaps(db, now=now) == 21
+
+
+def test_claimed_batch_fences_all_sibling_mutations_together(app):
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        sub_id = _seed_subscription(db, quota=-1)
+        timestamp = now.isoformat()
+        for index in range(2, 4):
+            db.execute(
+                "INSERT INTO provider_assignments(subscription_id,provider,external_id,host,port,status,qualification,"
+                "provider_eligible,live_status,country,dashboard_assignment_id,dashboard_eligible,dashboard_connections,"
+                "dashboard_observed_at,dashboard_source,assigned_at,last_seen_at,created_at,updated_at) "
+                "VALUES(?,'proxiware',?, ?,8081,'active','risk',1,'live','US',?,1,10,?,'provider_dashboard',?,?,?,?)",
+                (
+                    sub_id,
+                    f"assignment-{index}",
+                    f"proxy-{index}.example",
+                    f"dashboard-{index}",
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        db.commit()
+        set_setting(db, "proxiware_auto_swap", "1")
+        set_setting(db, "proxiware_allow_mutation", "1")
+        assert queue_eligible_swaps(db, now=now) == 3
+
+        batch = claim_next_swap_batch(db, now=now)
+        assert len(batch) == 3
+        assert len({row["batch_id"] for row in batch}) == 1
+        assert len({row["claim_token"] for row in batch}) == 1
+        assert claim_next_swap_batch(db, now=now) == []
+
+        recovered = claim_next_swap_batch(db, now=now + timedelta(seconds=301))
+        assert len(recovered) == 3
+        assert len({row["claim_token"] for row in recovered}) == 1
+        assert recovered[0]["claim_token"] != batch[0]["claim_token"]
+
+        mutation = begin_swap_batch_mutation(
+            db,
+            batch_id=recovered[0]["batch_id"],
+            claim_token=recovered[0]["claim_token"],
+            now=now + timedelta(seconds=301),
+        )
+        assert len(mutation) == 3
+        assert {row["state"] for row in mutation} == {"mutating"}
+        assert len({row["mutation_started_at"] for row in mutation}) == 1
+        assert claim_next_swap_batch(db, now=now + timedelta(seconds=302)) == []
+
+
+def test_manual_claim_respects_reconciling_batch_fence(app):
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        _seed_subscription(db)
+        set_setting(db, "proxiware_auto_swap", "1")
+        queue_eligible_swaps(db, now=now)
+        batch = claim_next_swap_batch(db, now=now)[0]
+        job_id = int(batch["id"])
+        db.execute("UPDATE swap_batches SET state='reconciling' WHERE id=?", (batch["batch_id"],))
+        db.execute(
+            "UPDATE swap_jobs SET state='pending',batch_id=NULL,claim_token=NULL,claimed_until=NULL WHERE id=?",
+            (job_id,),
+        )
+        db.commit()
+
+        assert claim_next_swap(db, now=now + timedelta(seconds=1), job_id=job_id) is None
 
 
 def test_queue_reserves_finite_swap_quota_across_sibling_assignments(app):
@@ -1077,9 +1224,57 @@ def test_reconciliation_required_with_fresh_unchanged_identity_releases_subscrip
             "SELECT state,reason,error_code,claim_token,claimed_until FROM swap_jobs WHERE id=?",
             (job["id"],),
         ).fetchone()
+        batch_state = db.execute("SELECT state FROM swap_batches WHERE id=?", (job["batch_id"],)).fetchone()["state"]
 
     assert result["reconciled_no_provider_change"] == 1
     assert tuple(stored) == ("blocked", "reconciled_no_provider_change", "provider_timeout", None, None)
+    assert batch_state == "complete"
+
+
+def test_interrupted_batch_is_frozen_and_sync_is_queued(app):
+    from app.services.proxiware_swap import recover_interrupted_swap_batches
+
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        _seed_subscription(db)
+        set_setting(db, "proxiware_auto_swap", "1")
+        set_setting(db, "proxiware_auto_swap_intent", "1")
+        set_setting(db, "proxiware_allow_mutation", "1")
+        assert queue_eligible_swaps(db, now=now) == 1
+        claimed = claim_next_swap_batch(db, now=now)[0]
+        assert begin_swap_batch_mutation(db, batch_id=claimed["batch_id"], claim_token=claimed["claim_token"], now=now)
+        db.execute("UPDATE swap_batches SET claimed_until=NULL WHERE id=?", (claimed["batch_id"],))
+        assert recover_interrupted_swap_batches(db, now=now + timedelta(seconds=329)) == {
+            "batches": 0,
+            "jobs": 0,
+        }
+        db.commit()
+
+        recovered = recover_interrupted_swap_batches(db, now=now + timedelta(seconds=331))
+        job = db.execute("SELECT state,error_code FROM swap_jobs WHERE id=?", (claimed["id"],)).fetchone()
+        batch = db.execute("SELECT state FROM swap_batches WHERE id=?", (claimed["batch_id"],)).fetchone()
+        runtime = db.execute("SELECT value FROM settings WHERE key='proxiware_auto_swap'").fetchone()
+        intent = db.execute("SELECT value FROM settings WHERE key='proxiware_auto_swap_intent'").fetchone()
+        from app.services.proxiware_credentials import restore_auto_swap_intent
+
+        assert restore_auto_swap_intent(db, now=now + timedelta(seconds=331)) is False
+        runtime_after_resume_attempt = db.execute(
+            "SELECT value FROM settings WHERE key='proxiware_auto_swap'"
+        ).fetchone()["value"]
+        queued_syncs = db.execute(
+            "SELECT COUNT(*) FROM provider_sync_runs WHERE provider='proxiware' AND status='queued'"
+        ).fetchone()[0]
+        claim_again = claim_next_swap_batch(db, now=now + timedelta(seconds=332))
+
+    assert recovered == {"batches": 1, "jobs": 1}
+    assert tuple(job) == ("reconciliation_required", "worker_restart_during_mutation")
+    assert batch["state"] == "reconciling"
+    assert runtime["value"] == "0"
+    assert runtime_after_resume_attempt == "0"
+    assert intent["value"] == "1"
+    assert queued_syncs == 1
+    assert claim_again == []
 
 
 def test_reconciliation_required_ignores_unrelated_fresh_dashboard_assignment(app):
