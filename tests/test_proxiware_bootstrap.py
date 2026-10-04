@@ -40,6 +40,7 @@ def test_fresh_app_bootstraps_all_provider_tables_and_canonical_settings(tmp_pat
     }.issubset(tables)
     assert {
         "proxiware_auto_swap",
+        "proxiware_allow_mutation",
         "proxiware_eligible_threshold",
         "proxiware_worker_concurrency",
         "proxiware_retry_limit",
@@ -71,9 +72,35 @@ def test_legacy_auto_swap_setting_is_migrated_once_and_not_written_back(tmp_path
         values = dict(db.execute("SELECT key,value FROM settings WHERE key LIKE 'proxiware_%'").fetchall())
 
     assert values["proxiware_auto_swap"] == "1"
+    assert values["proxiware_allow_mutation"] == "1"
     assert values["proxiware_eligible_threshold"] == "777"
     assert "proxiware_auto_swap_enabled" not in values
     assert "proxiware_eligibility_threshold" not in values
+
+
+def test_runtime_allow_mutation_switch_synchronizes_auto_swap(tmp_path):
+    app = _app(tmp_path / "mutation-policy.db")
+    from app.services.proxiware_health import set_proxiware_runtime_mutation
+
+    with app.app_context():
+        db = get_db()
+        set_proxiware_runtime_mutation(db, True)
+        db.commit()
+        enabled = dict(
+            db.execute(
+                "SELECT key,value FROM settings WHERE key IN ('proxiware_auto_swap','proxiware_allow_mutation')"
+            ).fetchall()
+        )
+        set_proxiware_runtime_mutation(db, False)
+        db.commit()
+        disabled = dict(
+            db.execute(
+                "SELECT key,value FROM settings WHERE key IN ('proxiware_auto_swap','proxiware_allow_mutation')"
+            ).fetchall()
+        )
+
+    assert enabled == {"proxiware_auto_swap": "1", "proxiware_allow_mutation": "1"}
+    assert disabled == {"proxiware_auto_swap": "0", "proxiware_allow_mutation": "0"}
 
 
 def test_swap_schema_does_not_require_core_proxies_table(tmp_path):

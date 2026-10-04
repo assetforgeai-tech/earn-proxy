@@ -900,10 +900,12 @@ def test_blocked_security_errors_pause_auto_swap_and_do_not_retry(app):
         mark_swap_blocked(db, job_id, error_code="captcha_required", blocked_at=now)
         job = db.execute("SELECT * FROM swap_jobs WHERE id=?", (job_id,)).fetchone()
         setting = db.execute("SELECT value FROM settings WHERE key='proxiware_auto_swap'").fetchone()
+        mutation = db.execute("SELECT value FROM settings WHERE key='proxiware_allow_mutation'").fetchone()
         assert queue_eligible_swaps(db, now=now + timedelta(hours=1)) == 0
     assert job["state"] == "blocked"
     assert job["reason"] == "manual_action_required"
     assert setting["value"] == "0"
+    assert mutation["value"] == "0"
 
 
 def test_secret_storage_is_encrypted_write_only_and_blank_preserves(app):

@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 
 from app.services.proxiware_crypto import decrypt_assignment_secret, ensure_worker_columns
 from app.services.proxiware_dashboard import dashboard_address_endpoint, normalize_dashboard_address
-from app.services.proxiware_health import is_proxiware_automation_paused
+from app.services.proxiware_health import is_proxiware_automation_paused, set_proxiware_runtime_mutation
 from app.services.settings import get_setting
 
 PROVIDER = "proxiware"
@@ -113,7 +113,7 @@ def _pause_auto_swap_no_commit(db, *, now: datetime | None = None) -> None:
             "1" if current is not None and str(current["value"]) == "1" else "0",
             now=now,
         )
-    _set_setting_no_commit(db, "proxiware_auto_swap", "0", now=now)
+    set_proxiware_runtime_mutation(db, False, now=now)
 
 
 def _safe_code(value: object, default: str = "provider_error") -> str:
@@ -213,11 +213,13 @@ def _execute_sql_script(db, script: str) -> None:
         db.execute(pending)
 
 
-PROXIWARE_SCHEMA_VERSION = "2026-09-29-2"
+PROXIWARE_SCHEMA_VERSION = "2026-10-04-1"
 
 
 def _proxiware_swap_schema_is_current(db) -> bool:
     if not _table_exists(db, "settings"):
+        return False
+    if db.execute("SELECT 1 FROM settings WHERE key='proxiware_allow_mutation'").fetchone() is None:
         return False
     # Existing production databases predate the marker.  Treat a complete
     # schema as ready without running DDL on every request; old/incomplete
@@ -721,6 +723,11 @@ def _ensure_proxiware_swap_schema(db) -> None:
     )
     db.execute(
         "INSERT OR IGNORE INTO settings(key,value,updated_at) "
+        "SELECT 'proxiware_allow_mutation',value,? FROM settings WHERE key='proxiware_auto_swap'",
+        (now,),
+    )
+    db.execute(
+        "INSERT OR IGNORE INTO settings(key,value,updated_at) "
         "SELECT 'proxiware_auto_swap_intent',value,? FROM settings WHERE key='proxiware_auto_swap'",
         (now,),
     )
@@ -1101,6 +1108,7 @@ def revalidate_swap_job(
     *,
     now: datetime | None = None,
     allow_manual: bool = False,
+    require_mutation: bool = False,
     claim_token: str | None = None,
     enter_mutation: bool = False,
 ) -> SwapDecision:
@@ -1135,6 +1143,11 @@ def revalidate_swap_job(
             and get_setting(db, "proxiware_auto_swap", "0") != "1"
         ):
             decision = SwapDecision(False, "manual_action_required", int(job["subscription_id"]))
+        elif require_mutation and (
+            get_setting(db, "proxiware_auto_swap", "0") != "1"
+            or get_setting(db, "proxiware_allow_mutation", "0") != "1"
+        ):
+            decision = SwapDecision(False, "mutation_disabled", int(job["subscription_id"]))
         else:
             decision = None
         try:

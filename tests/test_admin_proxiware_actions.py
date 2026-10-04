@@ -68,11 +68,28 @@ def test_settings_post_is_bounded_and_auto_swap_defaults_off(client, db):
     assert response.status_code in {302, 303}
     values = dict(db.execute("SELECT key,value FROM settings WHERE key LIKE 'proxiware_%'").fetchall())
     assert values["proxiware_auto_swap"] == "1"
+    assert values["proxiware_auto_swap_intent"] == "1"
+    assert values["proxiware_allow_mutation"] == "1"
     assert values["proxiware_eligible_threshold"] == "1"
     assert values["proxiware_cooldown_seconds"] == "60"
     assert values["proxiware_worker_concurrency"] == "20"
     assert values["proxiware_retry_limit"] == "5"
     assert values["proxiware_distribution_enabled"] == "1"
+
+    client.post(
+        "/admin/providers/proxiware/settings",
+        data={
+            "eligibility_threshold": "1000",
+            "worker_concurrency": "1",
+            "retry_limit": "2",
+            "cooldown_seconds": "60",
+            "ui": "1",
+        },
+    )
+    values = dict(db.execute("SELECT key,value FROM settings WHERE key LIKE 'proxiware_%'").fetchall())
+    assert values["proxiware_auto_swap"] == "0"
+    assert values["proxiware_auto_swap_intent"] == "0"
+    assert values["proxiware_allow_mutation"] == "0"
 
 
 def test_read_only_actions_fail_closed_without_provider_adapters(client):
@@ -422,7 +439,10 @@ def test_manual_swap_route_fails_closed_without_adapter(client, db):
 
 
 def test_manual_swap_route_executes_only_selected_job_with_injected_adapter(client, app, db):
+    from app.services.proxiware_credentials import set_auto_swap_preference
+
     job_id = _swap_job(db)
+    set_auto_swap_preference(db, True)
     login_admin(client)
 
     class Adapter:

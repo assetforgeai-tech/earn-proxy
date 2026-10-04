@@ -21,6 +21,7 @@ from app.services.proxiware_crypto import (
     ensure_worker_columns,
     worker_profile,
 )
+from app.services.proxiware_health import set_proxiware_runtime_mutation
 
 PROVIDER = "proxiware"
 SECRET_NAMES = frozenset({"login_email", "login_password", "api_key", "captcha_api_key"})
@@ -349,11 +350,7 @@ def mark_manual_action_required(db, error_code: str, *, now: datetime | None = N
             "last_error_code=excluded.last_error_code,updated_at=excluded.updated_at",
             (PROVIDER, "manual_action_required", safe, timestamp),
         )
-        db.execute(
-            "INSERT INTO settings(key,value,updated_at) VALUES('proxiware_auto_swap','0',?) "
-            "ON CONFLICT(key) DO UPDATE SET value='0',updated_at=excluded.updated_at",
-            (timestamp,),
-        )
+        set_proxiware_runtime_mutation(db, False, now=now)
         if owns:
             db.commit()
     except Exception:
@@ -392,20 +389,34 @@ def record_session_renewal_failure(
 
 
 def set_auto_swap_preference(db, enabled: bool, *, now: datetime | None = None) -> None:
-    """Persist operator intent separately from the fail-closed runtime gate."""
+    """Persist operator intent and both linked runtime controls atomically."""
 
-    from app.services.settings import set_setting
-
+    timestamp = _iso(now)
     value = "1" if enabled else "0"
-    set_setting(db, "proxiware_auto_swap_intent", value)
-    set_setting(db, "proxiware_auto_swap", value)
+    owns = not db.in_transaction
+    if owns:
+        db.execute("BEGIN IMMEDIATE")
+    try:
+        db.execute(
+            "INSERT INTO settings(key,value,updated_at) VALUES('proxiware_auto_swap_intent',?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+            (value, timestamp),
+        )
+        set_proxiware_runtime_mutation(db, enabled, now=now)
+        if owns:
+            db.commit()
+    except Exception:
+        if owns and db.in_transaction:
+            db.rollback()
+        raise
 
 
 def restore_auto_swap_intent(db, *, now: datetime | None = None) -> bool:
-    from app.services.settings import get_setting, set_setting
+    from app.services.settings import get_setting
 
     enabled = get_setting(db, "proxiware_auto_swap_intent", "0") == "1"
-    set_setting(db, "proxiware_auto_swap", "1" if enabled else "0")
+    set_proxiware_runtime_mutation(db, enabled, now=now)
+    db.commit()
     return enabled
 
 

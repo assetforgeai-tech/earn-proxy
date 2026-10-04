@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 AUTOMATION_PAUSE_KEY = "proxiware_automation_paused"
+RUNTIME_MUTATION_KEYS = ("proxiware_auto_swap", "proxiware_allow_mutation")
 
 
 def _iso(now: datetime | None = None) -> str:
@@ -12,6 +13,43 @@ def _iso(now: datetime | None = None) -> str:
     if current.tzinfo is None:
         current = current.replace(tzinfo=UTC)
     return current.astimezone(UTC).isoformat()
+
+
+def set_proxiware_runtime_mutation(db, enabled: bool, *, now: datetime | None = None) -> None:
+    """Keep auto-swap and its runtime mutation permission in sync."""
+
+    timestamp = _iso(now)
+    value = "1" if enabled else "0"
+    for key in RUNTIME_MUTATION_KEYS:
+        db.execute(
+            "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+            (key, value, timestamp),
+        )
+
+
+def record_swap_mutation_readiness(
+    db,
+    ready: bool,
+    *,
+    error_code: str = "",
+    now: datetime | None = None,
+) -> None:
+    """Persist safe readiness metadata reported by the configured swap worker."""
+
+    timestamp = _iso(now)
+    values = {
+        "proxiware_swap_worker_mutation_ready": "1" if ready else "0",
+        "proxiware_swap_worker_mutation_readiness_at": timestamp,
+        "proxiware_swap_worker_mutation_error_code": str(error_code or "").strip().lower()[:64],
+    }
+    for key, value in values.items():
+        db.execute(
+            "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+            (key, value, timestamp),
+        )
+    db.commit()
 
 
 def record_worker_heartbeat(
@@ -58,4 +96,10 @@ def is_proxiware_automation_paused(db) -> bool:
     return bool(row and str(row["value"] or "").strip() == "1")
 
 
-__all__ = ["AUTOMATION_PAUSE_KEY", "is_proxiware_automation_paused", "record_worker_heartbeat"]
+__all__ = [
+    "AUTOMATION_PAUSE_KEY",
+    "is_proxiware_automation_paused",
+    "record_swap_mutation_readiness",
+    "record_worker_heartbeat",
+    "set_proxiware_runtime_mutation",
+]

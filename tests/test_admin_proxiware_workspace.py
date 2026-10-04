@@ -18,7 +18,7 @@ def test_proxiware_workspace_is_admin_only_and_never_caches(client):
     assert "Credentials" in page
     assert "API key" in page
     assert "Sync now" not in page
-    assert "Mutation adapter disabled" in page
+    assert "Automatic swaps cannot run until the mutation adapter is enabled." not in page
     assert "manual_action_required" not in page
 
 
@@ -54,6 +54,59 @@ def test_proxiware_overview_marks_stale_worker_heartbeat(client, db):
     page = client.get("/admin/providers/proxiware").get_data(as_text=True)
 
     assert "Worker heartbeat stale" in page
+
+
+def test_auto_swap_warning_uses_fresh_worker_mutation_readiness(client, db):
+    from datetime import UTC, datetime
+
+    from app.services.settings import set_setting
+
+    set_setting(db, "proxiware_auto_swap", "1")
+    set_setting(db, "proxiware_allow_mutation", "1")
+    set_setting(db, "proxiware_session_status", "active")
+    login_admin(client)
+    page = client.get("/admin/providers/proxiware").get_data(as_text=True)
+
+    assert "Swap worker has not confirmed mutation readiness." in page
+
+    now = datetime.now(UTC).isoformat()
+    set_setting(db, "proxiware_swap_worker_status", "idle")
+    set_setting(db, "proxiware_swap_worker_heartbeat_at", now)
+    set_setting(db, "proxiware_swap_worker_mutation_ready", "1")
+    set_setting(db, "proxiware_swap_worker_mutation_readiness_at", now)
+    page = client.get("/admin/providers/proxiware").get_data(as_text=True)
+
+    assert "Swap worker has not confirmed mutation readiness." not in page
+
+    set_setting(db, "proxiware_swap_worker_mutation_readiness_at", "2020-01-01T00:00:00+00:00")
+    page = client.get("/admin/providers/proxiware").get_data(as_text=True)
+
+    assert "Swap worker has not confirmed mutation readiness." in page
+
+
+def test_auto_swap_warning_ignores_adapter_readiness_when_auto_swap_is_off(client, db):
+    from app.services.settings import set_setting
+
+    set_setting(db, "proxiware_auto_swap", "0")
+    set_setting(db, "proxiware_allow_mutation", "0")
+    login_admin(client)
+    page = client.get("/admin/providers/proxiware").get_data(as_text=True)
+
+    assert "Swap worker has not confirmed mutation readiness." not in page
+
+
+def test_policy_form_preserves_auto_swap_intent_when_runtime_is_paused(client, db):
+    from app.services.settings import set_setting
+
+    set_setting(db, "proxiware_auto_swap_intent", "1")
+    set_setting(db, "proxiware_auto_swap", "0")
+    set_setting(db, "proxiware_allow_mutation", "0")
+    login_admin(client)
+
+    page = client.get("/admin/providers/proxiware/settings").get_data(as_text=True)
+
+    assert 'name="auto_swap_enabled" checked' in page
+    assert "Session/challenge errors pause runtime but preserve this choice." in page
 
 
 def test_intentional_automation_pause_is_not_reported_as_stale(client, db):
@@ -375,6 +428,53 @@ def test_proxiware_inventory_all_count_matches_assignment_count(client, db):
 
     assert 'class="inventory-count all"' in page
     assert "<span>All</span><strong>1</strong>" in page
+
+
+def test_proxiware_inventory_excludes_missing_assignments_from_current_counts(client, db):
+    login_admin(client)
+    ensure_proxiware_swap_schema(db)
+    now = "2026-09-25T00:00:00+00:00"
+    missing_at = "2026-09-25T07:55:10+00:00"
+    db.execute(
+        "INSERT INTO provider_subscriptions(provider,external_id,status,created_at,updated_at) "
+        "VALUES('proxiware','missing-filter-sub','active',?,?)",
+        (now, now),
+    )
+    subscription_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.execute(
+        "INSERT INTO provider_assignments(subscription_id,provider,external_id,host,port,status,live_status,qualification,exit_ip,created_at,updated_at) "
+        "VALUES(?,'proxiware','current-assignment','current.example',8080,'active','live','allow','203.0.113.44',?,?)",
+        (subscription_id, now, now),
+    )
+    db.execute(
+        "INSERT INTO provider_assignments(subscription_id,provider,external_id,host,port,status,live_status,qualification,exit_ip,missing_at,created_at,updated_at) "
+        "VALUES(?,'proxiware','historical-assignment','historical.example',8080,'missing','live','risk','203.0.113.44',?,?,?)",
+        (subscription_id, missing_at, now, now),
+    )
+    db.execute(
+        "INSERT INTO provider_assignments(subscription_id,provider,external_id,host,port,status,live_status,qualification,created_at,updated_at) "
+        "VALUES(?,'proxiware','status-only-assignment','status-only.example',8080,'missing','live','risk',?,?)",
+        (subscription_id, now, now),
+    )
+    db.commit()
+
+    inventory = client.get("/admin/providers/proxiware/inventory").get_data(as_text=True)
+    duplicates = client.get("/admin/providers/proxiware/inventory?duplicate=duplicate").get_data(as_text=True)
+    overview = client.get("/admin/providers/proxiware").get_data(as_text=True)
+
+    assert "current.example:8080" in inventory
+    assert "historical.example:8080" not in inventory
+    assert "status-only.example:8080" not in inventory
+    assert "Showing 1–1 of 1" in inventory
+    assert "<span>All</span><strong>1</strong>" in inventory
+    assert "<span>Online</span><strong>1</strong>" in inventory
+    assert "<span>Replace needed</span><strong>0</strong>" in inventory
+    assert "<span>Repeated network</span><strong>0</strong>" in inventory
+    assert "historical.example:8080" not in duplicates
+    assert "status-only.example:8080" not in duplicates
+    assert "current.example:8080" not in duplicates
+    assert "<article><span>Proxies</span><strong>1</strong>" in overview
+    assert "<article><span>Online</span><strong>1</strong>" in overview
 
 
 def test_proxiware_online_filter_matches_canonical_live_value(client, db):

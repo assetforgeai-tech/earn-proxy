@@ -290,9 +290,14 @@ def test_manual_action_pauses_only_canonical_auto_swap_setting(app):
         )
         db.commit()
         mark_manual_action_required(db, "captcha_timeout")
-        values = dict(db.execute("SELECT key,value FROM settings WHERE key LIKE 'proxiware_auto_swap%'").fetchall())
+        values = dict(
+            db.execute(
+                "SELECT key,value FROM settings WHERE key IN ('proxiware_auto_swap','proxiware_allow_mutation')"
+            ).fetchall()
+        )
 
     assert values["proxiware_auto_swap"] == "0"
+    assert values["proxiware_allow_mutation"] == "0"
     assert "proxiware_auto_swap_enabled" not in values
 
 
@@ -305,6 +310,7 @@ def test_successful_session_renewal_restores_explicit_auto_swap_intent(app):
         )
         set_setting(db, "proxiware_auto_swap_intent", "1")
         set_setting(db, "proxiware_auto_swap", "0")
+        set_setting(db, "proxiware_allow_mutation", "0")
         result = renew_provider_session(
             db,
             FakeBrowser(),
@@ -313,9 +319,11 @@ def test_successful_session_renewal_restores_explicit_auto_swap_intent(app):
             page_url="https://app.proxiware.com/login",
         )
         current = get_setting(db, "proxiware_auto_swap", "0")
+        mutation = get_setting(db, "proxiware_allow_mutation", "0")
 
     assert result.state == "active"
     assert current == "1"
+    assert mutation == "1"
 
 
 def test_provider_credentials_are_explicitly_scoped_to_proxiware(app):

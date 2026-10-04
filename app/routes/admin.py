@@ -232,6 +232,8 @@ def _proxiware_snapshot(db, area: str, args) -> dict[str, object]:
         "cooldown_seconds": get_setting(db, "proxiware_cooldown_seconds", "60"),
     }
     auto_swap_enabled = get_setting(db, "proxiware_auto_swap", "0") == "1"
+    auto_swap_intent_enabled = get_setting(db, "proxiware_auto_swap_intent", "0") == "1"
+    allow_mutation_enabled = get_setting(db, "proxiware_allow_mutation", "0") == "1"
     distribution_enabled = get_setting(db, "proxiware_distribution_enabled", "0") == "1"
     session_status = get_setting(db, "proxiware_session_status", "not_configured")
     worker_status = get_setting(db, "proxiware_worker_status", "stopped")
@@ -321,6 +323,16 @@ def _proxiware_snapshot(db, area: str, args) -> dict[str, object]:
         summary["worker_alert"] = ""
         summary["worker_alert_url"] = ""
     summary["worker_heartbeats"] = heartbeat_states
+    swap_readiness_at = _parse_admin_timestamp(get_setting(db, "proxiware_swap_worker_mutation_readiness_at", ""))
+    swap_readiness_age = now_utc - swap_readiness_at if swap_readiness_at else None
+    swap_worker_status = heartbeat_states.get("swap_worker", "unknown")
+    swap_adapter_available = bool(
+        allow_mutation_enabled
+        and get_setting(db, "proxiware_swap_worker_mutation_ready", "0") == "1"
+        and swap_readiness_age is not None
+        and timedelta(0) <= swap_readiness_age <= timedelta(minutes=10)
+        and swap_worker_status in {"idle", "running", "success", "reconciliation_required"}
+    )
     summary["session_alert_url"] = (
         _proxiware_area_url("session") if session_status not in {"healthy", "active", "ready"} else ""
     )
@@ -351,23 +363,29 @@ def _proxiware_snapshot(db, area: str, args) -> dict[str, object]:
         assignment_columns = _proxiware_columns(db, assignment_table)
         provider_clause = "provider=?" if "provider" in assignment_columns else "0=1"
         provider_params = ("proxiware",) if provider_clause == "provider=?" else ()
+        active_scope = [provider_clause]
+        if "missing_at" in assignment_columns:
+            active_scope.append("missing_at IS NULL")
+        if "status" in assignment_columns:
+            active_scope.append("LOWER(COALESCE(status,''))<>'missing'")
+        assignment_scope = " AND ".join(active_scope)
         summary["assignments"] = int(
             db.execute(
-                f"SELECT COUNT(*) AS count FROM {assignment_table} WHERE {provider_clause}", provider_params
+                f"SELECT COUNT(*) AS count FROM {assignment_table} WHERE {assignment_scope}", provider_params
             ).fetchone()["count"]
         )
         summary["all"] = summary["assignments"]
         if "live_status" in assignment_columns:
             summary["live"] = int(
                 db.execute(
-                    f"SELECT COUNT(*) AS count FROM {assignment_table} WHERE {provider_clause} "
+                    f"SELECT COUNT(*) AS count FROM {assignment_table} WHERE {assignment_scope} "
                     "AND LOWER(COALESCE(live_status,'')) IN (?,?)",
                     (*provider_params, "live", "online"),
                 ).fetchone()["count"]
             )
             summary["dead"] = int(
                 db.execute(
-                    f"SELECT COUNT(*) AS count FROM {assignment_table} WHERE {provider_clause} "
+                    f"SELECT COUNT(*) AS count FROM {assignment_table} WHERE {assignment_scope} "
                     "AND LOWER(COALESCE(live_status,'')) IN (?,?)",
                     (*provider_params, "dead", "offline"),
                 ).fetchone()["count"]
@@ -376,14 +394,14 @@ def _proxiware_snapshot(db, area: str, args) -> dict[str, object]:
             for state in ("allow", "risk", "pending"):
                 summary[state] = int(
                     db.execute(
-                        f"SELECT COUNT(*) AS count FROM {assignment_table} WHERE {provider_clause} AND LOWER(COALESCE(qualification,''))=?",
+                        f"SELECT COUNT(*) AS count FROM {assignment_table} WHERE {assignment_scope} AND LOWER(COALESCE(qualification,''))=?",
                         (*provider_params, state),
                     ).fetchone()["count"]
                 )
         if "exit_ip" in assignment_columns:
             summary["duplicate"] = int(
                 db.execute(
-                    f"SELECT COUNT(*) AS count FROM {assignment_table} WHERE {provider_clause} AND exit_ip IS NOT NULL AND trim(exit_ip)<>'' AND exit_ip IN (SELECT exit_ip FROM {assignment_table} WHERE {provider_clause} AND exit_ip IS NOT NULL AND trim(exit_ip)<>'' GROUP BY exit_ip HAVING COUNT(*)>1)",
+                    f"SELECT COUNT(*) AS count FROM {assignment_table} WHERE {assignment_scope} AND exit_ip IS NOT NULL AND trim(exit_ip)<>'' AND exit_ip IN (SELECT exit_ip FROM {assignment_table} WHERE {assignment_scope} AND exit_ip IS NOT NULL AND trim(exit_ip)<>'' GROUP BY exit_ip HAVING COUNT(*)>1)",
                     (*provider_params, *provider_params),
                 ).fetchone()["count"]
             )
@@ -459,7 +477,7 @@ def _proxiware_snapshot(db, area: str, args) -> dict[str, object]:
             )
             selected = [name for name in safe if name in columns]
             if selected:
-                where = ["provider=?"] if "provider" in columns else ["0=1"]
+                where = [assignment_scope]
                 params: list[object] = ["proxiware"] if "provider" in columns else []
                 if query["q"]:
                     searchable = [
@@ -502,10 +520,10 @@ def _proxiware_snapshot(db, area: str, args) -> dict[str, object]:
                 if query["duplicate"] == "duplicate" and "exit_ip" in columns:
                     where.append(
                         "exit_ip IS NOT NULL AND trim(exit_ip)<>'' AND exit_ip IN "
-                        "(SELECT exit_ip FROM provider_assignments WHERE provider=? AND exit_ip IS NOT NULL "
+                        f"(SELECT exit_ip FROM provider_assignments WHERE {assignment_scope} AND exit_ip IS NOT NULL "
                         "AND trim(exit_ip)<>'' GROUP BY exit_ip HAVING COUNT(*)>1)"
                     )
-                    params.append("proxiware")
+                    params.extend(provider_params)
                 if query["subscription"] and "subscription_id" in columns:
                     where.append("CAST(subscription_id AS TEXT) LIKE ?")
                     params.append(f"%{query['subscription']}%")
@@ -651,7 +669,9 @@ def _proxiware_snapshot(db, area: str, args) -> dict[str, object]:
                                 "reconciliation_required": value.get("state") == "reconciliation_required",
                                 "retryable": value.get("state") in {"failed", "blocked", "canceled"},
                                 "cancelable": value.get("state") in {"pending", "running"},
-                                "manual_available": value.get("state") in {"pending", "failed", "blocked", "canceled"},
+                                "manual_available": auto_swap_enabled
+                                and allow_mutation_enabled
+                                and value.get("state") in {"pending", "failed", "blocked", "canceled"},
                                 "retry_url": url_for("admin.proxiware_swap_retry", job_id=int(value["id"]))
                                 if value.get("id") is not None
                                 else "#",
@@ -781,12 +801,11 @@ def _proxiware_snapshot(db, area: str, args) -> dict[str, object]:
         "worker_paused": worker_paused,
         "automation_paused": automation_paused,
         "auto_swap_enabled": auto_swap_enabled,
+        "auto_swap_intent_enabled": auto_swap_intent_enabled,
+        "allow_mutation_enabled": allow_mutation_enabled,
         "distribution_enabled": distribution_enabled,
         "sync_available": bool(credentials["proxiware_api_key"]),
-        "swap_adapter_available": bool(
-            current_app.extensions.get("proxiware_browser_adapter_factory")
-            and current_app.extensions.get("proxiware_captcha_adapter_factory")
-        ),
+        "swap_adapter_available": swap_adapter_available,
         "credentials": credentials,
         "settings": settings,
         "area_label": dict((key, label) for key, label in PROXIWARE_AREAS).get(area, area.title()),
@@ -1822,6 +1841,12 @@ def proxiware_swap_manual(job_id: int):
             "Manual swap did not run; resolve the provider action state first.",
             503,
             code=str(result.get("error_code") or "manual_action_required"),
+        )
+    if state == "mutation_disabled":
+        return _proxiware_action_error(
+            "Manual swap is disabled because Auto-swap and allow-mutation are off.",
+            409,
+            code=state,
         )
     if state in {"idle", "stopped"}:
         return _proxiware_action_error("Manual swap was not claimed.", 409, code="conflict")

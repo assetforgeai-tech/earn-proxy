@@ -27,7 +27,11 @@ from app.services.proxiware_credentials import (
     renew_provider_session,
     restore_auto_swap_intent,
 )
-from app.services.proxiware_health import is_proxiware_automation_paused, record_worker_heartbeat
+from app.services.proxiware_health import (
+    is_proxiware_automation_paused,
+    record_swap_mutation_readiness,
+    record_worker_heartbeat,
+)
 from app.services.proxiware_swap import (
     MANUAL_ACTION_CODES,
     claim_next_swap,
@@ -291,9 +295,18 @@ class ProxiwareSwapRunner:
                 return {"status": "paused"}
             auto_swap_enabled = get_setting(db, "proxiware_auto_swap", "0") == "1"
             auto_swap_intent = get_setting(db, "proxiware_auto_swap_intent", "0") == "1"
+            mutation_enabled = get_setting(db, "proxiware_allow_mutation", "0") == "1"
             if not allow_manual and not auto_swap_enabled and not auto_swap_intent:
                 record_worker_heartbeat(db, "swap_worker", "disabled")
                 return {"status": "disabled"}
+            if not allow_manual and auto_swap_enabled and not mutation_enabled:
+                record_swap_mutation_readiness(db, False, error_code="mutation_disabled")
+                record_worker_heartbeat(db, "swap_worker", "mutation_disabled", error_code="mutation_disabled")
+                return {"status": "mutation_disabled"}
+            if allow_manual and (not auto_swap_enabled or not mutation_enabled):
+                record_swap_mutation_readiness(db, False, error_code="mutation_disabled")
+                record_worker_heartbeat(db, "swap_worker", "mutation_disabled", error_code="mutation_disabled")
+                return {"status": "mutation_disabled"}
             configured_adapter = None
             if self._uses_configured_adapter:
                 if (
@@ -301,6 +314,7 @@ class ProxiwareSwapRunner:
                     or not bool(self.app.config.get("PROXIWARE_BROWSER_ALLOW_MUTATION", False))
                     or bool(self.app.config.get("PROXIWARE_BROWSER_DRY_RUN", False))
                 ):
+                    record_swap_mutation_readiness(db, False, error_code="adapter_missing")
                     record_worker_heartbeat(db, "swap_worker", "manual_action_required", error_code="adapter_missing")
                     return {"status": "manual_action_required", "error_code": "adapter_missing"}
                 try:
@@ -308,6 +322,7 @@ class ProxiwareSwapRunner:
                     adapter_holder["adapter"] = configured_adapter
                 except Exception as exc:  # noqa: BLE001 - adapter construction is a hard safety boundary
                     code = safe_swap_error(exc)
+                    record_swap_mutation_readiness(db, False, error_code=code)
                     mark_manual_action_required(db, code)
                     record_worker_heartbeat(db, "swap_worker", "manual_action_required", error_code=code)
                     return {"status": "manual_action_required", "error_code": code}
@@ -321,14 +336,20 @@ class ProxiwareSwapRunner:
                 if session_error:
                     cookies, session_error = self._renew_configured_session(db, configured_adapter)
                 if session_error:
+                    record_swap_mutation_readiness(db, False, error_code=session_error)
                     mark_manual_action_required(db, session_error)
                     record_worker_heartbeat(db, "swap_worker", "manual_action_required", error_code=session_error)
                     return {"status": "manual_action_required", "error_code": session_error}
                 if not allow_manual and auto_swap_intent:
                     restore_auto_swap_intent(db)
+                    mutation_enabled = get_setting(db, "proxiware_allow_mutation", "0") == "1"
                 if not allow_manual and get_setting(db, "proxiware_auto_swap", "0") != "1":
                     record_worker_heartbeat(db, "swap_worker", "disabled")
                     return {"status": "disabled"}
+                if not allow_manual and not mutation_enabled:
+                    record_swap_mutation_readiness(db, False, error_code="mutation_disabled")
+                    record_worker_heartbeat(db, "swap_worker", "mutation_disabled", error_code="mutation_disabled")
+                    return {"status": "mutation_disabled"}
                 try:
                     restore = getattr(configured_adapter, "restore_session", None)
                     if not callable(restore):
@@ -338,9 +359,12 @@ class ProxiwareSwapRunner:
                     code = safe_swap_error(exc)
                     if code == "provider_error":
                         code = "manual_action_required"
+                    record_swap_mutation_readiness(db, False, error_code=code)
                     mark_manual_action_required(db, code)
                     record_worker_heartbeat(db, "swap_worker", "manual_action_required", error_code=code)
                     return {"status": "manual_action_required", "error_code": code}
+                if getattr(configured_adapter, "allow_mutation", False) is True and mutation_enabled:
+                    record_swap_mutation_readiness(db, True)
             if not allow_manual and job_id is None:
                 queue_eligible_swaps(db)
             job = claim_next_swap(db, claim_seconds=self.claim_seconds, job_id=job_id)
@@ -370,6 +394,7 @@ class ProxiwareSwapRunner:
                     db,
                     int(job["id"]),
                     allow_manual=allow_manual,
+                    require_mutation=True,
                     claim_token=job["claim_token"],
                 )
                 if not decision.allowed:
@@ -390,6 +415,7 @@ class ProxiwareSwapRunner:
                     db,
                     int(job["id"]),
                     allow_manual=allow_manual,
+                    require_mutation=True,
                     claim_token=job["claim_token"],
                     enter_mutation=True,
                 )

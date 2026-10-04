@@ -43,6 +43,7 @@ def _queue(app):
         db = get_db()
         sub_id = _seed(db)
         set_setting(db, "proxiware_auto_swap", "1")
+        set_setting(db, "proxiware_allow_mutation", "1")
         assert queue_eligible_swaps(db) == 1
         return sub_id
 
@@ -91,6 +92,7 @@ def test_auto_swap_runner_queues_an_eligible_subscription_before_claiming(app):
         db = get_db()
         _seed(db)
         set_setting(db, "proxiware_auto_swap", "1")
+        set_setting(db, "proxiware_allow_mutation", "1")
 
     class Adapter:
         def swap(self, _job):
@@ -345,6 +347,30 @@ def test_configured_swap_runner_does_not_claim_when_mutation_adapter_is_disabled
     with app.app_context():
         row = get_db().execute("SELECT state,attempts FROM swap_jobs").fetchone()
     assert tuple(row) == ("pending", 0)
+
+
+def test_configured_swap_runner_requires_runtime_allow_mutation_policy(app):
+    _queue(app)
+    app.config.update(
+        PROXIWARE_BROWSER_ENABLED=True,
+        PROXIWARE_BROWSER_ALLOW_MUTATION=True,
+        PROXIWARE_BROWSER_DRY_RUN=False,
+    )
+    with app.app_context():
+        set_setting(get_db(), "proxiware_allow_mutation", "0")
+
+    result = (
+        __import__("app.proxiware_swap_service", fromlist=["ProxiwareSwapRunner"])
+        .ProxiwareSwapRunner(app=app)
+        .run_once()
+    )
+
+    assert result == {"status": "mutation_disabled"}
+    with app.app_context():
+        row = get_db().execute("SELECT state,attempts FROM swap_jobs").fetchone()
+        readiness = get_setting(get_db(), "proxiware_swap_worker_mutation_ready", "")
+    assert tuple(row) == ("pending", 0)
+    assert readiness == "0"
 
 
 def test_adapter_without_mutation_capability_is_blocked_before_mutating(app):
