@@ -4,9 +4,9 @@ from conftest import login, login_admin, register
 
 ADMIN_NAV_LABELS = (
     "Overview",
-    "Proxies",
-    "Health checker",
-    "Egress duplicates",
+    "Proxy inventory",
+    "Health checks",
+    "Duplicate networks",
     "Users",
     "Payouts",
     "Distribution API",
@@ -80,8 +80,8 @@ def test_admin_overview_is_the_only_page_with_complete_quick_links(client):
     login_admin(client)
     overview = client.get("/admin").get_data(as_text=True)
 
-    assert overview.count('class="quick-link"') == 8
-    for label in ADMIN_NAV_LABELS[1:]:
+    assert overview.count('class="quick-link"') == 4
+    for label in ("Review proxies", "Tune health checks", "Review users", "Review payouts"):
         assert f"<strong>{label}</strong>" in overview
 
     for path in (

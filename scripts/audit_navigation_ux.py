@@ -11,9 +11,9 @@ ADMIN_PASSWORD = os.environ["EARN_PROXY_ADMIN_PASSWORD"]
 
 ADMIN_ROUTES = (
     ("Overview", "/admin"),
-    ("Proxies", "/admin/proxies"),
-    ("Health checker", "/admin/checker"),
-    ("Egress duplicates", "/admin/egress-duplicates"),
+    ("Proxy inventory", "/admin/proxies"),
+    ("Health checks", "/admin/checker"),
+    ("Duplicate networks", "/admin/egress-duplicates"),
     ("Users", "/admin/users"),
     ("Payouts", "/admin/payouts"),
     ("Distribution API", "/admin/integrations"),
@@ -22,9 +22,9 @@ ADMIN_ROUTES = (
 )
 CONTRIBUTOR_ROUTES = (
     ("Overview", "/dashboard", "Your earning overview"),
-    ("Proxy pool", "/dashboard/proxies", "Manage your proxy pool"),
+    ("My proxies", "/dashboard/proxies", "Manage your proxy pool"),
     ("Earnings", "/dashboard/earnings", "Track your earnings"),
-    ("Wallet & payouts", "/dashboard/wallet", "Wallet & payouts"),
+    ("Wallet", "/dashboard/wallet", "Wallet & payouts"),
 )
 
 
@@ -43,7 +43,7 @@ def create_approved_contributor(page: Page) -> tuple[str, str]:
     page.goto(f"{BASE_URL}/register", wait_until="networkidle")
     page.get_by_label("Email").fill(email)
     page.get_by_label("Password").fill(password)
-    page.get_by_role("button", name="Register").click()
+    page.get_by_role("button", name="Create account").click()
     page.wait_for_url(f"{BASE_URL}/login")
 
     sign_in(page, ADMIN_EMAIL, ADMIN_PASSWORD, "/admin")
@@ -76,16 +76,40 @@ def assert_no_overflow(page: Page) -> None:
     assert overflow["documentWidth"] <= overflow["viewport"], f"{page.url}: {overflow}"
 
 
+def assert_admin_proxy_cards(page: Page) -> None:
+    layout = page.evaluate(
+        """() => {
+          const table = document.querySelector('.admin-proxy-table');
+          const endpoint = table?.querySelector('tbody [data-label="Endpoint"]');
+          if (!table || !endpoint) return null;
+          return {
+            tableDisplay: getComputedStyle(table).display,
+            tableWidth: table.getBoundingClientRect().width,
+            endpointWidth: endpoint.getBoundingClientRect().width,
+            endpointLabel: getComputedStyle(endpoint, '::before').content,
+          };
+        }"""
+    )
+    assert layout is not None, f"{page.url}: admin proxy inventory row is required for responsive audit"
+    assert layout["tableDisplay"] == "block", f"{page.url}: admin table is still squeezed into columns: {layout}"
+    assert layout["endpointWidth"] >= layout["tableWidth"] * 0.9, f"{page.url}: endpoint column is too narrow: {layout}"
+    assert "Endpoint" in layout["endpointLabel"], f"{page.url}: endpoint card label is missing: {layout}"
+
+
 def audit_admin(page: Page, width: int, height: int) -> None:
     page.set_viewport_size({"width": width, "height": height})
     for label, path in ADMIN_ROUTES:
-        page.goto(f"{BASE_URL}{path}", wait_until="networkidle")
+        response = page.goto(f"{BASE_URL}{path}", wait_until="networkidle")
+        if path == "/admin/transfer-proxy" and response and response.status == 503:
+            assert page.get_by_role("heading", name="Relay manager is not configured").is_visible()
         if width <= 1099:
             page.get_by_role("button", name="Open navigation").click()
         assert page.get_by_role("link", name=label, exact=True).get_attribute("aria-current") == "page"
         assert page.locator(".section-nav").count() == 0
         assert page.locator("[data-page-search]").count() == 0
         assert_no_overflow(page)
+        if path == "/admin/proxies" and width <= 900:
+            assert_admin_proxy_cards(page)
 
         if width <= 1099:
             assert page.locator("#app-sidebar").get_attribute("aria-hidden") == "false"
@@ -142,11 +166,21 @@ with sync_playwright() as playwright:
     browser = playwright.chromium.launch(headless=True)
     errors: list[str] = []
     page = browser.new_page(viewport={"width": 1440, "height": 900})
-    page.on("console", lambda message: errors.append(message.text) if message.type == "error" else None)
+
+    def collect_console_errors(message) -> None:
+        expected_relay_notice = (
+            message.type == "error"
+            and "503 (SERVICE UNAVAILABLE)" in message.text
+            and page.url.endswith("/admin/transfer-proxy")
+        )
+        if message.type == "error" and not expected_relay_notice:
+            errors.append(message.text)
+
+    page.on("console", collect_console_errors)
     page.on("pageerror", lambda error: errors.append(str(error)))
 
     sign_in(page, ADMIN_EMAIL, ADMIN_PASSWORD, "/admin")
-    for width, height in ((1440, 900), (1024, 768), (375, 812)):
+    for width, height in ((1440, 900), (1024, 768), (768, 1024), (375, 812)):
         audit_admin(page, width, height)
 
     page.set_viewport_size({"width": 1440, "height": 900})
@@ -160,7 +194,7 @@ with sync_playwright() as playwright:
     if not contributor_email or not contributor_password:
         contributor_email, contributor_password = create_approved_contributor(page)
     sign_in(page, contributor_email, contributor_password, "/dashboard")
-    for width, height in ((1440, 900), (1024, 768), (375, 812)):
+    for width, height in ((1440, 900), (1024, 768), (768, 1024), (375, 812)):
         audit_contributor(page, width, height)
 
     assert errors == [], errors

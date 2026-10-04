@@ -91,8 +91,7 @@ def test_proxy_inventory_active_quick_filters_toggle_off_individually(app, clien
     expected_filters = {
         "Online": "status",
         "SOCKS5": "protocol",
-        "Allow": "eligibility",
-        "Awaiting probe": "identity",
+        "Eligible": "eligibility",
     }
     for label, removed_filter in expected_filters.items():
         assert removed_filter not in active_links[label]
@@ -169,17 +168,17 @@ def test_proxy_inventory_filters_and_labels_global_egress_identity(app, client):
     all_rows = client.get("/dashboard/proxies").get_data(as_text=True)
     duplicate_rows = client.get("/dashboard/proxies?identity=duplicate").get_data(as_text=True)
 
-    assert "Egress identity" in all_rows
-    assert "Canonical" in all_rows
-    assert "Duplicate egress" in all_rows
-    assert "Awaiting probe" in all_rows
-    assert "Duplicate egress does not earn or enter API distribution." in all_rows
+    assert "Egress identity" not in all_rows
+    assert "Canonical" not in all_rows
+    assert "Duplicate egress" not in all_rows
+    assert "Awaiting probe" not in all_rows
+    assert "If multiple proxies use the same network address, only one can earn." in all_rows
     assert "198.51.100.10" not in all_rows
     assert "egress-b.example:9001" in duplicate_rows
     assert "egress-a.example:9000" not in duplicate_rows
     assert "egress-c.example:9002" not in duplicate_rows
     assert "Showing 1–1 of 1" in duplicate_rows
-    assert 'value="duplicate" selected' in duplicate_rows
+    assert 'name="identity"' not in duplicate_rows
 
 
 def test_proxy_inventory_keeps_untrusted_duplicate_pointer_in_awaiting_state(app, client):
@@ -220,7 +219,7 @@ def test_duplicate_egress_is_not_presented_as_earning_allow(app, client):
     row_start = page.index("effective-duplicate.example:9001")
     row = page[row_start : page.index("</tr>", row_start)]
     assert 'class="badge excluded">Not earning</span>' in row
-    assert "Duplicate egress blocks earnings and distribution" in row
+    assert "Another proxy already uses this network address." in row
     assert ">Allow<" not in row
 
 

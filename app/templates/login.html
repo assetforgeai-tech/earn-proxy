@@ -1,24 +1,30 @@
 {% extends "base.html" %}
 {% block title %}Sign in - Earn Proxy{% endblock %}
 {% block content %}
-<section class="auth-card">
-  <p class="eyebrow">EARN PROXY</p>
-  <h1>Keep your proxy fleet earning.</h1>
-  <p class="muted">Sign in to monitor masked endpoints and balance.</p>
-  {% set error_field = request.args.get('error_field', '') %}
-  <form method="post" action="{{ url_for('auth.login') }}" data-submit-once="true">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <input type="hidden" name="ui" value="1">
-    <label for="email">Email</label>
-    <input id="email" name="email" type="email" autocomplete="email" required aria-describedby="email-hint{% if error_field == 'email' %} email-error{% endif %}"{% if error_field == 'email' %} aria-invalid="true"{% endif %}>
-    <small id="email-hint" class="field-hint">Use the email associated with your account.</small>
-    {% if error_field == 'email' %}<small id="email-error" class="field-error">Check your email and try again.</small>{% endif %}
-    <label for="password">Password</label>
-    <input id="password" name="password" type="password" autocomplete="current-password" required aria-describedby="password-hint{% if error_field == 'password' %} password-error{% endif %}"{% if error_field == 'password' %} aria-invalid="true"{% endif %}>
-    <small id="password-hint" class="field-hint">Your password is never shown in the dashboard.</small>
-    {% if error_field == 'password' %}<small id="password-error" class="field-error">Check your password and try again.</small>{% endif %}
-    <button class="button primary" type="submit" data-loading-label="Signing in...">Sign in</button>
-  </form>
-  <p class="muted">New contributor? <a href="{{ url_for('auth.register') }}">Create an account</a></p>
-</section>
+<div class="auth-layout">
+  <aside class="auth-brand-panel" aria-label="Earn Proxy">
+    <div class="auth-brand-lockup"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M5 16.5V9.5M9.7 19V5M14.3 17V8M19 14.5v-5" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/></svg></span><span><strong>Earn Proxy</strong><small>Network revenue</small></span></div>
+    <div><p class="eyebrow">SIMPLE · SECURE · CLEAR</p><h2>Monitor your proxies without exposing credentials.</h2><p>Track availability, earnings, and payouts from one focused workspace.</p></div>
+  </aside>
+  <section class="auth-card">
+    <p class="eyebrow">WELCOME BACK</p>
+    <h1>Sign in</h1>
+    <p class="muted">Open your proxy and earnings dashboard.</p>
+    {% set error_field = request.args.get('error_field', '') %}
+    <form method="post" action="{{ url_for('auth.login') }}" data-submit-once="true">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="ui" value="1">
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" autocomplete="email" required aria-describedby="email-hint{% if error_field == 'email' %} email-error{% endif %}"{% if error_field == 'email' %} aria-invalid="true"{% endif %}>
+      <small id="email-hint" class="field-hint">Use the email associated with your account.</small>
+      {% if error_field == 'email' %}<small id="email-error" class="field-error">Check your email and try again.</small>{% endif %}
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required aria-describedby="password-hint{% if error_field == 'password' %} password-error{% endif %}"{% if error_field == 'password' %} aria-invalid="true"{% endif %}>
+      <small id="password-hint" class="field-hint">Your password is never shown in the dashboard.</small>
+      {% if error_field == 'password' %}<small id="password-error" class="field-error">Check your password and try again.</small>{% endif %}
+      <button class="button primary" type="submit" data-loading-label="Signing in...">Sign in</button>
+    </form>
+    <p class="muted auth-switch">New contributor? <a href="{{ url_for('auth.register') }}">Create an account</a></p>
+  </section>
+</div>
 {% endblock %}

@@ -196,6 +196,56 @@ def test_proxiware_inventory_exposes_server_side_controls(client):
     assert "Showing" in page
 
 
+def test_proxiware_inventory_labels_missing_replacement_time_as_ready(client, db):
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC).isoformat()
+    db.execute(
+        "INSERT INTO provider_subscriptions(provider,external_id,status,created_at,updated_at) "
+        "VALUES('proxiware','ready-sub','active',?,?)",
+        (now, now),
+    )
+    subscription_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.execute(
+        "INSERT INTO provider_assignments(subscription_id,provider,external_id,host,port,live_status,qualification,"
+        "created_at,updated_at) VALUES(?,'proxiware','ready-proxy','192.0.2.10',8080,'online','allow',?,?)",
+        (subscription_id, now, now),
+    )
+    db.commit()
+
+    login_admin(client)
+    page = client.get("/admin/providers/proxiware/inventory").get_data(as_text=True)
+
+    assert '<td data-label="Swap status"><span class="badge online">Ready</span></td>' in page
+
+
+def test_proxiware_inventory_marks_future_replacement_time_for_live_label(client, db):
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    ready_at = (now + timedelta(minutes=30)).isoformat()
+    timestamp = now.isoformat()
+    db.execute(
+        "INSERT INTO provider_subscriptions(provider,external_id,status,created_at,updated_at) "
+        "VALUES('proxiware','cooldown-sub','active',?,?)",
+        (timestamp, timestamp),
+    )
+    subscription_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.execute(
+        "INSERT INTO provider_assignments(subscription_id,provider,external_id,host,port,live_status,qualification,"
+        "replacement_ready_at,created_at,updated_at) "
+        "VALUES(?,'proxiware','cooldown-proxy','192.0.2.11',8080,'online','risk',?,?,?)",
+        (subscription_id, ready_at, timestamp, timestamp),
+    )
+    db.commit()
+
+    login_admin(client)
+    page = client.get("/admin/providers/proxiware/inventory").get_data(as_text=True)
+
+    assert f'data-proxiware-readiness data-ready-at="{ready_at}">Waiting</span>' in page
+    assert f'<time datetime="{ready_at}">{ready_at}</time>' in page
+
+
 def test_proxiware_secret_safe_placeholders_and_confirmations(client):
     login_admin(client)
     page = client.get("/admin/providers/proxiware/credentials").get_data(as_text=True)
@@ -281,7 +331,7 @@ def test_proxiware_overview_counts_canonical_live_status(client, db):
     overview = client.get("/admin/providers/proxiware").get_data(as_text=True)
     # The canonical worker value is live, while the UI label is Online.
     assert ">Online</span>" in page
-    assert "<article><span>Live</span><strong>1</strong>" in overview
+    assert "<article><span>Online</span><strong>1</strong>" in overview
 
 
 def test_proxiware_overview_counts_canonical_dead_status(client, db):
@@ -302,7 +352,7 @@ def test_proxiware_overview_counts_canonical_dead_status(client, db):
 
     page = client.get("/admin/providers/proxiware/inventory").get_data(as_text=True)
 
-    assert "<span>Dead</span><strong>1</strong>" in page
+    assert "<span>Offline</span><strong>1</strong>" in page
 
 
 def test_proxiware_inventory_all_count_matches_assignment_count(client, db):

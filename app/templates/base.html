@@ -30,26 +30,28 @@
       </div>
       <nav class="sidebar-nav" aria-label="{{ 'Admin' if is_admin else 'Contributor' }} workspace">
         {% if is_admin %}
-        <p class="nav-label">Workspace</p>
+        <p class="nav-label">Overview</p>
         <a class="nav-item" data-nav="overview"{% if current_nav == 'overview' %} aria-current="page"{% endif %} href="{{ url_for('admin.dashboard') }}">
           <svg viewBox="0 0 24 24" fill="none"><path d="M4 13h6V4H4v9Zm0 7h6v-4H4v4Zm10 0h6v-9h-6v9Zm0-16v4h6V4h-6Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><span>Overview</span>
         </a>
+        <p class="nav-label">Proxy operations</p>
         <a class="nav-item" data-nav="proxies"{% if current_nav == 'proxies' %} aria-current="page"{% endif %} href="{{ url_for('admin.proxies') }}">
-          <svg viewBox="0 0 24 24" fill="none"><path d="M4 6.5h16v11H4v-11Zm3-3h10M8 10h8m-8 3h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Proxies</span>
+          <svg viewBox="0 0 24 24" fill="none"><path d="M4 6.5h16v11H4v-11Zm3-3h10M8 10h8m-8 3h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Proxy inventory</span>
         </a>
         <a class="nav-item" data-nav="checker"{% if current_nav == 'checker' %} aria-current="page"{% endif %} href="{{ url_for('admin.checker') }}">
-          <svg viewBox="0 0 24 24" fill="none"><path d="M4 6h16M7 12h10M10 18h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Health checker</span>
+          <svg viewBox="0 0 24 24" fill="none"><path d="M4 6h16M7 12h10M10 18h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Health checks</span>
         </a>
         <a class="nav-item" data-nav="egress_duplicates"{% if current_nav == 'egress_duplicates' %} aria-current="page"{% endif %} href="{{ url_for('admin.egress_duplicates') }}">
-          <svg viewBox="0 0 24 24" fill="none"><path d="M7 4h10M7 20h10M5 8h14M5 16h14M9 4v4m6-4v4m-6 8v4m6-4v4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>Egress duplicates</span>
+          <svg viewBox="0 0 24 24" fill="none"><path d="M7 4h10M7 20h10M5 8h14M5 16h14M9 4v4m6-4v4m-6 8v4m6-4v4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>Duplicate networks</span>
         </a>
+        <p class="nav-label">Accounts &amp; payments</p>
         <a class="nav-item" data-nav="users"{% if current_nav == 'users' %} aria-current="page"{% endif %} href="{{ url_for('admin.users') }}">
           <svg viewBox="0 0 24 24" fill="none"><path d="M8 10a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm8.5-1a3.5 3.5 0 1 0 0-7M2 21v-3a5 5 0 0 1 5-5h2a5 5 0 0 1 5 5v3m1-8h1a5 5 0 0 1 5 5v3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>Users</span>
         </a>
         <a class="nav-item" data-nav="payouts"{% if current_nav == 'payouts' %} aria-current="page"{% endif %} href="{{ url_for('admin.payouts') }}">
           <svg viewBox="0 0 24 24" fill="none"><path d="M3.5 7.5h17v11h-17v-11Zm2-3h13v3h-13v-3Zm10 8h3" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><span>Payouts</span>
         </a>
-        <p class="nav-label">Operations</p>
+        <p class="nav-label">Integrations</p>
         <a class="nav-item" data-nav="integrations"{% if current_nav == 'integrations' %} aria-current="page"{% endif %} href="{{ url_for('admin.integrations') }}">
           <svg viewBox="0 0 24 24" fill="none"><path d="m8 8-4 4 4 4m8-8 4 4-4 4m-2.5-11-3 14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Distribution API</span>
         </a>
@@ -69,17 +71,17 @@
           <svg viewBox="0 0 24 24" fill="none"><path d="M4 13h6V4H4v9Zm0 7h6v-4H4v4Zm10 0h6v-9h-6v9Zm0-16v4h6V4h-6Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><span>Overview</span>
         </a>
         <a class="nav-item" data-nav="proxy_pool"{% if current_nav == 'proxy_pool' %} aria-current="page"{% endif %} href="{{ url_for('dashboard.proxies') }}">
-          <svg viewBox="0 0 24 24" fill="none"><path d="M5 7.5A2.5 2.5 0 1 0 5 2.5a2.5 2.5 0 0 0 0 5ZM19 7.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM12 21.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM7.2 6.2l3.2 10.6M16.8 6.2l-3.2 10.6M7.5 5h9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>Proxy pool</span>
+          <svg viewBox="0 0 24 24" fill="none"><path d="M5 7.5A2.5 2.5 0 1 0 5 2.5a2.5 2.5 0 0 0 0 5ZM19 7.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM12 21.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM7.2 6.2l3.2 10.6M16.8 6.2l-3.2 10.6M7.5 5h9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>My proxies</span>
         </a>
         <a class="nav-item" data-nav="earnings"{% if current_nav == 'earnings' %} aria-current="page"{% endif %} href="{{ url_for('dashboard.earnings') }}"><svg viewBox="0 0 24 24" fill="none"><path d="M4 18V9m5 9V5m6 13v-7m5 7V3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Earnings</span></a>
-        <a class="nav-item" data-nav="wallet"{% if current_nav == 'wallet' %} aria-current="page"{% endif %} href="{{ url_for('dashboard.wallet') }}"><svg viewBox="0 0 24 24" fill="none"><path d="M3.5 7.5h17v11h-17v-11Zm2-3h13v3h-13v-3Zm10 8h3" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><span>Wallet &amp; payouts</span></a>
+        <a class="nav-item" data-nav="wallet"{% if current_nav == 'wallet' %} aria-current="page"{% endif %} href="{{ url_for('dashboard.wallet') }}"><svg viewBox="0 0 24 24" fill="none"><path d="M3.5 7.5h17v11h-17v-11Zm2-3h13v3h-13v-3Zm10 8h3" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><span>Wallet</span></a>
         {% endif %}
       </nav>
       <div class="drawer-account">
         <div class="account-summary"><span class="avatar" aria-hidden="true">{{ g.user.email[:2]|upper }}</span><span class="account-copy"><strong>{{ g.user.email }}</strong><small>{{ 'Platform owner' if is_admin else 'Contributor' }}</small></span></div>
         <form method="post" action="{{ url_for('auth.logout') }}" data-submit-once="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button ghost drawer-signout" type="submit" data-loading-label="Signing out...">Sign out</button></form>
       </div>
-      <div class="sidebar-footer"><div class="system-card"><div><strong>All systems operational</strong><span class="status-dot" aria-label="Operational"></span></div><p>Health checks and payouts are monitored.</p></div></div>
+      <div class="sidebar-footer"><a class="system-card system-card-neutral" href="{{ url_for('admin.dashboard') if is_admin else url_for('dashboard.dashboard') }}"><div><strong>System status</strong><span class="status-dot is-neutral" aria-hidden="true"></span></div><p>Open the overview for current status.</p></a></div>
     </aside>
     <button id="sidebar-overlay" class="sidebar-overlay" type="button" aria-label="Close navigation" tabindex="-1" hidden></button>
     <div class="app-main">

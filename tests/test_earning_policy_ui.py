@@ -121,7 +121,7 @@ def test_user_proxy_table_shows_rate_pending_explanation_and_allow_first(app, cl
     assert "$0.50/month" in page
     assert "$0.00/month" in page
     assert "$0.125000" in page
-    assert "High quality" in page
+    assert "Earning eligibility" in page
     assert "earnapp" not in page.lower()
     assert "sort=eligibility" in page
     assert "direction=asc" in page

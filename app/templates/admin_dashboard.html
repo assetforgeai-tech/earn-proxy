@@ -51,15 +51,11 @@
   <div class="panel-head">
     <div><p class="eyebrow">WORKSPACES</p><h2 id="admin-quick-links-title">Choose an area to manage</h2></div>
   </div>
-  <div class="quick-link-grid">
-    <a class="quick-link" href="{{ url_for('admin.proxies') }}"><strong>Proxies</strong><span>Search and review the full credential-safe inventory.</span></a>
-    <a class="quick-link" href="{{ url_for('admin.checker') }}"><strong>Health checker</strong><span>Cadence, concurrency, retries, and API classes.</span></a>
-    <a class="quick-link" href="{{ url_for('admin.egress_duplicates') }}"><strong>Egress duplicates</strong><span>Review globally duplicated trusted exit identities.</span></a>
-    <a class="quick-link" href="{{ url_for('admin.users') }}"><strong>Users</strong><span>Approve, pause, block, or remove accounts.</span></a>
-    <a class="quick-link" href="{{ url_for('admin.payouts') }}"><strong>Payouts</strong><span>Review requests and record transaction hashes.</span></a>
-    <a class="quick-link" href="{{ url_for('admin.integrations') }}"><strong>Distribution API</strong><span>Connect another system to the live proxy feeds.</span></a>
-    <a class="quick-link" href="{{ url_for('admin.api_keys_workspace') }}"><strong>API keys</strong><span>Create, rotate, and revoke machine credentials.</span></a>
-    <a class="quick-link" href="{{ url_for('admin.transfer_proxy') }}"><strong>Transfer Proxy</strong><span>Open the isolated fixed-listener relay manager.</span></a>
+  <div class="quick-link-grid priority-action-grid">
+    <a class="quick-link" href="{{ url_for('admin.proxies') }}"><strong>Review proxies</strong><span>Find offline, stale, or duplicated proxy records.</span></a>
+    <a class="quick-link" href="{{ url_for('admin.checker') }}"><strong>Tune health checks</strong><span>Adjust check speed without overloading the VPS.</span></a>
+    <a class="quick-link" href="{{ url_for('admin.users') }}"><strong>Review users</strong><span>Approve registrations and investigate account activity.</span></a>
+    <a class="quick-link" href="{{ url_for('admin.payouts') }}"><strong>Review payouts</strong><span>Process requests and record transaction hashes.</span></a>
   </div>
 </section>
 {% endif %}
@@ -71,6 +67,12 @@
       <h2>Checker policy</h2>
       <p class="muted">Stable proxies use one rotating endpoint through their detected protocol. Failures receive short confirmation retries before going offline.</p>
     </div>
+  </div>
+  <div class="checker-presets" aria-label="Checker speed presets">
+    <div><strong>Choose a starting point</strong><span>Presets only fill the form. Nothing changes until you save.</span></div>
+    <button class="button small ghost" type="button" data-checker-preset="resource_saver">Resource saver</button>
+    <button class="button small ghost" type="button" data-checker-preset="balanced">Balanced</button>
+    <button class="button small ghost" type="button" data-checker-preset="fast">Fast</button>
   </div>
   <form method="post" action="{{ url_for('admin.update_settings') }}" class="settings-grid" data-submit-once="true">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -104,18 +106,18 @@
       <p class="muted">Admin-created accounts are active immediately.</p>
     </div>
   </div>
-  <form method="post" action="{{ url_for('admin.create_admin_user') }}" class="inline-form inline-form-wide" data-submit-once="true">
+  <form method="post" action="{{ url_for('admin.create_admin_user') }}" class="inline-form inline-form-wide" data-submit-once="true" autocomplete="off">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="ui" value="1">
     <div class="field-group">
       <label for="new-user-email">Email</label>
-      <input id="new-user-email" name="email" type="email" maxlength="254" placeholder="user@example.com" required aria-describedby="new-user-email-hint{% if error_focus == 'new-user-email' %} new-user-email-error{% endif %}"{% if error_focus == 'new-user-email' %} aria-invalid="true"{% endif %}>
+      <input id="new-user-email" name="email" type="email" maxlength="254" placeholder="user@example.com" autocomplete="off" required aria-describedby="new-user-email-hint{% if error_focus == 'new-user-email' %} new-user-email-error{% endif %}"{% if error_focus == 'new-user-email' %} aria-invalid="true"{% endif %}>
       <small id="new-user-email-hint" class="field-hint">Must not already be registered.</small>
       {% if error_focus == 'new-user-email' %}<small id="new-user-email-error" class="field-error">Enter an available email address.</small>{% endif %}
     </div>
     <div class="field-group">
       <label for="new-user-password">Temporary password</label>
-      <input id="new-user-password" name="password" type="password" minlength="8" placeholder="At least 8 characters" required aria-describedby="new-user-password-hint{% if error_focus == 'new-user-password' %} new-user-password-error{% endif %}"{% if error_focus == 'new-user-password' %} aria-invalid="true"{% endif %}>
+      <input id="new-user-password" name="password" type="password" minlength="8" placeholder="At least 8 characters" autocomplete="new-password" required aria-describedby="new-user-password-hint{% if error_focus == 'new-user-password' %} new-user-password-error{% endif %}"{% if error_focus == 'new-user-password' %} aria-invalid="true"{% endif %}>
       <small id="new-user-password-hint" class="field-hint">Use at least 8 characters.</small>
       {% if error_focus == 'new-user-password' %}<small id="new-user-password-error" class="field-error">Use at least 8 characters.</small>{% endif %}
     </div>
@@ -143,11 +145,15 @@
               <td data-label="Status"><span class="badge {{ user.status }}">{{ user.status|capitalize }}</span></td>
               <td data-label="Earn">{{ 'Paused' if user.earn_paused else 'Running' }}</td>
               <td data-label="Actions" class="actions">
+                {% if user.status == 'deleted' %}
+                <span class="muted">Archived account</span>
+                {% else %}
                 {% if user.status == 'pending' %}<form method="post" action="{{ url_for('admin.approve_user', user_id=user.id) }}" data-submit-once="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button small" type="submit" data-loading-label="Approving...">Approve</button></form>{% endif %}
                 <form method="post" action="{{ url_for('admin.pause_earn' if not user.earn_paused else 'admin.resume_earn', user_id=user.id) }}" data-submit-once="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button small ghost" type="submit" data-loading-label="Updating...">{{ 'Resume earn' if user.earn_paused else 'Pause earn' }}</button></form>
                 {% if user.status != 'blocked' %}<form method="post" action="{{ url_for('admin.block_user', user_id=user.id) }}" data-confirm-dialog data-confirm-title="Block user?" data-confirm-message="Sessions will be revoked and API distribution for this account will stop." data-confirm-label="Block user" data-submit-once="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button small danger" type="submit" data-confirm-trigger data-loading-label="Blocking..." disabled>Block</button></form>{% endif %}
                 <form method="post" action="{{ url_for('admin.delete_user', user_id=user.id) }}" data-confirm-dialog data-confirm-title="Delete user?" data-confirm-message="The account will be disabled while historical records are retained." data-confirm-label="Delete user" data-submit-once="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button small danger" type="submit" data-confirm-trigger data-loading-label="Deleting..." disabled>Delete</button></form>
                 <noscript><small class="field-error">Enable JavaScript to perform destructive actions safely.</small></noscript>
+                {% endif %}
               </td>
             </tr>
           {% endfor %}

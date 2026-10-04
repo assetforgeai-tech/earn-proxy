@@ -7,11 +7,15 @@
     <h1>Proxiware static ISP</h1>
     <p class="muted">Inspect provider inventory, qualification, swaps, and session health from one admin-only workspace.</p>
   </div>
-  <div class="page-actions" aria-label="Proxiware read-only actions">
-    {% if automation_paused|default(false) %}<form method="post" action="/admin/providers/proxiware/automation/resume" data-submit-once="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button primary" type="submit">Resume Proxiware automation</button></form>{% else %}<form method="post" action="/admin/providers/proxiware/automation/pause" data-confirm-dialog data-confirm-title="Pause Proxiware automation?" data-confirm-message="Sync, qualification, and automatic swap workers will stop. Distribution, earnings, hours, and quota remain unchanged." data-confirm-label="Pause automation" data-submit-once="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button danger" type="submit" data-confirm-trigger>Pause Proxiware automation</button></form>{% endif %}
+  <div class="page-actions proxiware-page-actions" aria-label="Proxiware actions">
     {% if sync_available|default(false) %}<form method="post" action="/admin/providers/proxiware/sync" data-submit-once="true" data-inline-action="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button primary" type="submit" data-loading-label="Syncing...">Sync now</button></form>{% endif %}
-    <a class="button ghost" href="{{ workspace_url }}">Refresh status</a>
-    <a class="button ghost" href="{{ url_for('admin.proxiware_workspace', area='sync') }}">Sync</a>
+    <a class="button ghost" href="{{ workspace_url }}">Refresh</a>
+    <details class="action-menu">
+      <summary class="button ghost">More actions</summary>
+      <div class="action-menu-panel">
+        {% if automation_paused|default(false) %}<form method="post" action="/admin/providers/proxiware/automation/resume" data-submit-once="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button primary" type="submit">Resume Proxiware automation</button></form>{% else %}<form method="post" action="/admin/providers/proxiware/automation/pause" data-confirm-dialog data-confirm-title="Pause Proxiware automation?" data-confirm-message="Sync, qualification, and automatic swap workers will stop. Distribution, earnings, hours, and quota remain unchanged." data-confirm-label="Pause automation" data-submit-once="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="ui" value="1"><button class="button danger" type="submit" data-confirm-trigger>Pause automation</button></form>{% endif %}
+      </div>
+    </details>
   </div>
 </div>
 
@@ -21,19 +25,42 @@
 <form class="proxiware-action-row" method="post" action="/admin/providers/proxiware/sync/{{ summary.sync_run_id }}/cancel" data-confirm-dialog data-confirm-title="{{ 'Cancel queued sync?' if summary.sync_state == 'queued' else 'Stop this sync?' }}" data-confirm-message="The read-only sync will stop before or at its next safe checkpoint. Inventory already committed remains unchanged." data-confirm-label="{{ 'Cancel queued sync' if summary.sync_state == 'queued' else 'Stop sync' }}" data-submit-once="true"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="button danger" type="submit" data-confirm-trigger disabled>{{ 'Cancel queued sync' if summary.sync_state == 'queued' else 'Stop sync' }}</button></form>
 {% endif %}
 
-<section class="proxiware-status-strip" aria-label="Proxiware status" aria-live="polite">
-  <div class="proxiware-status-item"><span class="status-dot {{ 'is-good' if session_status|lower in ('healthy', 'active', 'ready') else 'is-warn' }}" aria-hidden="true"></span><span>Session</span><strong>{{ session_status|replace('_', ' ')|title }}</strong></div>
-  {% for worker_name in ('sync_worker', 'browser_worker', 'qualification_worker', 'swap_worker') %}<div class="proxiware-status-item"><span class="status-dot {{ 'is-good' if worker_heartbeats.get(worker_name, 'unknown')|lower in ('healthy', 'running', 'ready', 'ok', 'sleeping', 'idle') else 'is-warn' }}" aria-hidden="true"></span><span>{{ worker_status_labels.get(worker_name, worker_name) }}</span><strong>{{ worker_heartbeats.get(worker_name, 'unknown')|replace('_', ' ')|title }}</strong></div>{% endfor %}
-  <div class="proxiware-status-item"><span>Auto-swap</span><strong>{{ 'On' if auto_swap_enabled else 'Off' }}</strong><small>{{ 'Guarded by policy' if auto_swap_enabled else 'Manual approval required' }}</small></div>
-  <div class="proxiware-status-item"><span>Distribution</span><strong>{{ 'On' if distribution_enabled else 'Off' }}</strong><small>Internal API output</small></div>
-  <div class="proxiware-status-item"><span>Automation</span><strong>{{ 'Paused' if automation_paused|default(false) else 'Running' }}</strong><small>{{ 'Workers stopped' if automation_paused|default(false) else 'Provider-scoped' }}</small></div>
+{% set provider_needs_attention = error or summary.worker_alert|default('') or summary.session_alert_url|default('') or not swap_adapter_available|default(false) %}
+<section class="provider-state-summary {{ 'is-attention' if provider_needs_attention else ('is-paused' if automation_paused|default(false) else 'is-ready') }}" aria-live="polite">
+  <span class="status-dot {{ 'is-warn' if provider_needs_attention else ('is-neutral' if automation_paused|default(false) else 'is-good') }}" aria-hidden="true"></span>
+  <div><strong>{{ 'Needs attention' if provider_needs_attention else ('Paused' if automation_paused|default(false) else 'Running') }}</strong><span>{% if not swap_adapter_available|default(false) %}Automatic swaps cannot run until the mutation adapter is enabled.{% elif summary.session_alert_url|default('') %}The provider session needs attention.{% elif summary.worker_alert|default('') %}A provider worker needs attention.{% elif automation_paused|default(false) %}Provider automation is paused.{% else %}Provider automation is available and no blocking warning is reported.{% endif %}</span></div>
 </section>
 
-<nav class="proxiware-tabs" aria-label="Proxiware workspace" role="tablist">
-  {% for item in areas %}
-    <a data-proxiware-area="{{ item.key }}" class="proxiware-tab{% if area == item.canonical %} is-active{% endif %}" href="{{ item.url }}"{% if area == item.canonical %} aria-current="page"{% endif %}>{{ item.label }}</a>
-  {% endfor %}
+<details class="provider-status-details">
+  <summary>Service details</summary>
+  <section class="proxiware-status-strip" aria-label="Proxiware service details">
+    <div class="proxiware-status-item"><span class="status-dot {{ 'is-good' if session_status|lower in ('healthy', 'active', 'ready') else 'is-warn' }}" aria-hidden="true"></span><span>Session</span><strong>{{ session_status|replace('_', ' ')|title }}</strong></div>
+    {% for worker_name in ('sync_worker', 'browser_worker', 'qualification_worker', 'swap_worker') %}<div class="proxiware-status-item"><span class="status-dot {{ 'is-good' if worker_heartbeats.get(worker_name, 'unknown')|lower in ('healthy', 'running', 'ready', 'ok', 'sleeping', 'idle') else 'is-warn' }}" aria-hidden="true"></span><span>{{ worker_status_labels.get(worker_name, worker_name) }}</span><strong>{{ worker_heartbeats.get(worker_name, 'unknown')|replace('_', ' ')|title }}</strong></div>{% endfor %}
+    <div class="proxiware-status-item"><span>Auto-swap</span><strong>{{ 'Blocked' if auto_swap_enabled and not swap_adapter_available|default(false) else ('On' if auto_swap_enabled else 'Off') }}</strong><small>{{ 'Adapter unavailable' if auto_swap_enabled and not swap_adapter_available|default(false) else ('Guarded by policy' if auto_swap_enabled else 'Manual only') }}</small></div>
+    <div class="proxiware-status-item"><span>Distribution</span><strong>{{ 'On' if distribution_enabled else 'Off' }}</strong><small>Internal API output</small></div>
+    <div class="proxiware-status-item"><span>Automation</span><strong>{{ 'Paused' if automation_paused|default(false) else 'Running' }}</strong><small>{{ 'Workers stopped' if automation_paused|default(false) else 'Provider-scoped' }}</small></div>
+  </section>
+</details>
+
+<nav class="proxiware-nav-groups" aria-label="Proxiware workspace">
+  <a data-proxiware-area="overview" class="proxiware-nav-root{% if area == 'overview' %} is-active{% endif %}" href="{{ url_for('admin.proxiware_workspace') }}"{% if area == 'overview' %} aria-current="page"{% endif %}>Overview</a>
+  <details{% if area in ('inventory', 'qualification') %} open{% endif %}><summary>Inventory</summary><div><a data-proxiware-area="inventory"{% if area == 'inventory' %} aria-current="page"{% endif %} href="{{ url_for('admin.proxiware_workspace', area='inventory') }}">Proxy list</a><a data-proxiware-area="eligibility"{% if area == 'qualification' %} aria-current="page"{% endif %} href="{{ url_for('admin.proxiware_workspace', area='qualification') }}">Qualification</a></div></details>
+  <details{% if area in ('sync', 'swaps', 'swap-history', 'audit') %} open{% endif %}><summary>Operations</summary><div><a data-proxiware-area="history"{% if area == 'sync' %} aria-current="page"{% endif %} href="{{ url_for('admin.proxiware_workspace', area='sync') }}">Sync history</a><a data-proxiware-area="swaps"{% if area == 'swaps' %} aria-current="page"{% endif %} href="{{ url_for('admin.proxiware_workspace', area='swaps') }}">Swap queue</a><a data-proxiware-area="swap-history"{% if area == 'swap-history' %} aria-current="page"{% endif %} href="{{ url_for('admin.proxiware_swap_history') }}">Swap history</a><a data-proxiware-area="audit"{% if area == 'audit' %} aria-current="page"{% endif %} href="{{ url_for('admin.proxiware_workspace', area='audit') }}">Audit log</a></div></details>
+  <details{% if area in ('credentials', 'session') %} open{% endif %}><summary>Connection</summary><div><a data-proxiware-area="credentials"{% if area == 'credentials' %} aria-current="page"{% endif %} href="{{ url_for('admin.proxiware_workspace', area='credentials') }}">Credentials</a><a data-proxiware-area="session"{% if area == 'session' %} aria-current="page"{% endif %} href="{{ url_for('admin.proxiware_workspace', area='session') }}">Session</a></div></details>
+  <a data-proxiware-area="settings" class="proxiware-nav-root{% if area == 'policy' %} is-active{% endif %}" href="{{ url_for('admin.proxiware_workspace', area='policy') }}"{% if area == 'policy' %} aria-current="page"{% endif %}>Settings</a>
 </nav>
+<label class="proxiware-mobile-nav" for="proxiware-mobile-nav"><span>Section</span><select id="proxiware-mobile-nav">
+  <option value="{{ url_for('admin.proxiware_workspace') }}"{% if area == 'overview' %} selected{% endif %}>Overview</option>
+  <option value="{{ url_for('admin.proxiware_workspace', area='inventory') }}"{% if area == 'inventory' %} selected{% endif %}>Inventory · Proxy list</option>
+  <option value="{{ url_for('admin.proxiware_workspace', area='qualification') }}"{% if area == 'qualification' %} selected{% endif %}>Inventory · Qualification</option>
+  <option value="{{ url_for('admin.proxiware_workspace', area='sync') }}"{% if area == 'sync' %} selected{% endif %}>Operations · Sync history</option>
+  <option value="{{ url_for('admin.proxiware_workspace', area='swaps') }}"{% if area == 'swaps' %} selected{% endif %}>Operations · Swap queue</option>
+  <option value="{{ url_for('admin.proxiware_swap_history') }}"{% if area == 'swap-history' %} selected{% endif %}>Operations · Swap history</option>
+  <option value="{{ url_for('admin.proxiware_workspace', area='audit') }}"{% if area == 'audit' %} selected{% endif %}>Operations · Audit log</option>
+  <option value="{{ url_for('admin.proxiware_workspace', area='credentials') }}"{% if area == 'credentials' %} selected{% endif %}>Connection · Credentials</option>
+  <option value="{{ url_for('admin.proxiware_workspace', area='session') }}"{% if area == 'session' %} selected{% endif %}>Connection · Session</option>
+  <option value="{{ url_for('admin.proxiware_workspace', area='policy') }}"{% if area == 'policy' %} selected{% endif %}>Settings</option>
+</select></label>
 
 {% if error %}
 <div class="notice error" role="alert"><strong>Provider data unavailable.</strong><span>{{ error }}</span></div>
@@ -48,15 +75,15 @@
 
 {% if area == 'overview' %}
 <section class="stats proxiware-stat-grid" aria-label="Proxiware overview">
-  <article><span>Subscriptions</span><strong>{{ summary.subscriptions }}</strong><small>Provider records</small></article>
-  <article><span>Assignments</span><strong>{{ summary.assignments }}</strong><small>Normalized inventory</small></article>
-  <article><span>Live</span><strong>{{ summary.live }}</strong><small>Last known health</small></article>
-  <article><span>Allow</span><strong>{{ summary.allow }}</strong><small>Eligible for distribution</small></article>
-  <article><span>Risk</span><strong>{{ summary.risk }}</strong><small>Needs review</small></article>
-  <article><span>Pending swaps</span><strong>{{ summary.swaps_pending }}</strong><small>Guarded queue</small></article>
-  <article><span>Blocked swaps</span><strong>{{ summary.swaps_blocked }}</strong><small>Safe error state</small></article>
-  <article><span>Reconciliation required</span><strong>{{ summary.swaps_reconciliation_required }}</strong><small>Read-only evidence pending</small></article>
-  <article><span>Eligible</span><strong>{{ summary.eligible_count }}</strong><small>Provider count</small></article>
+  <article><span>Plans</span><strong>{{ summary.subscriptions }}</strong><small>Provider subscriptions</small></article>
+  <article><span>Proxies</span><strong>{{ summary.assignments }}</strong><small>Synced assignments</small></article>
+  <article><span>Online</span><strong>{{ summary.live }}</strong><small>Last known connection state</small></article>
+  <article><span>Quality passed</span><strong>{{ summary.allow }}</strong><small>Passed the quality check</small></article>
+  <article><span>Replace needed</span><strong>{{ summary.risk }}</strong><small>Did not pass the quality check</small></article>
+  <article><span>Waiting swaps</span><strong>{{ summary.swaps_pending }}</strong><small>Queued safely</small></article>
+  <article><span>Blocked swaps</span><strong>{{ summary.swaps_blocked }}</strong><small>Held by a safety check</small></article>
+  <article><span>Needs review</span><strong>{{ summary.swaps_reconciliation_required }}</strong><small>Waiting for fresh provider data</small></article>
+  <article><span>Ready for use</span><strong>{{ summary.eligible_count }}</strong><small>Passes every distribution rule</small></article>
 </section>
 <section class="panel proxiware-overview-grid" aria-labelledby="proxiware-health-title">
   <div class="panel-head"><div><p class="eyebrow">OPERATIONS</p><h2 id="proxiware-health-title">Provider health</h2><p class="muted">Read-only status. Sync and swap operations never run from a page load.</p></div><span class="badge {{ summary.health_badge|default('pending')|lower|replace(' ', '-') }}">{{ summary.health_badge|default('Needs attention') }}</span></div>
@@ -71,18 +98,18 @@
 <section class="panel" aria-labelledby="proxiware-inventory-title">
   <div class="panel-head"><div><p class="eyebrow">{{ 'QUALIFICATION' if area == 'qualification' else 'INVENTORY' }}</p><h2 id="proxiware-inventory-title">{{ 'Qualification signals' if area == 'qualification' else 'Provider inventory' }}</h2><p class="muted">{{ pagination.total }} record{{ '' if pagination.total == 1 else 's' }}. Credentials and session material are never rendered.</p></div><span class="muted">Showing {{ pagination.start }}–{{ pagination.end }} of {{ pagination.total }}</span></div>
   <div class="proxiware-count-grid" aria-label="Inventory counts">
-    {% for key, label in (('all', 'All'), ('live', 'Live'), ('dead', 'Dead'), ('allow', 'Allow'), ('risk', 'Risk'), ('pending', 'Pending'), ('duplicate', 'Duplicate egress')) %}
+    {% for key, label in (('all', 'All'), ('live', 'Online'), ('dead', 'Offline'), ('allow', 'Quality passed'), ('risk', 'Replace needed'), ('pending', 'Checking'), ('duplicate', 'Repeated network')) %}
       <a class="inventory-count {{ key }}{% if filters.qualification == key or filters.live == key or filters.duplicate == key %} is-active{% endif %}" href="{{ filter_urls.get(key, workspace_url) }}"><span>{{ label }}</span><strong>{{ summary.get(key, 0) }}</strong></a>
     {% endfor %}
   </div>
   <form class="inventory-toolbar proxiware-toolbar" method="get" action="{{ workspace_url }}">
     <div class="field-group inventory-search"><label for="proxiware-q">Search</label><input id="proxiware-q" name="q" value="{{ filters.q }}" maxlength="100" placeholder="Subscription, endpoint, country"></div>
     <div class="field-group"><label for="proxiware-subscription">Subscription</label><input id="proxiware-subscription" name="subscription" value="{{ filters.subscription }}" maxlength="100" placeholder="All subscriptions"></div>
-    <div class="field-group"><label for="proxiware-live">Live state</label><select id="proxiware-live" name="live"><option value="">All states</option>{% for value in ('online', 'offline', 'pending') %}<option value="{{ value }}"{% if filters.live == value %} selected{% endif %}>{{ value|capitalize }}</option>{% endfor %}</select></div>
-    <div class="field-group"><label for="proxiware-qualification">Qualification</label><select id="proxiware-qualification" name="qualification"><option value="">All classes</option>{% for value in ('allow', 'risk', 'pending', 'dead') %}<option value="{{ value }}"{% if filters.qualification == value %} selected{% endif %}>{{ value|capitalize }}</option>{% endfor %}</select></div>
+    <div class="field-group"><label for="proxiware-live">Connection</label><select id="proxiware-live" name="live"><option value="">All connection states</option><option value="online"{% if filters.live == 'online' %} selected{% endif %}>Online</option><option value="offline"{% if filters.live == 'offline' %} selected{% endif %}>Offline</option><option value="pending"{% if filters.live == 'pending' %} selected{% endif %}>Checking</option></select></div>
+    <div class="field-group"><label for="proxiware-qualification">Quality result</label><select id="proxiware-qualification" name="qualification"><option value="">All quality results</option><option value="allow"{% if filters.qualification == 'allow' %} selected{% endif %}>Quality passed</option><option value="risk"{% if filters.qualification == 'risk' %} selected{% endif %}>Replace needed</option><option value="pending"{% if filters.qualification == 'pending' %} selected{% endif %}>Checking</option><option value="dead"{% if filters.qualification == 'dead' %} selected{% endif %}>Offline</option></select></div>
     <div class="field-group"><label for="proxiware-country">Country</label><input id="proxiware-country" name="country" value="{{ filters.country }}" maxlength="2" placeholder="US"></div>
-    <div class="field-group"><label for="proxiware-provider-eligibility">Provider eligibility</label><select id="proxiware-provider-eligibility" name="provider_eligibility"><option value="">All provider states</option>{% for value in ('eligible', 'ineligible', 'unknown') %}<option value="{{ value }}"{% if filters.provider_eligibility == value %} selected{% endif %}>{{ value|capitalize }}</option>{% endfor %}</select></div>
-    <div class="field-group"><label for="proxiware-readiness">Replacement readiness</label><select id="proxiware-readiness" name="readiness"><option value="">All readiness states</option>{% for value in ('ready', 'cooldown', 'blocked') %}<option value="{{ value }}"{% if filters.readiness == value %} selected{% endif %}>{{ value|capitalize }}</option>{% endfor %}</select></div>
+    <div class="field-group"><label for="proxiware-provider-eligibility">Provider threshold</label><select id="proxiware-provider-eligibility" name="provider_eligibility"><option value="">All threshold states</option><option value="eligible"{% if filters.provider_eligibility == 'eligible' %} selected{% endif %}>Met</option><option value="ineligible"{% if filters.provider_eligibility == 'ineligible' %} selected{% endif %}>Not met</option><option value="unknown"{% if filters.provider_eligibility == 'unknown' %} selected{% endif %}>Not checked</option></select></div>
+    <div class="field-group"><label for="proxiware-readiness">Swap readiness</label><select id="proxiware-readiness" name="readiness"><option value="">All swap states</option><option value="ready"{% if filters.readiness == 'ready' %} selected{% endif %}>Ready</option><option value="cooldown"{% if filters.readiness == 'cooldown' %} selected{% endif %}>Waiting</option><option value="blocked"{% if filters.readiness == 'blocked' %} selected{% endif %}>Blocked</option></select></div>
     <div class="field-group"><label for="proxiware-sort">Sort</label><select id="proxiware-sort" name="sort">{% for value, label in (('updated', 'Recently updated'), ('subscription', 'Subscription'), ('country', 'Country'), ('status', 'Status')) %}<option value="{{ value }}"{% if filters.sort == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
     <div class="field-group"><label for="proxiware-direction">Direction</label><select id="proxiware-direction" name="direction"><option value="desc"{% if filters.direction == 'desc' %} selected{% endif %}>Descending</option><option value="asc"{% if filters.direction == 'asc' %} selected{% endif %}>Ascending</option></select></div>
     <div class="field-group"><label for="proxiware-per-page">Rows per page</label><select id="proxiware-per-page" name="per_page">{% for size in (25, 50, 100) %}<option value="{{ size }}"{% if pagination.per_page == size %} selected{% endif %}>{{ size }}</option>{% endfor %}</select></div>
@@ -90,8 +117,8 @@
     <button class="button primary" type="submit">Apply filters</button><a class="button ghost" href="{{ workspace_url }}">Clear</a>
   </form>
   {% if rows %}
-  <div class="table-wrap"><table class="responsive-table compact-data-table proxiware-table"><caption>Credential-safe Proxiware inventory</caption><thead><tr><th scope="col">Subscription</th><th scope="col">Assignment</th><th scope="col">Endpoint</th><th scope="col">Country</th><th scope="col">Live</th><th scope="col">Qualification</th><th scope="col">Provider</th><th scope="col">Readiness</th></tr></thead><tbody>
-  {% for row in rows %}<tr><th scope="row" data-label="Subscription" class="breakable">{{ row.subscription|default('—') }}</th><td data-label="Assignment" class="mono breakable">{{ row.assignment|default('—') }}</td><td data-label="Endpoint" class="mono breakable">{{ row.endpoint|default('—') }}</td><td data-label="Country">{{ row.country|default('—') }}</td><td data-label="Live"><span class="badge {{ row.live|default('pending') }}">{{ row.live|default('Pending')|capitalize }}</span></td><td data-label="Qualification"><span class="badge {{ row.qualification|default('pending') }}">{{ row.qualification|default('Pending')|capitalize }}</span>{% if row.reason %}<small class="field-hint">{{ row.reason }}</small>{% endif %}</td><td data-label="Provider">{% if row.provider_status is sameas true or row.provider_status == 1 %}Eligible{% elif row.provider_status is sameas false or row.provider_status == 0 %}Ineligible{% else %}Unknown{% endif %}</td><td data-label="Readiness">{{ row.readiness|default('—') }}</td></tr>{% endfor %}
+  <div class="table-wrap"><table class="responsive-table compact-data-table proxiware-table"><caption>Credential-safe Proxiware inventory</caption><thead><tr><th scope="col">Plan</th><th scope="col">Proxy ID</th><th scope="col">Endpoint</th><th scope="col">Country</th><th scope="col">Connection</th><th scope="col">Quality</th><th scope="col">Threshold</th><th scope="col">Swap status</th></tr></thead><tbody>
+  {% for row in rows %}{% set quality = row.qualification|default('pending') %}{% set quality_label = {'allow': 'Quality passed', 'risk': 'Replace needed', 'pending': 'Checking', 'dead': 'Offline'}.get(quality, quality|capitalize) %}<tr><th scope="row" data-label="Plan" class="breakable">{{ row.subscription|default('—') }}</th><td data-label="Proxy ID" class="mono breakable"><span class="compact-id" title="{{ row.assignment|default('—') }}">{{ row.assignment[:18] if row.assignment else '—' }}{% if row.assignment and row.assignment|length > 18 %}…{% endif %}</span></td><td data-label="Endpoint" class="mono breakable">{{ row.endpoint|default('—') }}</td><td data-label="Country">{{ row.country|default('—') }}</td><td data-label="Connection"><span class="badge {{ row.live|default('pending') }}">{{ 'Checking' if row.live|default('pending') == 'pending' else row.live|default('Pending')|capitalize }}</span></td><td data-label="Quality"><span class="badge {{ quality }}">{{ quality_label }}</span>{% if row.reason %}<small class="field-hint">{{ row.reason|replace('_', ' ') }}</small>{% endif %}</td><td data-label="Threshold">{% if row.provider_status is sameas true or row.provider_status == 1 %}Met{% elif row.provider_status is sameas false or row.provider_status == 0 %}Not met{% else %}Not checked{% endif %}</td><td data-label="Swap status">{% if row.readiness is none %}<span class="badge online">Ready</span>{% else %}<span class="badge pending" data-proxiware-readiness data-ready-at="{{ row.readiness }}">Waiting</span><small class="field-hint">Ready at <time datetime="{{ row.readiness }}">{{ row.readiness }}</time></small>{% endif %}</td></tr>{% endfor %}
   </tbody></table></div>
   {% else %}<div class="empty">No provider records match these filters. Run a read-only sync, then refresh this page.</div>{% endif %}
   {% include "_proxiware_pagination.html" %}

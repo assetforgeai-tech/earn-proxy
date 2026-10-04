@@ -75,6 +75,16 @@
   sidebar?.querySelectorAll(".nav-item").forEach((item) => item.addEventListener("click", () => closeSidebar({ restoreFocus: false })));
   mobileQuery.addEventListener?.("change", syncSidebarMode);
 
+  document.querySelectorAll("[data-scroll-hint]").forEach((region) => {
+    const hint = document.querySelector(`.${region.dataset.scrollHint}`);
+    if (!hint) return;
+    const syncScrollHint = () => {
+      hint.hidden = !(region.scrollWidth > region.clientWidth + 1);
+    };
+    syncScrollHint();
+    window.addEventListener("resize", syncScrollHint, { passive: true });
+  });
+
   const legacyDashboardRoutes = {
     "#add-proxy": "/dashboard/proxies",
     "#proxy-status": "/dashboard/proxies",
@@ -219,13 +229,85 @@
       const target = document.getElementById(button.dataset.copyTarget);
       if (!target) return;
       const value = target.textContent.trim();
+      const originalLabel = button.dataset.copyLabel || button.textContent.trim();
+      button.dataset.copyLabel = originalLabel;
       try {
         await navigator.clipboard.writeText(value);
+        button.textContent = "Copied";
         if (copyStatus) copyStatus.textContent = "Copied to clipboard.";
+        window.clearTimeout(Number(button.dataset.copyTimer || 0));
+        button.dataset.copyTimer = String(window.setTimeout(() => {
+          button.textContent = originalLabel;
+        }, 1800));
       } catch (_error) {
+        button.textContent = "Copy failed";
         if (copyStatus) copyStatus.textContent = "Copy is unavailable here; select the text manually.";
       }
     });
+  });
+
+  const checkerPresets = {
+    resource_saver: {
+      health_interval_minutes: 120,
+      health_concurrency: 3,
+      health_per_host_concurrency: 1,
+      health_retry_first_minutes: 10,
+      health_retry_second_minutes: 30,
+      health_stale_minutes: 240,
+    },
+    balanced: {
+      health_interval_minutes: 60,
+      health_concurrency: 5,
+      health_per_host_concurrency: 2,
+      health_retry_first_minutes: 5,
+      health_retry_second_minutes: 15,
+      health_stale_minutes: 120,
+    },
+    fast: {
+      health_interval_minutes: 30,
+      health_concurrency: 10,
+      health_per_host_concurrency: 2,
+      health_retry_first_minutes: 3,
+      health_retry_second_minutes: 10,
+      health_stale_minutes: 60,
+    },
+  };
+  document.querySelectorAll("[data-checker-preset]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const preset = checkerPresets[button.dataset.checkerPreset];
+      if (!preset) return;
+      Object.entries(preset).forEach(([id, value]) => {
+        const input = document.getElementById(id);
+        if (input instanceof HTMLInputElement) input.value = String(value);
+      });
+      document.querySelectorAll("[data-checker-preset]").forEach((item) => {
+        item.setAttribute("aria-pressed", String(item === button));
+      });
+    });
+  });
+
+  const proxiwareMobileNav = document.querySelector("#proxiware-mobile-nav");
+  proxiwareMobileNav?.addEventListener("change", () => {
+    if (proxiwareMobileNav.value) window.location.assign(proxiwareMobileNav.value);
+  });
+
+  const localDateTime = new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+  document.querySelectorAll("time[datetime]").forEach((element) => {
+    const value = new Date(element.dateTime);
+    if (Number.isNaN(value.getTime())) return;
+    element.title ||= element.textContent.trim();
+    element.textContent = localDateTime.format(value);
+  });
+
+  document.querySelectorAll("[data-proxiware-readiness]").forEach((element) => {
+    const readyAt = new Date(element.dataset.readyAt);
+    if (Number.isNaN(readyAt.getTime()) || readyAt > new Date()) return;
+    element.textContent = "Ready";
+    element.classList.replace("pending", "online");
+    element.nextElementSibling?.remove();
   });
 
   const invalidField = document.querySelector('[aria-invalid="true"]');

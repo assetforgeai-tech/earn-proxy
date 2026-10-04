@@ -40,7 +40,7 @@ def test_user_dashboard_shows_safe_proxy_controls_uptime_and_payout_history(app,
     assert '<details id="add-proxy"' in page
     assert "import-panel-summary" in page
     assert "Online hours" in page
-    assert "Wallet &amp; payouts" in page
+    assert "<span>Wallet</span>" in page
     assert "private-user" not in page
     assert "private-pass" not in page
 
@@ -61,8 +61,7 @@ def test_user_proxy_workspace_exposes_bulk_text_file_import_and_supported_format
     assert "https://username:password@host:port" in page
     assert "raw_proxy" in page
     assert "host,port,username,password,protocol" in page
-    assert "Egress duplicates are detected after the first trusted probe" in page
-    assert "do not earn or enter API distribution" in page
+    assert "If multiple proxies use the same network address, only one can earn." in page
 
 
 def test_admin_dashboard_exposes_create_delete_and_payout_controls(app, client):

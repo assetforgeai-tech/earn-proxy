@@ -101,8 +101,9 @@
     <span>Sort by {{ inventory.query.sort }} · {{ inventory.query.direction|upper }} · credentials hidden</span>
   </div>
 
+  <p class="admin-proxy-scroll-hint" hidden>If columns are clipped, scroll horizontally to view all columns.</p>
   {% if inventory.views %}
-  <div class="table-wrap">
+  <div class="table-wrap admin-proxy-scroll" role="region" tabindex="0" aria-label="Scrollable global proxy inventory" data-scroll-hint="admin-proxy-scroll-hint">
     <table class="responsive-table compact-data-table admin-proxy-table">
       <caption>Global proxy inventory. Upstream credentials are never rendered.</caption>
       <thead>

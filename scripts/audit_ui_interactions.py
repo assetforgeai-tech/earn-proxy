@@ -31,7 +31,7 @@ with sync_playwright() as playwright:
     page.goto(f"{BASE_URL}/register")
     page.get_by_label("Email").fill(contributor_email)
     page.get_by_label("Password").fill(contributor_password)
-    page.get_by_role("button", name="Register").click()
+    page.get_by_role("button", name="Create account").click()
     page.wait_for_url(f"{BASE_URL}/login")
 
     page.goto(f"{BASE_URL}/login")
@@ -90,7 +90,7 @@ with sync_playwright() as playwright:
     mobile.goto(f"{BASE_URL}/dashboard/proxies")
     mobile.wait_for_load_state("networkidle")
     mobile.get_by_role("button", name="Open navigation").click()
-    assert mobile.get_by_role("link", name="Proxy pool", exact=True).get_attribute("aria-current") == "page"
+    assert mobile.get_by_role("link", name="My proxies", exact=True).get_attribute("aria-current") == "page"
     mobile.keyboard.press("Escape")
     mobile.locator("#add-proxy > summary").click()
     assert mobile.get_by_role("button", name="Import securely").is_visible()
