@@ -2878,7 +2878,7 @@ body.authenticated .priority-action-grid {
   position: relative;
 }
 
-.proxiware-nav-groups details > div {
+.proxiware-nav-groups details[open] > div {
   position: absolute;
   top: calc(100% + 8px);
   left: 0;

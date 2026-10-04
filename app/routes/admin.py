@@ -171,6 +171,24 @@ def _proxiware_columns(db, table: str) -> set[str]:
     return {str(row["name"]) for row in db.execute(f'PRAGMA table_info("{table}")').fetchall()}
 
 
+def _proxiware_current_blocked_swap_count(db) -> int:
+    required_columns = {"id", "provider", "status", "qualification", "missing_at"}
+    if not required_columns.issubset(_proxiware_columns(db, "provider_assignments")):
+        return 0
+    return int(
+        db.execute(
+            "SELECT COUNT(DISTINCT pa.id) AS count FROM swap_jobs sj "
+            "JOIN provider_assignments pa ON pa.id=sj.old_assignment_id AND pa.provider=sj.provider "
+            "WHERE sj.provider=? AND sj.state='blocked' AND pa.missing_at IS NULL "
+            "AND LOWER(COALESCE(pa.status,'')) IN ('active','current') "
+            "AND LOWER(COALESCE(pa.qualification,''))='risk' "
+            "AND NOT EXISTS (SELECT 1 FROM swap_jobs newer WHERE newer.provider=sj.provider "
+            "AND newer.old_assignment_id=sj.old_assignment_id AND newer.id>sj.id)",
+            ("proxiware",),
+        ).fetchone()["count"]
+    )
+
+
 def _proxiware_page_args(args) -> dict[str, object]:
     try:
         page = max(1, min(10_000_000, int(str(args.get("page") or "1"))))
@@ -416,12 +434,7 @@ def _proxiware_snapshot(db, area: str, args) -> dict[str, object]:
                 provider_params,
             ).fetchone()["count"]
         )
-        summary["swaps_blocked"] = int(
-            db.execute(
-                f"SELECT COUNT(*) AS count FROM swap_jobs WHERE {provider_clause} AND state='blocked'",
-                provider_params,
-            ).fetchone()["count"]
-        )
+        summary["swaps_blocked"] = _proxiware_current_blocked_swap_count(db)
         summary["swaps_reconciliation_required"] = int(
             db.execute(
                 f"SELECT COUNT(*) AS count FROM swap_jobs WHERE {provider_clause} AND state='reconciliation_required'",
@@ -713,11 +726,7 @@ def _proxiware_snapshot(db, area: str, args) -> dict[str, object]:
                             params,
                         ).fetchone()["count"]
                     )
-                    summary["swaps_blocked"] = int(
-                        db.execute(
-                            f"SELECT COUNT(*) AS count FROM {table} WHERE {provider_clause} AND state='blocked'", params
-                        ).fetchone()["count"]
-                    )
+                    summary["swaps_blocked"] = _proxiware_current_blocked_swap_count(db)
     total = (
         area_total
         if table and _proxiware_table_exists(db, table)

@@ -65,6 +65,8 @@ def test_proxiware_uses_grouped_navigation_and_tablet_card_contract(client):
     tablet_rules = css[css.rindex("@media (max-width: 900px)") :]
     assert ".proxiware-table" in tablet_rules
     assert "min-width: 0;" in tablet_rules
+    assert re.search(r"\.proxiware-nav-groups details\[open\] > div\s*\{[^}]*display:\s*grid", css)
+    assert not re.search(r"\.proxiware-nav-groups details > div\s*\{[^}]*display:\s*grid", css)
 
 
 def test_contributor_inventory_switches_to_labeled_cards_before_table_overflows():

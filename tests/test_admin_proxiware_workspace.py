@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from conftest import login_admin
@@ -20,6 +21,87 @@ def test_proxiware_workspace_is_admin_only_and_never_caches(client):
     assert "Sync now" not in page
     assert "Automatic swaps cannot run until the mutation adapter is enabled." not in page
     assert "manual_action_required" not in page
+
+
+def test_proxiware_blocked_swap_count_only_includes_current_risk_assignments(client, db):
+    ensure_proxiware_swap_schema(db)
+    now = "2026-10-05T00:00:00+00:00"
+    db.execute(
+        "INSERT INTO provider_subscriptions(provider,external_id,status,created_at,updated_at) "
+        "VALUES('proxiware','blocked-count-sub','active',?,?)",
+        (now, now),
+    )
+    subscription_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    assignment_ids = {}
+    for external_id, qualification, status, missing_at in (
+        ("blocked-count-allow", "allow", "active", None),
+        ("blocked-count-risk", "risk", "active", None),
+        ("blocked-count-missing", "risk", "missing", now),
+        ("blocked-count-retried", "risk", "active", None),
+    ):
+        db.execute(
+            "INSERT INTO provider_assignments(subscription_id,provider,external_id,host,port,status,"
+            "live_status,qualification,missing_at,created_at,updated_at) "
+            "VALUES(?,'proxiware',?,'blocked-count.example',8080,?,'live',?,?,?,?)",
+            (subscription_id, external_id, status, qualification, missing_at, now, now),
+        )
+        assignment_ids[external_id] = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    for external_id in (
+        "blocked-count-allow",
+        "blocked-count-risk",
+        "blocked-count-missing",
+        "blocked-count-retried",
+    ):
+        db.execute(
+            "INSERT INTO swap_jobs(provider,subscription_id,old_assignment_id,state,reason,created_at,updated_at) "
+            "VALUES('proxiware',?,?,'blocked','test',?,?)",
+            (subscription_id, assignment_ids[external_id], now, now),
+        )
+    db.execute(
+        "INSERT INTO swap_jobs(provider,subscription_id,old_assignment_id,state,reason,created_at,updated_at) "
+        "VALUES('proxiware',?,?,'blocked','duplicate-history',?,?)",
+        (subscription_id, assignment_ids["blocked-count-risk"], now, now),
+    )
+    db.execute(
+        "INSERT INTO swap_jobs(provider,subscription_id,old_assignment_id,state,reason,created_at,updated_at) "
+        "VALUES('proxiware',?,?,'pending','newer-retry',?,?)",
+        (subscription_id, assignment_ids["blocked-count-retried"], now, now),
+    )
+    db.execute(
+        "INSERT INTO swap_jobs(provider,subscription_id,old_assignment_id,state,reason,created_at,updated_at) "
+        "VALUES('proxiware',?,999999,'blocked','orphaned-history',?,?)",
+        (subscription_id, now, now),
+    )
+    db.commit()
+
+    login_admin(client)
+    page = client.get("/admin/providers/proxiware").get_data(as_text=True)
+
+    assert "<article><span>Blocked swaps</span><strong>1</strong>" in page
+    assert "Current Risk proxies held by a safety check" in page
+
+    db.execute(
+        "UPDATE provider_assignments SET qualification='allow' WHERE id=?",
+        (assignment_ids["blocked-count-risk"],),
+    )
+    db.commit()
+    page = client.get("/admin/providers/proxiware").get_data(as_text=True)
+
+    assert "<article><span>Blocked swaps</span><strong>0</strong>" in page
+
+
+def test_proxiware_navigation_dropdowns_share_an_exclusive_details_group(client):
+    login_admin(client)
+
+    page = client.get("/admin/providers/proxiware/inventory").get_data(as_text=True)
+    nav = page.split('<nav class="proxiware-nav-groups"', 1)[1].split("</nav>", 1)[0]
+    groups = re.findall(r"<details([^>]*)><summary>(Inventory|Operations|Connection)</summary>", nav)
+
+    assert len(groups) == 3
+    assert all('name="proxiware-navigation"' in attributes for attributes, _ in groups)
+    assert [label for attributes, label in groups if " open" in attributes] == ["Inventory"]
 
 
 def test_proxiware_overview_shows_each_worker_state(client, db):
