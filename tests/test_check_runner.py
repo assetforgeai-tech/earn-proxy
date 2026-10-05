@@ -5,6 +5,8 @@ import time
 from concurrent.futures import Future
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from app.check_service import CheckRunner, SchedulerState
 from app.checker import PROBE_URLS
 
@@ -252,6 +254,40 @@ def test_runner_wait_delay_is_until_next_due_work_not_busy_loop():
     state = SchedulerState(interval_minutes=60, concurrency=5, last_sweep_at=now)
     runner = CheckRunner(state=state)
     assert runner.next_wait_seconds(now=now + timedelta(minutes=5)) == 3300
+
+
+@pytest.mark.parametrize("worker", ["health", "earnapp"])
+def test_worker_rechecks_database_before_sleeping_past_new_work(app, monkeypatch, worker):
+    from app.db import get_db
+    from app.services.proxies import add_proxy
+    from app.services.users import create_user
+
+    due_at = (datetime.now(UTC) + timedelta(hours=4)).isoformat()
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, f"scheduler-{worker}@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, f"scheduler-{worker}.example:9000:u:p")
+        if worker == "health":
+            db.execute("UPDATE proxies SET next_check_at=? WHERE id=?", (due_at, proxy_id))
+        else:
+            db.execute(
+                "UPDATE proxies SET status='online', earnapp_next_check_at=? WHERE id=?",
+                (due_at, proxy_id),
+            )
+        db.commit()
+
+    runner = CheckRunner(app=app, state=SchedulerState(), worker=worker)
+    waits = []
+
+    def stop_after_wait(seconds):
+        waits.append(seconds)
+        runner.stop()
+
+    monkeypatch.setattr(runner._stop, "wait", stop_after_wait)
+    runner.run_forever()
+    runner.close()
+
+    assert waits == [5]
 
 
 def test_runner_stop_event_interrupts_wait_without_spinning():

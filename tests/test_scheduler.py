@@ -83,7 +83,7 @@ def test_run_forever_processes_due_backlog_without_added_spacing(app, monkeypatc
     assert waits == [0]
 
 
-def test_run_forever_sleeps_until_next_health_window_after_last_batch(app, monkeypatch):
+def test_run_forever_caps_idle_wait_after_last_batch(app, monkeypatch):
     runner = CheckRunner(app=app, state=SchedulerState(interval_minutes=60, concurrency=5))
     finished_at = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
     calls = 0
@@ -102,7 +102,7 @@ def test_run_forever_sleeps_until_next_health_window_after_last_batch(app, monke
     monkeypatch.setattr(runner._stop, "wait", lambda seconds: waits.append(seconds))
     runner.run_forever()
 
-    assert waits and waits[0] >= 3500
+    assert waits and waits[0] == 5
 
 
 def test_run_forever_wakes_for_a_durable_retry_before_the_hour_window(app, monkeypatch):
@@ -131,7 +131,7 @@ def test_run_forever_wakes_for_a_durable_retry_before_the_hour_window(app, monke
     assert waits and waits[0] <= 360
 
 
-def test_run_forever_keeps_empty_inventory_sleeping_until_the_health_window(app, monkeypatch):
+def test_run_forever_polls_empty_inventory_for_new_queue_work(app, monkeypatch):
     closed_at = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
     runner = CheckRunner(app=app, state=SchedulerState(interval_minutes=60, concurrency=5))
     runner.mark_health_sweep(closed_at)
@@ -140,7 +140,46 @@ def test_run_forever_keeps_empty_inventory_sleeping_until_the_health_window(app,
 
     runner.run_forever()
 
-    assert waits and waits[0] >= 3500
+    assert waits == [5]
+
+
+def test_run_forever_polls_for_new_imports_after_completing_a_batch(app, monkeypatch):
+    from app.db import get_db
+    from app.services.proxies import add_proxy
+    from app.services.users import create_user
+
+    now = datetime.now(UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "post-batch-import@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "post-batch-import.example:9000:u:p")
+        db.execute(
+            "UPDATE proxies SET next_check_at=? WHERE id=?", ((now - timedelta(seconds=1)).isoformat(), proxy_id)
+        )
+        db.commit()
+
+    runner = CheckRunner(
+        app=app,
+        state=SchedulerState(interval_minutes=60, concurrency=1, last_health_sweep_at=now),
+    )
+    waits = []
+
+    def complete_batch():
+        with app.app_context():
+            get_db().execute(
+                "UPDATE proxies SET next_check_at=? WHERE id=?",
+                ((datetime.now(UTC) + timedelta(minutes=60)).isoformat(), proxy_id),
+            )
+            get_db().commit()
+        return 1
+
+    monkeypatch.setattr(runner, "run_batch", complete_batch)
+    monkeypatch.setattr(runner._stop, "wait", lambda seconds: (waits.append(seconds), runner.stop()))
+
+    runner.run_forever()
+    runner.close()
+
+    assert waits == [5]
 
 
 def test_run_forever_wakes_when_a_stale_claim_expires_before_next_check(app, monkeypatch):

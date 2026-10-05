@@ -31,6 +31,7 @@ from app.services.proxies import reveal_proxy
 
 PROBE_CIRCUIT_FAILURE_THRESHOLD = 3
 PROBE_CIRCUIT_COOLDOWN_SECONDS = 300
+MAX_QUEUE_POLL_SECONDS = 5
 
 
 def _call_compatible_checker(checker, proxy, *, timeout: float | None = None, runner=None, unavailable_endpoints=None):
@@ -551,7 +552,7 @@ class CheckRunner:
                         durable_wait = self._next_health_wake_seconds(get_db(), now)
                 waits = [value for value in (health_wait, durable_wait) if value and value > 0]
                 wait_seconds = min(waits) if waits else 1
-            self._stop.wait(wait_seconds)
+            self._stop.wait(min(MAX_QUEUE_POLL_SECONDS, wait_seconds))
 
     def run_earnapp_forever(self) -> None:
         while not self.stopped:
@@ -580,7 +581,7 @@ class CheckRunner:
                         durable_wait = self._next_earnapp_wake_seconds(get_db(), now)
                 waits = [value for value in (window_wait, durable_wait) if value and value > 0]
                 wait_seconds = min(waits) if waits else 1
-            self._stop.wait(wait_seconds)
+            self._stop.wait(min(MAX_QUEUE_POLL_SECONDS, wait_seconds))
 
 
 def main() -> int:
