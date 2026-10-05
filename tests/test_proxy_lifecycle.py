@@ -31,8 +31,7 @@ def test_replace_resets_earnapp_retry_state(app):
         user_id = create_user(db, "replace-retry@example.com", "password", status="active")
         proxy_id = add_proxy(db, user_id, "old-retry.example:9000:u:p")
         db.execute(
-            "UPDATE proxies SET earnapp_retry_count=4, earnapp_verdict='WSS_FAIL', "
-            "earnapp_next_check_at=? WHERE id=?",
+            "UPDATE proxies SET earnapp_retry_count=4, earnapp_verdict='WSS_FAIL', earnapp_next_check_at=? WHERE id=?",
             ((now + timedelta(days=1)).isoformat(), proxy_id),
         )
         db.commit()

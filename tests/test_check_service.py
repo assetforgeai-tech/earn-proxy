@@ -702,7 +702,7 @@ def test_earnapp_probe_failures_use_bounded_retry_backoff(app, prior_failures, e
         user_id = create_user(db, f"earnapp-retry-{prior_failures}@example.com", "password", status="active")
         proxy_id = add_proxy(db, user_id, "retry-proxy.example:9000:u:p")
         db.execute(
-        "UPDATE proxies SET status='online', detected_protocol='socks5', earnapp_retry_count=?, "
+            "UPDATE proxies SET status='online', detected_protocol='socks5', earnapp_retry_count=?, "
             "earnapp_claim_token='retry-claim' WHERE id=?",
             (prior_failures, proxy_id),
         )
@@ -733,7 +733,7 @@ def test_earnapp_definitive_verdict_resets_probe_retry_count(app):
         user_id = create_user(db, "earnapp-retry-reset@example.com", "password", status="active")
         proxy_id = add_proxy(db, user_id, "retry-reset.example:9000:u:p")
         db.execute(
-        "UPDATE proxies SET status='online', detected_protocol='socks5', earnapp_retry_count=4, "
+            "UPDATE proxies SET status='online', detected_protocol='socks5', earnapp_retry_count=4, "
             "earnapp_claim_token='retry-reset-claim' WHERE id=?",
             (proxy_id,),
         )

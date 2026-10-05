@@ -362,11 +362,7 @@ def _quality_check_view(proxy, *, now: datetime, pending: bool) -> dict[str, str
         claimed_until = None
     if claimed_until and claimed_until.tzinfo is None:
         claimed_until = claimed_until.replace(tzinfo=UTC)
-    if (
-        claimed_until
-        and claimed_until > now
-        and str(proxy["earnapp_claim_token"] or "").strip()
-    ):
+    if claimed_until and claimed_until > now and str(proxy["earnapp_claim_token"] or "").strip():
         return {
             "state": "checking",
             "label": "Checking",

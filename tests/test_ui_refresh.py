@@ -59,7 +59,9 @@ def test_contributor_pending_quality_status_distinguishes_active_claim_from_sche
 
     with app.app_context():
         db = get_db()
-        user_id = db.execute("SELECT id FROM users WHERE email=?", ("pending-quality-state@example.com",)).fetchone()["id"]
+        user_id = db.execute("SELECT id FROM users WHERE email=?", ("pending-quality-state@example.com",)).fetchone()[
+            "id"
+        ]
         active_id = add_proxy(db, user_id, "active-check.example:9000:u:p")
         waiting_id = add_proxy(db, user_id, "waiting-check.example:9001:u:p")
         now = datetime.now(UTC)

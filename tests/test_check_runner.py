@@ -448,8 +448,7 @@ def test_earnapp_batch_finishes_claimed_parallel_probes_after_stop(app, monkeypa
     assert rows[1]["earnapp_claimed_until"] is None
     assert rows[1]["earnapp_claim_token"] is None
     assert all(
-        datetime.fromisoformat(row["earnapp_next_check_at"]) >= datetime.now(UTC) + timedelta(days=6)
-        for row in rows
+        datetime.fromisoformat(row["earnapp_next_check_at"]) >= datetime.now(UTC) + timedelta(days=6) for row in rows
     )
 
 
