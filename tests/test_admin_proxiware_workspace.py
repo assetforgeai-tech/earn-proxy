@@ -97,11 +97,13 @@ def test_proxiware_navigation_dropdowns_share_an_exclusive_details_group(client)
 
     page = client.get("/admin/providers/proxiware/inventory").get_data(as_text=True)
     nav = page.split('<nav class="proxiware-nav-groups"', 1)[1].split("</nav>", 1)[0]
-    groups = re.findall(r"<details([^>]*)><summary>(Inventory|Operations|Connection)</summary>", nav)
+    groups = re.findall(r"<details([^>]*)><summary([^>]*)>(Inventory|Operations|Connection)</summary>", nav)
 
     assert len(groups) == 3
-    assert all('name="proxiware-navigation"' in attributes for attributes, _ in groups)
-    assert [label for attributes, label in groups if " open" in attributes] == ["Inventory"]
+    assert all('name="proxiware-navigation"' in attributes for attributes, _, _ in groups)
+    assert all(" open" not in attributes for attributes, _, _ in groups)
+    assert [label for attributes, _, label in groups if 'class="is-current"' in attributes] == ["Inventory"]
+    assert 'data-proxiware-area="inventory" aria-current="page"' in nav
 
 
 def test_proxiware_overview_shows_each_worker_state(client, db):

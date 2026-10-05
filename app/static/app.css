@@ -2869,6 +2869,7 @@ body.authenticated .priority-action-grid {
 .proxiware-nav-groups summary:hover,
 .proxiware-nav-groups summary:focus-visible,
 .proxiware-nav-root.is-active,
+.proxiware-nav-groups details.is-current > summary,
 .proxiware-nav-groups details[open] > summary {
   background: var(--shell-primary-soft);
   color: var(--shell-primary);
