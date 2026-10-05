@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS proxies (
     earnapp_reason TEXT NOT NULL DEFAULT '',
     earnapp_checked_at TEXT,
     earnapp_next_check_at TEXT,
+    earnapp_retry_count INTEGER NOT NULL DEFAULT 0,
     egress_verified_at TEXT,
     egress_attestation_source TEXT NOT NULL DEFAULT '',
     earnapp_claimed_until TEXT,
@@ -71,6 +72,8 @@ CREATE TABLE IF NOT EXISTS proxies (
 
 CREATE INDEX IF NOT EXISTS proxies_due_idx
     ON proxies(archived_at, next_check_at, check_claimed_until);
+CREATE INDEX IF NOT EXISTS proxies_earnapp_due_idx
+    ON proxies(archived_at, status, earnapp_next_check_at, earnapp_claimed_until);
 CREATE INDEX IF NOT EXISTS proxies_exit_idx
     ON proxies(exit_ip, duplicate_of, created_at);
 CREATE INDEX IF NOT EXISTS proxies_distribution_idx
@@ -296,6 +299,7 @@ PROXY_MIGRATION_COLUMNS = {
     "earnapp_reason": "TEXT NOT NULL DEFAULT ''",
     "earnapp_checked_at": "TEXT",
     "earnapp_next_check_at": "TEXT",
+    "earnapp_retry_count": "INTEGER NOT NULL DEFAULT 0",
     "egress_verified_at": "TEXT",
     "egress_attestation_source": "TEXT NOT NULL DEFAULT ''",
     "earnapp_claimed_until": "TEXT",
@@ -463,6 +467,26 @@ def migrate_db(db) -> None:
             return
         legacy_columns = _columns(db, "proxies")
         _add_missing_columns(db, "proxies", PROXY_MIGRATION_COLUMNS)
+        if "earnapp_retry_count" not in legacy_columns:
+            # Recover only legacy transient failures scheduled on the 7-day verdict interval.
+            from datetime import UTC, datetime, timedelta
+            from random import uniform
+
+            current = datetime.now(UTC)
+            stale_probe_failures = db.execute(
+                "SELECT id FROM proxies WHERE archived_at IS NULL AND status='online' AND eligibility='pending' "
+                "AND earnapp_retry_count=0 AND UPPER(earnapp_verdict) IN "
+                "('TIMEOUT','WSS_FAIL','WSS_CLOSE','PROTOCOL_FAIL','UNKNOWN') "
+                "AND earnapp_next_check_at>=? ORDER BY id",
+                ((current + timedelta(hours=24)).isoformat(),),
+            ).fetchall()
+            db.executemany(
+                "UPDATE proxies SET earnapp_retry_count=1, earnapp_next_check_at=? WHERE id=?",
+                [
+                    ((current + timedelta(seconds=int(900 * uniform(0.8, 1.0)))).isoformat(), int(row["id"]))
+                    for row in stale_probe_failures
+                ],
+            )
         if _table_exists(db, "earnings_ledger"):
             # Duplicate rows must not retain a pending balance that could
             # unlock if a later recheck promotes them to canonical.
@@ -563,6 +587,10 @@ def migrate_db(db) -> None:
         )
         db.execute(
             "CREATE INDEX IF NOT EXISTS proxies_due_idx ON proxies(archived_at,next_check_at,check_claimed_until)"
+        )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS proxies_earnapp_due_idx "
+            "ON proxies(archived_at,status,earnapp_next_check_at,earnapp_claimed_until)"
         )
         db.execute("CREATE INDEX IF NOT EXISTS proxies_exit_idx ON proxies(exit_ip,duplicate_of,created_at)")
         db.execute(

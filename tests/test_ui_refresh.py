@@ -46,8 +46,40 @@ def test_contributor_proxy_page_hides_internal_identity_language(app, client):
 
     for internal_term in ("Egress identity", "Canonical", "Duplicate egress", "Awaiting probe"):
         assert internal_term not in page
-    for public_label in ("Earning eligibility", "Eligible", "Replace recommended", "Checking"):
+    for public_label in ("Earning eligibility", "Eligible", "Replace recommended", "Pending"):
         assert public_label in page
+
+
+def test_contributor_pending_quality_status_distinguishes_active_claim_from_scheduled_retry(app, client):
+    _activate_contributor(app, client, email="pending-quality-state@example.com")
+    from datetime import UTC, datetime, timedelta
+
+    from app.db import get_db
+    from app.services.proxies import add_proxy
+
+    with app.app_context():
+        db = get_db()
+        user_id = db.execute("SELECT id FROM users WHERE email=?", ("pending-quality-state@example.com",)).fetchone()["id"]
+        active_id = add_proxy(db, user_id, "active-check.example:9000:u:p")
+        waiting_id = add_proxy(db, user_id, "waiting-check.example:9001:u:p")
+        now = datetime.now(UTC)
+        db.execute(
+            "UPDATE proxies SET status='online', earnapp_claimed_until=?, earnapp_claim_token='active' WHERE id=?",
+            ((now + timedelta(minutes=5)).isoformat(), active_id),
+        )
+        db.execute(
+            "UPDATE proxies SET status='online', earnapp_verdict='WSS_FAIL', earnapp_retry_count=1, "
+            "earnapp_next_check_at=? WHERE id=?",
+            ((now + timedelta(minutes=15)).isoformat(), waiting_id),
+        )
+        db.commit()
+
+    page = client.get("/dashboard/proxies").get_data(as_text=True)
+
+    assert 'data-quality-check="checking"' in page
+    assert 'data-quality-check="scheduled"' in page
+    assert "A quality check is running." in page
+    assert "Retry scheduled" in page
 
 
 def test_proxiware_uses_grouped_navigation_and_tablet_card_contract(client):

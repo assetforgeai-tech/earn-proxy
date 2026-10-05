@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import random
 import secrets
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -14,8 +15,10 @@ from app.services.settings import get_setting
 DEFAULT_HEALTH_INTERVAL_MINUTES = 60
 DEFAULT_HEALTH_CONCURRENCY = 5
 MAX_HEALTH_CONCURRENCY = 20
+MAX_EARNAPP_CONCURRENCY = 2
 DEFAULT_PER_HOST_CONCURRENCY = 2
 MAX_PER_HOST_CONCURRENCY = 3
+EARNAPP_RETRY_BACKOFF = (timedelta(minutes=15), timedelta(hours=1), timedelta(hours=6), timedelta(hours=24))
 
 
 def _normalized_exit_ip(value: object) -> str:
@@ -81,6 +84,13 @@ def checker_settings(db) -> CheckerSettings:
         health_stale_minutes=bounded_int("health_stale_minutes", 120, 60, 1440),
         earnapp_refresh_hours=bounded_int("earnapp_refresh_hours", 168, 24, 720),
     )
+
+
+def earnapp_retry_delay(failure_count: int) -> timedelta:
+    """Return a jittered retry delay, capped at 24 hours."""
+    attempt = max(1, min(len(EARNAPP_RETRY_BACKOFF), int(failure_count)))
+    base = EARNAPP_RETRY_BACKOFF[attempt - 1]
+    return timedelta(seconds=int(base.total_seconds() * random.uniform(0.8, 1.0)))
 
 
 def batch_spacing_seconds(db, *, due_count: int) -> float:
@@ -222,6 +232,7 @@ def claim_due_proxies(db, *, now: datetime | None = None, limit: int | None = No
 
 def claim_due_earnapp(db, *, now: datetime | None = None, limit: int = 5):
     current = now or datetime.now(UTC)
+    batch_size = max(1, min(MAX_EARNAPP_CONCURRENCY, int(limit)))
     try:
         db.execute("BEGIN IMMEDIATE")
         rows = db.execute(
@@ -236,7 +247,7 @@ def claim_due_earnapp(db, *, now: datetime | None = None, limit: int = 5):
             (
                 current.isoformat(),
                 current.isoformat(),
-                max(1, min(MAX_HEALTH_CONCURRENCY, int(limit))),
+                batch_size,
             ),
         ).fetchall()
         if not rows:
@@ -245,8 +256,8 @@ def claim_due_earnapp(db, *, now: datetime | None = None, limit: int = 5):
         claimed_until = current + timedelta(minutes=10)
         claim_token = secrets.token_urlsafe(18)
         db.executemany(
-            "UPDATE proxies SET earnapp_claimed_until=?, earnapp_claim_token=? WHERE id=?",
-            [(claimed_until.isoformat(), claim_token, row["id"]) for row in rows],
+            "UPDATE proxies SET earnapp_next_check_at=?, earnapp_claimed_until=?, earnapp_claim_token=? WHERE id=?",
+            [(claimed_until.isoformat(), claimed_until.isoformat(), claim_token, row["id"]) for row in rows],
         )
         db.commit()
         placeholders = ",".join("?" for _ in rows)
@@ -317,7 +328,7 @@ def _apply_earnapp_result_locked(db, proxy_id: int, result: dict, *, now: dateti
     refresh = checker_settings(db).earnapp_refresh_hours
     previous = db.execute(
         "SELECT eligibility, credential_generation, earnapp_claim_token, archived_at, exit_ip, "
-        "egress_verified_at FROM proxies WHERE id=?",
+        "egress_verified_at, earnapp_retry_count FROM proxies WHERE id=?",
         (proxy_id,),
     ).fetchone()
     if previous is None or previous["archived_at"] is not None:
@@ -344,6 +355,13 @@ def _apply_earnapp_result_locked(db, proxy_id: int, result: dict, *, now: dateti
     if egress_changed:
         eligibility = "pending"
         reason = f"{reason}; authenticated egress changed".strip("; ")
+    retry_count = int(previous["earnapp_retry_count"] or 0)
+    if eligibility == "pending" and not egress_changed:
+        retry_count += 1
+        next_check_at = current + earnapp_retry_delay(retry_count)
+    else:
+        retry_count = 0
+        next_check_at = current if egress_changed else current + timedelta(hours=refresh)
     country_code = str(result.get("country_code") or "").strip().upper()
     country_evidence_ip = authenticated_exit_ip or (result_exit_ip if legacy_result else "")
     verified_country_code = (
@@ -379,7 +397,7 @@ def _apply_earnapp_result_locked(db, proxy_id: int, result: dict, *, now: dateti
         """
         UPDATE proxies SET eligibility=?, earnapp_verdict=?, earnapp_reason=?, earnapp_checked_at=?,
             country_code=CASE WHEN ?<>'' THEN ? ELSE country_code END,
-            earnapp_next_check_at=?, earnapp_claimed_until=NULL, earnapp_claim_token=NULL,
+            earnapp_next_check_at=?, earnapp_retry_count=?, earnapp_claimed_until=NULL, earnapp_claim_token=NULL,
             probation_started_at=CASE WHEN ? THEN ? ELSE probation_started_at END,
             accrual_cursor_at=CASE WHEN ? THEN ? ELSE accrual_cursor_at END, updated_at=? WHERE id=?
         """,
@@ -390,7 +408,8 @@ def _apply_earnapp_result_locked(db, proxy_id: int, result: dict, *, now: dateti
             current.isoformat(),
             verified_country_code,
             verified_country_code,
-            (current.isoformat() if egress_changed else (current + timedelta(hours=refresh)).isoformat()),
+            next_check_at.isoformat(),
+            retry_count,
             int(reset),
             current.isoformat(),
             int(reset),
@@ -504,7 +523,8 @@ def _apply_health_result_locked(db, proxy_id: int, result: dict, *, now: datetim
             """
             UPDATE proxies SET status='online', detected_protocol=?, consecutive_failures=0, health_mode=?,
                 online_since=?, offline_since=NULL, last_checked_at=?, check_claimed_until=NULL, check_claim_token=NULL,
-                accumulated_online_seconds=?, accumulated_offline_seconds=?, continuous_dead_since=NULL, egress_verified_at=?, eligibility=?, earnapp_next_check_at=?, probation_started_at=?,
+                accumulated_online_seconds=?, accumulated_offline_seconds=?, continuous_dead_since=NULL, egress_verified_at=?, eligibility=?, earnapp_next_check_at=?,
+                earnapp_retry_count=CASE WHEN ? THEN 0 ELSE earnapp_retry_count END, probation_started_at=?,
                 earnapp_claimed_until=CASE WHEN ? THEN NULL ELSE earnapp_claimed_until END,
                 earnapp_claim_token=CASE WHEN ? THEN NULL ELSE earnapp_claim_token END,
                 accrual_cursor_at=?, last_success_at=?, next_check_at=?, next_probe_index=?, last_probe_endpoint=?,
@@ -528,6 +548,7 @@ def _apply_health_result_locked(db, proxy_id: int, result: dict, *, now: datetim
                 current.isoformat()
                 if (egress_changed or untrusted_egress_mismatch or missing_trusted_egress)
                 else row["earnapp_next_check_at"],
+                int(continuity_reset),
                 current.isoformat() if continuity_reset else row["probation_started_at"],
                 int(egress_changed or untrusted_egress_mismatch or stale_recovery or unobserved_recovery),
                 int(egress_changed or untrusted_egress_mismatch or stale_recovery or unobserved_recovery),

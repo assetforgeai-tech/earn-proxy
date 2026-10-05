@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from app.db import get_db
 from app.earnapp_probe import classify_verdict
 from app.services.checks import (
@@ -683,6 +685,92 @@ def test_earnapp_qualification_is_not_due_on_every_hourly_health_sweep(app):
     assert datetime.fromisoformat(row["earnapp_next_check_at"]) >= now + timedelta(hours=168)
 
 
+@pytest.mark.parametrize(
+    ("prior_failures", "expected_delay"),
+    (
+        (0, timedelta(minutes=15)),
+        (1, timedelta(hours=1)),
+        (2, timedelta(hours=6)),
+        (3, timedelta(hours=24)),
+        (8, timedelta(hours=24)),
+    ),
+)
+def test_earnapp_probe_failures_use_bounded_retry_backoff(app, prior_failures, expected_delay):
+    now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, f"earnapp-retry-{prior_failures}@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "retry-proxy.example:9000:u:p")
+        db.execute(
+        "UPDATE proxies SET status='online', detected_protocol='socks5', earnapp_retry_count=?, "
+            "earnapp_claim_token='retry-claim' WHERE id=?",
+            (prior_failures, proxy_id),
+        )
+        db.commit()
+
+        apply_earnapp_result(
+            db,
+            proxy_id,
+            {"verdict": "WSS_FAIL", "reason": "temporary upstream timeout", "_earnapp_claim_token": "retry-claim"},
+            now=now,
+        )
+        row = db.execute(
+            "SELECT eligibility, earnapp_retry_count, earnapp_next_check_at FROM proxies WHERE id=?",
+            (proxy_id,),
+        ).fetchone()
+
+    retry_at = datetime.fromisoformat(row["earnapp_next_check_at"])
+    delay = retry_at - now
+    assert row["eligibility"] == "pending"
+    assert row["earnapp_retry_count"] == prior_failures + 1
+    assert expected_delay * 0.8 <= delay <= expected_delay
+
+
+def test_earnapp_definitive_verdict_resets_probe_retry_count(app):
+    now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "earnapp-retry-reset@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "retry-reset.example:9000:u:p")
+        db.execute(
+        "UPDATE proxies SET status='online', detected_protocol='socks5', earnapp_retry_count=4, "
+            "earnapp_claim_token='retry-reset-claim' WHERE id=?",
+            (proxy_id,),
+        )
+        db.commit()
+        apply_earnapp_result(
+            db,
+            proxy_id,
+            {"verdict": "BLACKLIST", "reason": "blocked", "_earnapp_claim_token": "retry-reset-claim"},
+            now=now,
+        )
+        row = db.execute(
+            "SELECT eligibility, earnapp_retry_count, earnapp_next_check_at FROM proxies WHERE id=?",
+            (proxy_id,),
+        ).fetchone()
+
+    assert row["eligibility"] == "risk"
+    assert row["earnapp_retry_count"] == 0
+    assert datetime.fromisoformat(row["earnapp_next_check_at"]) == now + timedelta(hours=168)
+
+
+def test_earnapp_claim_hard_caps_batch_at_two(app):
+    now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "earnapp-claim-cap@example.com", "password", status="active")
+        proxy_ids = [add_proxy(db, user_id, f"claim-cap-{index}.example:9000:u:p") for index in range(3)]
+        db.executemany(
+            "UPDATE proxies SET status='online', earnapp_next_check_at=? WHERE id=?",
+            [(now.isoformat(), proxy_id) for proxy_id in proxy_ids],
+        )
+        db.commit()
+
+        claimed = claim_due_earnapp(db, now=now, limit=5)
+
+    assert len(claimed) == 2
+
+
 def test_egress_change_schedules_new_earnapp_qualification(app):
     now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
     with app.app_context():
@@ -690,7 +778,8 @@ def test_egress_change_schedules_new_earnapp_qualification(app):
         user_id = create_user(db, "one@example.com", "password", status="active")
         proxy_id = add_proxy(db, user_id, "proxy.example:9000:u:p")
         db.execute(
-            "UPDATE proxies SET exit_ip='198.51.100.1', eligibility='allow', earnapp_next_check_at=? WHERE id=?",
+            "UPDATE proxies SET exit_ip='198.51.100.1', eligibility='allow', earnapp_retry_count=3, "
+            "earnapp_next_check_at=? WHERE id=?",
             ((now + timedelta(days=7)).isoformat(), proxy_id),
         )
         db.commit()
@@ -701,10 +790,11 @@ def test_egress_change_schedules_new_earnapp_qualification(app):
             now=now,
         )
         row = db.execute(
-            "SELECT eligibility, earnapp_next_check_at FROM proxies WHERE id=?",
+            "SELECT eligibility, earnapp_retry_count, earnapp_next_check_at FROM proxies WHERE id=?",
             (proxy_id,),
         ).fetchone()
     assert row["eligibility"] == "pending"
+    assert row["earnapp_retry_count"] == 0
     assert datetime.fromisoformat(row["earnapp_next_check_at"]) <= now
 
 

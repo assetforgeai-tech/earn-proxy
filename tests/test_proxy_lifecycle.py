@@ -24,6 +24,30 @@ def test_replace_updates_same_record_and_resets_probation(app):
     assert row["probation_started_at"] == now.isoformat()
 
 
+def test_replace_resets_earnapp_retry_state(app):
+    now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "replace-retry@example.com", "password", status="active")
+        proxy_id = add_proxy(db, user_id, "old-retry.example:9000:u:p")
+        db.execute(
+            "UPDATE proxies SET earnapp_retry_count=4, earnapp_verdict='WSS_FAIL', "
+            "earnapp_next_check_at=? WHERE id=?",
+            ((now + timedelta(days=1)).isoformat(), proxy_id),
+        )
+        db.commit()
+
+        replace_proxy(db, proxy_id, user_id, "new-retry.example:9001:u:new", now=now)
+        row = db.execute(
+            "SELECT earnapp_retry_count, earnapp_verdict, earnapp_next_check_at FROM proxies WHERE id=?",
+            (proxy_id,),
+        ).fetchone()
+
+    assert row["earnapp_retry_count"] == 0
+    assert row["earnapp_verdict"] == ""
+    assert row["earnapp_next_check_at"] is None
+
+
 def test_replace_resets_fast_health_observation_state(app):
     now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
     with app.app_context():

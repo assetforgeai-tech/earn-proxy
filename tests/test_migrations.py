@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime, timedelta
 
 from app import create_app
 from app.crypto import decrypt_secret
@@ -430,6 +431,49 @@ def test_attestation_migration_invalidates_rows_with_untrusted_existing_source(a
     assert row["country_code"] == ""
     assert row["duplicate_of"] is None
     assert row["health_mode"] == "strong"
+
+
+def test_migration_reschedules_only_pending_earnapp_probe_errors(app):
+    from app.db import migrate_db
+    from app.services.proxies import add_proxy
+    from app.services.users import create_user
+
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "earnapp-retry-backfill@example.com", "password", status="active")
+        failed_id = add_proxy(db, user_id, "failed-retry-backfill.example:9000:u:p")
+        allowed_id = add_proxy(db, user_id, "allowed-retry-backfill.example:9001:u:p")
+        db.execute("ALTER TABLE proxies DROP COLUMN earnapp_retry_count")
+        retry_at = (datetime.now(UTC) + timedelta(days=7)).isoformat()
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='pending', earnapp_verdict='WSS_FAIL', "
+            "earnapp_next_check_at=? WHERE id=?",
+            (retry_at, failed_id),
+        )
+        db.execute(
+            "UPDATE proxies SET status='online', eligibility='allow', earnapp_verdict='CID_SET', "
+            "exit_ip='198.51.100.55', egress_attestation_source='earnapp_tls', "
+            "earnapp_next_check_at=? WHERE id=?",
+            (retry_at, allowed_id),
+        )
+        db.commit()
+
+        migrate_db(db)
+        failed = db.execute(
+            "SELECT earnapp_retry_count, earnapp_next_check_at FROM proxies WHERE id=?",
+            (failed_id,),
+        ).fetchone()
+        allowed = db.execute(
+            "SELECT earnapp_retry_count, earnapp_next_check_at FROM proxies WHERE id=?",
+            (allowed_id,),
+        ).fetchone()
+
+    now = datetime.now(UTC)
+    failed_retry = datetime.fromisoformat(failed["earnapp_next_check_at"])
+    assert failed["earnapp_retry_count"] == 1
+    assert now <= failed_retry <= now + timedelta(minutes=15)
+    assert allowed["earnapp_retry_count"] == 0
+    assert allowed["earnapp_next_check_at"] == retry_at
 
 
 def test_migration_expires_pending_ledger_for_existing_duplicate_egress(app):

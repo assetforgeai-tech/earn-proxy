@@ -7,7 +7,7 @@ import signal
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
@@ -17,6 +17,7 @@ from app.db import get_db
 from app.earnapp_probe import probe_earnapp_proxy
 from app.proxy_intelligence import lookup_country_cached
 from app.services.checks import (
+    MAX_EARNAPP_CONCURRENCY,
     MAX_HEALTH_CONCURRENCY,
     apply_earnapp_result,
     apply_health_result,
@@ -64,6 +65,18 @@ def check_proxy(proxy, timeout: float = 10, runner=None, *, unavailable_endpoint
     )
 
 
+def _probe_earnapp_sync(parsed, protocol: str) -> dict:
+    return asyncio.run(
+        probe_earnapp_proxy(
+            parsed.host,
+            parsed.port,
+            protocol=protocol,
+            username=parsed.username,
+            password=parsed.password,
+        )
+    )
+
+
 @dataclass(frozen=True)
 class SchedulerState:
     interval_minutes: int = 60
@@ -87,6 +100,10 @@ class CheckRunner:
         self._health_executor = ThreadPoolExecutor(
             max_workers=MAX_HEALTH_CONCURRENCY,
             thread_name_prefix="proxy-health",
+        )
+        self._earnapp_executor = ThreadPoolExecutor(
+            max_workers=MAX_EARNAPP_CONCURRENCY,
+            thread_name_prefix="earnapp-probe",
         )
         self._provider_lock = threading.Lock()
         self._provider_slots: dict[str, tuple[int, threading.BoundedSemaphore]] = {}
@@ -155,6 +172,7 @@ class CheckRunner:
 
     def close(self) -> None:
         self._health_executor.shutdown(wait=True, cancel_futures=True)
+        self._earnapp_executor.shutdown(wait=True, cancel_futures=True)
 
     def unavailable_probe_endpoints(self, *, now: float | None = None) -> set[str]:
         current = time.monotonic() if now is None else float(now)
@@ -441,17 +459,20 @@ class CheckRunner:
             return completed
 
     def run_earnapp_batch(self) -> int:
-        if self.app is None:
+        if self.app is None or self.stopped:
             return 0
         with self.app.app_context():
             db = get_db()
             self.refresh_settings(db)
             settings = checker_settings(db)
-            rows = claim_due_earnapp(db, limit=min(settings.health_concurrency, 2))
+            rows = claim_due_earnapp(db, limit=min(settings.health_concurrency, MAX_EARNAPP_CONCURRENCY))
             completed = 0
             if not rows:
                 self.mark_earnapp_sweep(datetime.now(UTC))
                 return 0
+            futures = {}
+            results = []
+            submitted_ids = set()
             for row in rows:
                 if self.stopped:
                     break
@@ -459,36 +480,43 @@ class CheckRunner:
                     parsed = reveal_proxy(row)
                     protocol = str(row["detected_protocol"] or parsed.protocol)
                     if protocol not in {"http", "socks5"}:
-                        result = {
-                            "verdict": "UNKNOWN",
-                            "reason": "protocol not detected",
-                        }
+                        results.append((row, {"verdict": "UNKNOWN", "reason": "protocol not detected"}))
                     else:
-                        result = asyncio.run(
-                            probe_earnapp_proxy(
-                                parsed.host,
-                                parsed.port,
-                                protocol=protocol,
-                                username=parsed.username,
-                                password=parsed.password,
-                            )
-                        )
-                        exit_ip = str(result.get("exit_ip") or "").strip()
-                        if exit_ip:
-                            result.update(lookup_country_cached(db, exit_ip))
+                        future = self._earnapp_executor.submit(_probe_earnapp_sync, parsed, protocol)
+                        futures[future] = row
+                        submitted_ids.add(int(row["id"]))
                 except Exception as exc:  # noqa: BLE001 - external WSS failures become durable evidence
-                    result = {
-                        "verdict": "WSS_FAIL",
-                        "reason": f"checker worker failed: {exc}",
-                    }
+                    results.append((row, {"verdict": "WSS_FAIL", "reason": f"checker worker failed: {exc}"}))
+            for future in as_completed(futures):
+                row = futures[future]
+                try:
+                    result = future.result()
+                    if not isinstance(result, dict):
+                        result = {"verdict": "UNKNOWN", "reason": "checker returned no result"}
+                except Exception as exc:  # noqa: BLE001 - probe exceptions become durable retry evidence
+                    result = {"verdict": "WSS_FAIL", "reason": f"checker worker failed: {exc}"}
+                exit_ip = str(result.get("exit_ip") or "").strip()
+                if exit_ip:
+                    # Country lookup must not invalidate a quality verdict.
+                    with suppress(Exception):
+                        result.update(lookup_country_cached(db, exit_ip))
+                results.append((row, result))
+            processed_ids = set()
+            for row, result in results:
                 result["_credential_generation"] = int(row["credential_generation"] or 1)
                 result["_earnapp_claim_token"] = str(row["earnapp_claim_token"] or "")
                 apply_earnapp_result(db, int(row["id"]), result)
+                processed_ids.add(int(row["id"]))
                 completed += 1
-            if completed != len(rows):
+            unprocessed = [
+                (int(row["id"]), str(row["earnapp_claim_token"] or ""))
+                for row in rows
+                if int(row["id"]) not in processed_ids and int(row["id"]) not in submitted_ids
+            ]
+            if unprocessed:
                 release_earnapp_claims(
                     db,
-                    [(int(row["id"]), str(row["earnapp_claim_token"] or "")) for row in rows[completed:]],
+                    unprocessed,
                 )
             now = datetime.now(UTC)
             due = db.execute(

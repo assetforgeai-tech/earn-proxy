@@ -71,7 +71,7 @@
   <div class="policy-grid">
     <article><strong>Eligible · $1.00/month US</strong><span>Eligible non-US proxies earn $0.50/month while online.</span></article>
     <article><strong>Replace recommended · $0.50/month</strong><span>This proxy can earn, but replacing it may improve quality.</span></article>
-    <article><strong>Checking · $0.00/month</strong><span>Health and quality checks are still running.</span></article>
+    <article><strong>Pending · $0.00/month</strong><span>Pending proxies do not earn until their checks finish.</span></article>
     <article><strong>Available</strong><span>Can be requested once it clears the seven-day probation period.</span></article>
     <article><strong>Minimum payout</strong><span>$10.00 gross, processed manually within 48 hours.</span></article>
   </div>
@@ -216,7 +216,7 @@
       <span class="inventory-count-label">Earning eligibility</span>
       <small class="field-hint">Use these labels to decide which proxies to keep or replace.</small>
       <div class="inventory-count-list">
-        {% for value, label in (('allow', 'Eligible'), ('risk', 'Replace recommended'), ('pending', 'Checking')) %}<a class="inventory-count {{ value }} {% if inventory.query.eligibility == value %}is-active{% endif %}" href="{{ inventory.filter_url(eligibility=value) }}"><span>{{ label }}</span><strong>{{ inventory.eligibility_counts.get(value, 0) }}</strong></a>{% endfor %}
+        {% for value, label in (('allow', 'Eligible'), ('risk', 'Replace recommended'), ('pending', 'Pending')) %}<a class="inventory-count {{ value }} {% if inventory.query.eligibility == value %}is-active{% endif %}" href="{{ inventory.filter_url(eligibility=value) }}"><span>{{ label }}</span><strong>{{ inventory.eligibility_counts.get(value, 0) }}</strong></a>{% endfor %}
       </div>
     </div>
   </div>
@@ -247,7 +247,7 @@
         <option value="">All earning states</option>
         <option value="allow"{% if inventory.query.eligibility == 'allow' %} selected{% endif %}>Eligible</option>
         <option value="risk"{% if inventory.query.eligibility == 'risk' %} selected{% endif %}>Replace recommended</option>
-        <option value="pending"{% if inventory.query.eligibility == 'pending' %} selected{% endif %}>Checking</option>
+        <option value="pending"{% if inventory.query.eligibility == 'pending' %} selected{% endif %}>Pending</option>
       </select>
     </div>
     <div class="field-group">
@@ -286,12 +286,12 @@
         <tbody>
           {% for item in proxy_views %}
             {% set proxy = item.row %}
-            {% set earning_label = {'allow': 'Eligible', 'risk': 'Replace recommended', 'pending': 'Checking', 'excluded': 'Not earning'}.get(item.earning.state, 'Checking') %}
+            {% set earning_label = {'allow': 'Eligible', 'risk': 'Replace recommended', 'pending': item.quality_check.label, 'excluded': 'Not earning'}.get(item.earning.state, 'Pending') %}
             <tr>
               <th scope="row" data-label="Endpoint" class="mono breakable">{{ proxy.host }}:{{ proxy.port }}</th>
               <td data-label="Protocol">{{ proxy.detected_protocol|upper }}</td>
               <td data-label="Status"><span class="badge {{ proxy.status }}">{{ proxy.status|capitalize }}</span></td>
-              <td data-label="Earning status"><span class="earning-status-main"><span class="badge {{ item.earning.state }}">{{ earning_label }}</span><small class="rate-label">${{ '%.2f'|format(item.earning.rate_micro_usd / 1000000) }}/month</small></span>{% if item.earning.state == 'excluded' %}<small class="field-hint">Another proxy already uses this network address.</small>{% elif item.earning.state == 'pending' %}<small class="field-hint">Checks are still running.</small>{% elif item.earning.state == 'risk' %}<small class="field-hint">Replace this proxy for the best earning quality.</small>{% endif %}</td>
+              <td data-label="Earning status"><span class="earning-status-main"><span class="badge {{ item.earning.state }}"{% if item.earning.state == 'pending' %} data-quality-check="{{ item.quality_check.state }}"{% endif %}>{{ earning_label }}</span><small class="rate-label">${{ '%.2f'|format(item.earning.rate_micro_usd / 1000000) }}/month</small></span>{% if item.earning.state == 'excluded' %}<small class="field-hint">Another proxy already uses this network address.</small>{% elif item.earning.state == 'pending' %}<small class="field-hint" data-quality-check-detail>{{ item.quality_check.detail }}{% if item.quality_check.next_iso %} · Next: <time datetime="{{ item.quality_check.next_iso }}">{{ item.quality_check.next }}</time>{% endif %}</small>{% elif item.earning.state == 'risk' %}<small class="field-hint">Replace this proxy for the best earning quality.</small>{% endif %}</td>
               <td data-label="Earn" class="numeric-cell earn-cell"><span class="earn-main"><strong>${{ '%.6f'|format(item.earnings.total_micro_usd / 1000000) }}</strong><small class="field-hint">Pending ${{ '%.6f'|format(item.earnings.pending_micro_usd / 1000000) }} · Available ${{ '%.6f'|format(item.earnings.available_micro_usd / 1000000) }}</small></span></td>
               <td data-label="Online hours" class="numeric-cell duration-cell" title="{{ '%.2f'|format(item.uptime.online) }} total hours">{{ item.uptime.online_label }}</td>
               <td data-label="Offline hours" class="numeric-cell duration-cell" title="{{ '%.2f'|format(item.uptime.offline) }} total hours">{{ item.uptime.offline_label }}</td>

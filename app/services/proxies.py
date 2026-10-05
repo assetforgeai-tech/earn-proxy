@@ -299,6 +299,7 @@ def replace_proxy(db, proxy_id: int, user_id: int, raw_proxy: str, *, now: datet
             credential_started_at=?,
             detected_protocol='unknown', status='pending', eligibility='pending',
             earnapp_verdict='', earnapp_reason='', earnapp_checked_at=NULL, earnapp_next_check_at=NULL,
+            earnapp_retry_count=0,
             earnapp_claimed_until=NULL, earnapp_claim_token=NULL, egress_verified_at=NULL,
             egress_attestation_source='', exit_ip=NULL, country_code='',
             duplicate_of=NULL, consecutive_failures=0, online_since=NULL,

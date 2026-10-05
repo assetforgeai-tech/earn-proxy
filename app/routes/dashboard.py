@@ -353,6 +353,65 @@ def _freshness_view(proxy, *, now: datetime, stale_minutes: int) -> dict[str, ob
     }
 
 
+def _quality_check_view(proxy, *, now: datetime, pending: bool) -> dict[str, str]:
+    if not pending:
+        return {"state": "idle", "label": "", "detail": "", "next": "", "next_iso": ""}
+    try:
+        claimed_until = datetime.fromisoformat(proxy["earnapp_claimed_until"] or "")
+    except ValueError:
+        claimed_until = None
+    if claimed_until and claimed_until.tzinfo is None:
+        claimed_until = claimed_until.replace(tzinfo=UTC)
+    if (
+        claimed_until
+        and claimed_until > now
+        and str(proxy["earnapp_claim_token"] or "").strip()
+    ):
+        return {
+            "state": "checking",
+            "label": "Checking",
+            "detail": "A quality check is running.",
+            "next": "",
+            "next_iso": "",
+        }
+
+    next_check = _timestamp_view(proxy["earnapp_next_check_at"], empty_label="")
+    if str(proxy["status"] or "") != "online":
+        return {
+            "state": "waiting",
+            "label": "Waiting for connection",
+            "detail": "This proxy will be checked when it comes online.",
+            "next": "",
+            "next_iso": "",
+        }
+    retry_count = int(proxy["earnapp_retry_count"] or 0)
+    if next_check["iso"]:
+        try:
+            next_at = datetime.fromisoformat(next_check["iso"])
+        except ValueError:
+            next_at = None
+        if next_at and next_at > now:
+            label = "Retry scheduled" if retry_count else "Next check scheduled"
+            return {
+                "state": "scheduled",
+                "label": label,
+                "detail": (
+                    "A temporary check issue occurred; another attempt is scheduled."
+                    if retry_count
+                    else "Another quality check is scheduled."
+                ),
+                "next": next_check["label"],
+                "next_iso": next_check["iso"],
+            }
+    return {
+        "state": "waiting",
+        "label": "Waiting",
+        "detail": "Waiting for the next quality check.",
+        "next": "",
+        "next_iso": "",
+    }
+
+
 def _identity_view(proxy) -> dict[str, str]:
     """Expose dedupe state without revealing egress identity to contributors."""
     source = str(proxy["egress_attestation_source"] or "").strip().lower()
@@ -476,6 +535,7 @@ def _render_dashboard(section: str):
             ),
             "identity": identity,
             "earning": earning,
+            "quality_check": _quality_check_view(proxy, now=now, pending=earning["state"] == "pending"),
             "earnings": proxy_earnings.get(int(proxy["id"])),
         }
         for proxy in proxies

@@ -402,7 +402,8 @@ def test_health_batch_stop_does_not_release_a_running_claim(app, monkeypatch):
     assert row["check_claim_token"]
 
 
-def test_earnapp_batch_stop_releases_unprocessed_claims(app, monkeypatch):
+def test_earnapp_batch_finishes_claimed_parallel_probes_after_stop(app, monkeypatch):
+    start_barrier = threading.Barrier(2)
     from app.db import get_db
     from app.services.proxies import add_proxy
     from app.services.users import create_user
@@ -423,13 +424,14 @@ def test_earnapp_batch_stop_releases_unprocessed_claims(app, monkeypatch):
         db.commit()
 
     async def one_result_then_stop(*args, **kwargs):
+        start_barrier.wait(timeout=2)
         runner.stop()
         return {"verdict": "CID_SET", "reason": "cid"}
 
     runner = CheckRunner(app=app, state=SchedulerState(interval_minutes=60, concurrency=2), worker="earnapp")
     monkeypatch.setattr("app.check_service.probe_earnapp_proxy", one_result_then_stop)
 
-    assert runner.run_earnapp_batch() == 1
+    assert runner.run_earnapp_batch() == 2
     with app.app_context():
         rows = (
             get_db()
@@ -442,10 +444,13 @@ def test_earnapp_batch_stop_releases_unprocessed_claims(app, monkeypatch):
 
     assert rows[0]["eligibility"] == "allow"
     assert rows[0]["earnapp_claimed_until"] is None
-    assert rows[1]["eligibility"] == "pending"
+    assert rows[1]["eligibility"] == "allow"
     assert rows[1]["earnapp_claimed_until"] is None
     assert rows[1]["earnapp_claim_token"] is None
-    assert datetime.fromisoformat(rows[1]["earnapp_next_check_at"]) <= datetime.now(UTC)
+    assert all(
+        datetime.fromisoformat(row["earnapp_next_check_at"]) >= datetime.now(UTC) + timedelta(days=6)
+        for row in rows
+    )
 
 
 def test_earnapp_batch_enriches_country_without_adding_work_to_health_checks(app, monkeypatch):
@@ -483,3 +488,42 @@ def test_earnapp_batch_enriches_country_without_adding_work_to_health_checks(app
     assert row["country_code"] == "US"
     assert len(lookup_calls) == 1
     assert lookup_calls[0][1] == "8.8.8.8"
+
+
+def test_earnapp_batch_runs_two_probes_concurrently(app, monkeypatch):
+    import asyncio
+
+    from app.db import get_db
+    from app.services.proxies import add_proxy
+    from app.services.users import create_user
+
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "earnapp-concurrency@example.com", "password", status="active")
+        proxy_ids = [add_proxy(db, user_id, f"parallel-{index}.example:9000:u:p") for index in range(2)]
+        db.executemany(
+            "UPDATE proxies SET status='online', detected_protocol='socks5', earnapp_next_check_at=? WHERE id=?",
+            [(datetime.now(UTC).isoformat(), proxy_id) for proxy_id in proxy_ids],
+        )
+        db.commit()
+
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    async def probe(*_args, **_kwargs):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        await asyncio.sleep(0.08)
+        with lock:
+            active -= 1
+        return {"verdict": "BLACKLIST", "reason": "blocked"}
+
+    monkeypatch.setattr("app.check_service.probe_earnapp_proxy", probe)
+    runner = CheckRunner(app=app, state=SchedulerState(concurrency=5), worker="earnapp")
+    assert runner.run_earnapp_batch() == 2
+    runner.close()
+
+    assert peak == 2
