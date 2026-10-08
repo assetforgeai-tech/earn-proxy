@@ -12,8 +12,10 @@ install -m 0644 /opt/proxy-relay/deploy/proxy-relay-healthcheck.timer /etc/syste
 install -m 0750 /opt/proxy-relay/deploy/proxy-relay-backup.sh /usr/local/sbin/proxy-relay-backup
 install -m 0644 /opt/proxy-relay/deploy/proxy-relay-backup.service /etc/systemd/system/proxy-relay-backup.service
 install -m 0644 /opt/proxy-relay/deploy/proxy-relay-backup.timer /etc/systemd/system/proxy-relay-backup.timer
+install -m 0644 /opt/proxy-relay/deploy/proxy-relay-proxiware-sync.service /etc/systemd/system/proxy-relay-proxiware-sync.service
+install -m 0644 /opt/proxy-relay/deploy/proxy-relay-proxiware-sync.timer /etc/systemd/system/proxy-relay-proxiware-sync.timer
 systemctl daemon-reload
-systemctl enable --now proxy-relay proxy-relay-engine proxy-relay-healthcheck.timer proxy-relay-backup.timer
+systemctl enable --now proxy-relay proxy-relay-engine proxy-relay-healthcheck.timer proxy-relay-backup.timer proxy-relay-proxiware-sync.timer
 systemctl enable --now caddy
 ufw allow 20001:29999/tcp
 ufw allow 30001:39999/tcp

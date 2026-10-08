@@ -1,9 +1,24 @@
-import base64, csv, hashlib, hmac, io, json, os, re, secrets, sqlite3, subprocess, threading, time, uuid
+import base64
+import csv
+import hashlib
+import hmac
+import io
+import ipaddress
+import json
+import os
+import re
+import secrets
+import sqlite3
+import subprocess
+import threading
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlsplit, urlencode
 from functools import wraps
-from flask import Flask, request, redirect, session, render_template, Response, flash, jsonify
+from urllib.parse import urlencode, urlsplit
+
 from checker import check_proxy
+from flask import Flask, Response, flash, jsonify, redirect, render_template, request, session
 
 ROOT=os.environ.get('RELAY_ROOT','/opt/proxy-relay'); DB=os.path.join(ROOT,'relay.db'); CFG=os.path.join(ROOT,'3proxy.cfg')
 HTTP_BASE=int(os.environ.get('HTTP_PORT_BASE','20001')); SOCKS_BASE=int(os.environ.get('SOCKS_PORT_BASE','30001'))
@@ -11,6 +26,7 @@ ADMIN_USER=os.environ.get('ADMIN_USER','admin'); ADMIN_PASS=os.environ.get('ADMI
 URL_PREFIX=os.environ.get('RELAY_URL_PREFIX','').rstrip('/')
 RELAY_FEED_KEY=os.environ.get('RELAY_FEED_KEY','')
 RELAY_SSO_SECRET=os.environ.get('RELAY_SSO_SECRET','')
+PROXIWARE_SLOT_FEED_URL=os.environ.get('PROXIWARE_SLOT_FEED_URL','http://127.0.0.1:8100/internal/api/v1/proxiware-transfer-feed')
 app=Flask(__name__); app.secret_key=os.environ.get('SESSION_SECRET','replace-me')
 app.config.update(SESSION_COOKIE_NAME='relay_session',SESSION_COOKIE_PATH=URL_PREFIX or '/',SESSION_COOKIE_SECURE=True,SESSION_COOKIE_HTTPONLY=True,SESSION_COOKIE_SAMESITE='Lax')
 CSRF_ENABLED=os.environ.get('RELAY_ENFORCE_CSRF','1' if URL_PREFIX else '0') == '1'
@@ -61,11 +77,13 @@ def login_client_ip():
 
 def conn():
     os.makedirs(ROOT,exist_ok=True); c=sqlite3.connect(DB,timeout=30); c.row_factory=sqlite3.Row
-    c.execute('''create table if not exists proxies(id integer primary key, host text not null, port integer not null, username text, password text, protocol text default 'auto', status text default 'unknown', detected_protocol text, exit_ip text, latency_ms integer, error text, http_port integer unique, socks_port integer unique, enabled integer default 1, created_at text default current_timestamp, checked_at text, import_batch_id integer, last_check_status text, failure_streak integer not null default 0)''')
+    c.execute('''create table if not exists proxies(id integer primary key, host text not null, port integer not null, username text, password text, protocol text default 'auto', status text default 'unknown', detected_protocol text, exit_ip text, latency_ms integer, error text, http_port integer unique, socks_port integer unique, enabled integer default 1, created_at text default current_timestamp, checked_at text, import_batch_id integer, last_check_status text, failure_streak integer not null default 0, provider_slot_key text)''')
     columns={row['name'] for row in c.execute('pragma table_info(proxies)')}
     if 'import_batch_id' not in columns: c.execute('alter table proxies add column import_batch_id integer')
     if 'last_check_status' not in columns: c.execute('alter table proxies add column last_check_status text')
     if 'failure_streak' not in columns: c.execute('alter table proxies add column failure_streak integer not null default 0')
+    if 'provider_slot_key' not in columns: c.execute('alter table proxies add column provider_slot_key text')
+    c.execute('create unique index if not exists proxies_provider_slot_key_uidx on proxies(provider_slot_key) where provider_slot_key is not null and trim(provider_slot_key)!=\'\'')
     c.execute('''create table if not exists import_batches(
         id integer primary key,
         created_at text default current_timestamp,
@@ -304,7 +322,63 @@ def selected_ids(values):
 def setting(c,key,default=''):
     row=c.execute('select value from settings where key=?',(key,)).fetchone(); return row['value'] if row else default
 def reload_relay():
-    c=conn(); rows=c.execute("select * from proxies where enabled=1 and status in ('live','live_unverified') and detected_protocol in ('http','socks5') order by id").fetchall(); data={'client_user':CLIENT_USER,'client_password':CLIENT_PASS,'entries':[{'id':r['id'],'port':client_port(r),'protocol':r['detected_protocol'],'host':r['host'],'upstream_port':r['port'],'username':r['username'],'password':r['password']} for r in rows]}; tmp=os.path.join(ROOT,'relay.json.tmp'); open(tmp,'w',encoding='utf8').write(json.dumps(data)); os.replace(tmp,os.path.join(ROOT,'relay.json')); subprocess.run(['systemctl','kill','-s','HUP','proxy-relay-engine'],capture_output=True,check=False)
+    c=conn(); rows=c.execute("select * from proxies where enabled=1 and (status in ('live','live_unverified') or (provider_slot_key is not null and status not in ('dead','blocked'))) and detected_protocol in ('http','socks5') order by id").fetchall(); data={'client_user':CLIENT_USER,'client_password':CLIENT_PASS,'entries':[{'id':r['id'],'port':client_port(r),'protocol':r['detected_protocol'],'host':r['host'],'upstream_port':r['port'],'username':r['username'],'password':r['password']} for r in rows]}; tmp=os.path.join(ROOT,'relay.json.tmp'); open(tmp,'w',encoding='utf8').write(json.dumps(data)); os.replace(tmp,os.path.join(ROOT,'relay.json')); subprocess.run(['systemctl','kill','-s','HUP','proxy-relay-engine'],capture_output=True,check=False)
+
+def sync_proxiware_bindings(c, items, *, reload=True):
+    if not isinstance(items,list) or len(items)>50000: raise ValueError('invalid Proxiware slot feed size')
+    normalized=[]; seen=set()
+    for item in items:
+        if not isinstance(item,dict): raise ValueError('invalid Proxiware slot')
+        slot=str(item.get('slot_key') or '').strip(); raw=str(item.get('raw') or '').strip()
+        if not re.fullmatch(r'pw1_[0-9a-f]{64}',slot) or slot in seen: raise ValueError('duplicate or invalid Proxiware slot key')
+        upstream=item.get('upstream')
+        if isinstance(upstream,dict):
+            host=str(upstream.get('host') or '').strip(); username=str(upstream.get('username') or ''); password=str(upstream.get('password') or '')
+            try: port=int(upstream.get('port'))
+            except (TypeError,ValueError): raise ValueError('invalid Proxiware proxy port') from None
+        else:
+            if not raw or len(raw)>4096: raise ValueError('invalid Proxiware proxy value')
+            parsed=parse_proxy_line(raw)
+            host=str(parsed['host']); port=int(parsed['port']); username=str(parsed['username']); password=str(parsed['password'])
+        if not host or len(host)>253 or any(ord(char)<33 or ord(char)==127 for char in host): raise ValueError('invalid Proxiware proxy host')
+        if not 1<=port<=65535 or len(username)>512 or len(password)>2048 or any(ord(char)<32 or ord(char)==127 for char in username+password): raise ValueError('invalid Proxiware proxy credentials')
+        proto=str(item.get('protocol') or 'auto').strip().lower()
+        if proto not in {'http','socks5','auto'}: proto='auto'
+        live=str(item.get('live_status') or '').strip().lower()
+        status='live' if live in {'live','online'} and proto in {'http','socks5'} else ('dead' if live in {'dead','offline'} else 'unknown')
+        try: exit_ip=str(ipaddress.ip_address(str(item.get('exit_ip') or '').strip()))
+        except ValueError: exit_ip=''
+        normalized.append((slot,{'host':host,'port':port,'username':username,'password':password},proto,status,exit_ip)); seen.add(slot)
+    changed=False; stats={'created':0,'adopted':0,'updated':0,'deactivated':0,'changed':False}
+    with c:
+        for slot,parsed,proto,status,exit_ip in normalized:
+            row=c.execute('select * from proxies where provider_slot_key=?',(slot,)).fetchone()
+            if row is None:
+                matches=c.execute("select * from proxies where provider_slot_key is null and host=? and port=? and coalesce(username,'')=? and coalesce(password,'')=?",(parsed['host'],parsed['port'],parsed['username'],parsed['password'])).fetchall()
+                if len(matches)>1: raise ValueError('ambiguous existing transfer proxy match')
+                if matches:
+                    row=matches[0]
+                    c.execute('update proxies set provider_slot_key=? where id=?',(slot,row['id']))
+                    stats['adopted']+=1; changed=True
+                else:
+                    hp,sp=next_ports(c)
+                    c.execute('insert into proxies(host,port,username,password,protocol,status,detected_protocol,exit_ip,http_port,socks_port,provider_slot_key) values(?,?,?,?,?,?,?,?,?,?,?)',(parsed['host'],parsed['port'],parsed['username'],parsed['password'],proto,status,proto if proto in {'http','socks5'} else None,exit_ip,hp,sp,slot))
+                    stats['created']+=1; changed=True; continue
+            current=c.execute('select * from proxies where provider_slot_key=?',(slot,)).fetchone()
+            protocol=proto if proto in {'http','socks5'} else current['protocol'] if current['protocol'] in {'http','socks5'} else 'auto'
+            detected_protocol=proto if proto in {'http','socks5'} else current['detected_protocol'] if current['detected_protocol'] in {'http','socks5'} else None
+            values=(parsed['host'],parsed['port'],parsed['username'],parsed['password'],protocol,status,detected_protocol,exit_ip,slot,1)
+            old=(current['host'],current['port'],current['username'] or '',current['password'] or '',current['protocol'] or 'auto',current['status'],current['detected_protocol'],current['exit_ip'] or '',current['provider_slot_key'],int(current['enabled'] or 0))
+            if values!=old:
+                c.execute('update proxies set host=?,port=?,username=?,password=?,protocol=?,status=?,detected_protocol=?,exit_ip=?,provider_slot_key=?,enabled=? where id=?',(*values,current['id']))
+                stats['updated']+=1; changed=True
+        stale=c.execute("select id from proxies where provider_slot_key is not null and provider_slot_key not in (%s) and enabled=1"%(','.join('?' for _ in seen) if seen else "''"),sorted(seen)).fetchall()
+        if stale:
+            c.execute("update proxies set enabled=0,status='dead',last_check_status='dead' where provider_slot_key is not null and provider_slot_key not in (%s) and enabled=1"%(','.join('?' for _ in seen) if seen else "''"),sorted(seen))
+            stats['deactivated']=len(stale); changed=True
+    stats['changed']=changed
+    if changed and reload: reload_relay()
+    return stats
 def run_check_ids(ids=None, concurrency=32, job_id=None):
     c=conn(); query='select * from proxies where enabled=1'; params=[]
     if ids is not None: query += ' and id in (%s)'%(','.join('?'*len(ids)) if ids else '0'); params=ids
@@ -406,6 +480,24 @@ def internal_feed():
     items=[{'proxy':format_endpoint(row,row['detected_protocol']), 'protocol':row['detected_protocol'], 'exit_ip':row['exit_ip'] or ''} for row in rows]
     c.close()
     response=jsonify(items=items)
+    response.headers['Cache-Control']='no-store'
+    return response
+
+@app.route('/internal/proxiware-bindings')
+def internal_proxiware_bindings():
+    remote=(request.remote_addr or '').strip()
+    supplied=request.headers.get('X-Relay-Feed-Key','')
+    if remote not in {'127.0.0.1','::1'} or not RELAY_FEED_KEY or not hmac.compare_digest(supplied, RELAY_FEED_KEY):
+        return jsonify(error='Unauthorized'), 401
+    c=conn()
+    rows=c.execute("select * from proxies where provider_slot_key is not null order by provider_slot_key").fetchall()
+    items=[]
+    for row in rows:
+        protocol=row['detected_protocol'] if row['detected_protocol'] in {'http','socks5'} else row['protocol']
+        proxy=format_endpoint(row,protocol) if protocol in {'http','socks5'} else ''
+        items.append({'slot_key':row['provider_slot_key'],'relay_id':int(row['id']),'proxy':proxy,'enabled':int(row['enabled'] or 0),'status':row['status'] or 'unknown','protocol':protocol or 'unknown','exit_ip':row['exit_ip'] or ''})
+    c.close()
+    response=jsonify(complete=True,count=len(items),items=items)
     response.headers['Cache-Control']='no-store'
     return response
 @app.route('/')

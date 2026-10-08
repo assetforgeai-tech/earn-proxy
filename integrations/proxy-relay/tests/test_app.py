@@ -1,8 +1,9 @@
 import sys, pathlib, sqlite3
+import pytest
 sys.path.insert(0,str(pathlib.Path(__file__).parents[1]))
 from app import app, parse_proxy_line, format_endpoint, format_raw_proxy, duplicate_raw_csv, selected_ids, unique_exit_rows, client_port, job_snapshot
 from app import should_commit_check_results, job_should_stop, result_counts, active_job_id, terminal_job, apply_check_result, FAILURE_THRESHOLD
-from app import proxy_counts, build_proxy_filters, pagination_window
+from app import proxy_counts, build_proxy_filters, pagination_window, sync_proxiware_bindings
 from app import web_bind
 
 def test_web_bind_defaults_to_loopback_internal_port(monkeypatch):
@@ -37,6 +38,290 @@ def test_internal_feed_requires_loopback_key_and_returns_fixed_endpoints(monkeyp
     assert allowed.get_json()['items'][0]['proxy'].startswith('42.96.12.142:30001:client:')
 
 
+def test_proxiware_binding_sync_creates_once_then_updates_same_listener(monkeypatch, tmp_path):
+    import app as relay_app
+
+    monkeypatch.setattr(relay_app, 'ROOT', str(tmp_path))
+    monkeypatch.setattr(relay_app, 'DB', str(tmp_path / 'relay.db'))
+    c = relay_app.conn()
+    slot = 'pw1_' + 'a' * 64
+    first = {'slot_key': slot, 'raw': 'first.proxy.example:9000:user:pass', 'protocol': 'socks5', 'live_status': 'live', 'qualification': 'allow', 'exit_ip': '198.51.100.10'}
+    created = sync_proxiware_bindings(c, [first], reload=False)
+    original = c.execute('select * from proxies where provider_slot_key=?', (slot,)).fetchone()
+    changed = {'slot_key': slot, 'raw': 'second.proxy.example:9001:user2:pass2', 'protocol': 'socks5', 'live_status': 'live', 'qualification': 'risk', 'exit_ip': '198.51.100.11'}
+    updated = sync_proxiware_bindings(c, [changed], reload=False)
+    current = c.execute('select * from proxies where provider_slot_key=?', (slot,)).fetchone()
+
+    assert created['created'] == 1
+    assert updated['updated'] == 1
+    assert current['id'] == original['id']
+    assert (current['http_port'], current['socks_port']) == (original['http_port'], original['socks_port'])
+    assert (current['host'], current['port'], current['username'], current['password']) == ('second.proxy.example', 9001, 'user2', 'pass2')
+    assert c.execute('select count(*) from proxies where provider_slot_key=?', (slot,)).fetchone()[0] == 1
+    c.close()
+
+
+def test_proxiware_swap_keeps_listener_during_pending_protocol_recheck(monkeypatch, tmp_path):
+    import json
+    import app as relay_app
+
+    monkeypatch.setattr(relay_app, 'ROOT', str(tmp_path))
+    monkeypatch.setattr(relay_app, 'DB', str(tmp_path / 'relay.db'))
+    monkeypatch.setattr(relay_app.subprocess, 'run', lambda *_args, **_kwargs: None)
+    c = relay_app.conn()
+    slot = 'pw1_' + '9' * 64
+    dead_slot = 'pw1_' + '8' * 64
+    dead = {'slot_key': dead_slot, 'raw': 'dead.proxy.example:9002:user:pass', 'protocol': 'socks5', 'live_status': 'dead'}
+    sync_proxiware_bindings(
+        c,
+        [
+            {'slot_key': slot, 'raw': 'old.proxy.example:9000:user:pass', 'protocol': 'socks5', 'live_status': 'live'},
+            dead,
+        ],
+        reload=False,
+    )
+    original = c.execute('select id,http_port,socks_port from proxies where provider_slot_key=?', (slot,)).fetchone()
+
+    sync_proxiware_bindings(
+        c,
+        [
+            {'slot_key': slot, 'raw': 'new.proxy.example:9001:user2:pass2', 'protocol': 'auto', 'live_status': 'pending'},
+            dead,
+        ],
+        reload=False,
+    )
+    current = c.execute('select * from proxies where provider_slot_key=?', (slot,)).fetchone()
+    dead_status = c.execute('select status from proxies where provider_slot_key=?', (dead_slot,)).fetchone()['status']
+    c.close()
+    relay_app.reload_relay()
+    runtime = json.loads((tmp_path / 'relay.json').read_text())
+
+    assert (current['id'], current['http_port'], current['socks_port']) == tuple(original)
+    assert current['detected_protocol'] == 'socks5'
+    assert [(entry['host'], entry['protocol'], entry['port']) for entry in runtime['entries']] == [
+        ('new.proxy.example', 'socks5', original['socks_port'])
+    ]
+    assert dead_status == 'dead'
+
+
+def test_fifty_proxiware_slots_keep_their_transfer_rows_and_ports_after_swap(monkeypatch, tmp_path):
+    import app as relay_app
+
+    monkeypatch.setattr(relay_app, 'ROOT', str(tmp_path))
+    monkeypatch.setattr(relay_app, 'DB', str(tmp_path / 'relay.db'))
+    c = relay_app.conn()
+    slots = [f'pw1_{index:064x}' for index in range(50)]
+    before = [
+        {'slot_key': slot, 'raw': f'old-{index}.proxy.example:9000:user:pass', 'protocol': 'socks5', 'live_status': 'live'}
+        for index, slot in enumerate(slots)
+    ]
+    after = [
+        {'slot_key': slot, 'raw': f'new-{index}.proxy.example:9100:user:pass', 'protocol': 'socks5', 'live_status': 'live'}
+        for index, slot in enumerate(slots)
+    ]
+
+    assert sync_proxiware_bindings(c, before, reload=False)['created'] == 50
+    original = {row['provider_slot_key']: (row['id'], row['http_port'], row['socks_port']) for row in c.execute('select * from proxies')}
+    assert sync_proxiware_bindings(c, after, reload=False)['updated'] == 50
+    current = {row['provider_slot_key']: (row['id'], row['http_port'], row['socks_port']) for row in c.execute('select * from proxies')}
+    repeated = sync_proxiware_bindings(c, after, reload=False)
+
+    assert len(current) == 50
+    assert current == original
+    assert repeated['changed'] is False
+    assert c.execute("select count(*) from proxies where host like 'new-%'").fetchone()[0] == 50
+    c.close()
+
+
+def test_proxiware_binding_sync_adopts_one_exact_existing_transfer_proxy(monkeypatch, tmp_path):
+    import app as relay_app
+
+    monkeypatch.setattr(relay_app, 'ROOT', str(tmp_path))
+    monkeypatch.setattr(relay_app, 'DB', str(tmp_path / 'relay.db'))
+    c = relay_app.conn()
+    c.execute('insert into proxies(host,port,username,password,http_port,socks_port) values(?,?,?,?,?,?)', ('raw.proxy.example', 9000, 'user', 'pass', 20123, 30123))
+    c.commit()
+
+    result = sync_proxiware_bindings(c, [{'slot_key': 'pw1_' + 'b' * 64, 'raw': 'raw.proxy.example:9000:user:pass', 'protocol': 'http', 'live_status': 'live'}], reload=False)
+    row = c.execute('select * from proxies where provider_slot_key is not null').fetchone()
+
+    assert result['adopted'] == 1
+    assert (row['http_port'], row['socks_port']) == (20123, 30123)
+    assert row['detected_protocol'] == 'http'
+    c.close()
+
+
+def test_proxiware_binding_sync_preserves_password_colons_from_structured_feed(monkeypatch, tmp_path):
+    import app as relay_app
+
+    monkeypatch.setattr(relay_app, 'ROOT', str(tmp_path))
+    monkeypatch.setattr(relay_app, 'DB', str(tmp_path / 'relay.db'))
+    c = relay_app.conn()
+
+    sync_proxiware_bindings(c, [{'slot_key': 'pw1_' + 'f' * 64, 'upstream': {'host': 'colon.proxy.example', 'port': 9000, 'username': 'user', 'password': 'pass:with:colons'}, 'protocol': 'http', 'live_status': 'live'}], reload=False)
+    row = c.execute('select * from proxies where provider_slot_key=?', ('pw1_' + 'f' * 64,)).fetchone()
+
+    assert row['password'] == 'pass:with:colons'
+    c.close()
+
+
+def test_proxiware_binding_sync_rejects_ambiguous_or_duplicate_slots_without_partial_changes(monkeypatch, tmp_path):
+    import app as relay_app
+
+    monkeypatch.setattr(relay_app, 'ROOT', str(tmp_path))
+    monkeypatch.setattr(relay_app, 'DB', str(tmp_path / 'relay.db'))
+    c = relay_app.conn()
+    for listener_offset in (0, 1):
+        c.execute('insert into proxies(host,port,username,password,http_port,socks_port) values(?,?,?,?,?,?)', ('same.proxy.example', 9000, 'user', 'pass', 20000 + listener_offset, 30000 + listener_offset))
+    c.commit()
+    item = {'slot_key': 'pw1_' + 'c' * 64, 'raw': 'same.proxy.example:9000:user:pass', 'protocol': 'http', 'live_status': 'live'}
+
+    with pytest.raises(ValueError, match='ambiguous'):
+        sync_proxiware_bindings(c, [item], reload=False)
+    with pytest.raises(ValueError, match='duplicate'):
+        sync_proxiware_bindings(c, [item, item], reload=False)
+
+    assert c.execute('select count(*) from proxies where provider_slot_key is not null').fetchone()[0] == 0
+    c.close()
+
+
+def test_proxiware_binding_sync_deactivates_absent_slots_without_deleting_their_identity(monkeypatch, tmp_path):
+    import app as relay_app
+
+    monkeypatch.setattr(relay_app, 'ROOT', str(tmp_path))
+    monkeypatch.setattr(relay_app, 'DB', str(tmp_path / 'relay.db'))
+    c = relay_app.conn()
+    slot = 'pw1_' + 'd' * 64
+    sync_proxiware_bindings(c, [{'slot_key': slot, 'raw': 'gone.proxy.example:9000:user:pass', 'protocol': 'http', 'live_status': 'live'}], reload=False)
+    original = c.execute('select id,http_port,socks_port from proxies where provider_slot_key=?', (slot,)).fetchone()
+
+    result = sync_proxiware_bindings(c, [], reload=False)
+    inactive = c.execute('select * from proxies where provider_slot_key=?', (slot,)).fetchone()
+    restored = sync_proxiware_bindings(c, [{'slot_key': slot, 'raw': 'gone.proxy.example:9000:user:pass', 'protocol': 'http', 'live_status': 'live'}], reload=False)
+    active = c.execute('select * from proxies where provider_slot_key=?', (slot,)).fetchone()
+
+    assert result['deactivated'] == 1
+    assert inactive['enabled'] == 0
+    assert (inactive['id'], inactive['http_port'], inactive['socks_port']) == tuple(original)
+    assert restored['changed'] is True
+    assert active['enabled'] == 1
+    assert (active['id'], active['http_port'], active['socks_port']) == tuple(original)
+    c.close()
+
+
+def test_internal_proxiware_bindings_is_loopback_key_protected_and_no_store(monkeypatch, tmp_path):
+    import app as relay_app
+
+    monkeypatch.setattr(relay_app, 'ROOT', str(tmp_path))
+    monkeypatch.setattr(relay_app, 'DB', str(tmp_path / 'relay.db'))
+    monkeypatch.setattr(relay_app, 'RELAY_FEED_KEY', 'feed-secret')
+    c = relay_app.conn()
+    c.execute('insert into proxies(host,port,username,password,protocol,status,detected_protocol,exit_ip,http_port,socks_port,provider_slot_key) values(?,?,?,?,?,?,?,?,?,?,?)', ('raw.proxy.example', 9000, 'u', 'p', 'auto', 'live', 'socks5', '198.51.100.10', 20001, 30001, 'pw1_' + 'e' * 64))
+    c.commit()
+    c.close()
+    with relay_app.app.test_client() as client:
+        denied = client.get('/internal/proxiware-bindings', headers={'X-Relay-Feed-Key':'feed-secret'}, environ_base={'REMOTE_ADDR':'192.0.2.10'})
+        allowed = client.get('/internal/proxiware-bindings', headers={'X-Relay-Feed-Key':'feed-secret'}, environ_base={'REMOTE_ADDR':'127.0.0.1'})
+
+    assert denied.status_code == 401
+    assert allowed.status_code == 200
+    item = allowed.get_json()['items'][0]
+    assert item['slot_key'] == 'pw1_' + 'e' * 64
+    assert item['proxy'].startswith('42.96.12.142:30001:client:')
+    assert 'username' not in item and 'password' not in item
+    assert allowed.headers['Cache-Control'] == 'no-store'
+
+
+def test_proxiware_binding_sync_timer_is_installed():
+    from pathlib import Path
+
+    root = Path(__file__).parents[1]
+    unit = root / 'deploy' / 'proxy-relay-proxiware-sync.service'
+    timer = root / 'deploy' / 'proxy-relay-proxiware-sync.timer'
+
+    assert unit.exists() and timer.exists()
+    assert 'proxy-relay-proxiware-sync.timer' in (root / 'deploy' / 'install.sh').read_text()
+
+
+def test_proxiware_slot_sync_rejects_non_loopback_feed_url(monkeypatch):
+    import sync_proxiware as relay_sync
+
+    monkeypatch.setattr(relay_sync, 'PROXIWARE_SLOT_FEED_URL', 'http://example.com/feed')
+    monkeypatch.setattr(relay_sync, 'RELAY_FEED_KEY', 'feed-secret')
+
+    with pytest.raises(ValueError, match='target'):
+        relay_sync.fetch_slots()
+
+
+def test_proxiware_slot_sync_requires_complete_consistent_snapshot(monkeypatch):
+    import json
+    import sync_proxiware as relay_sync
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, limit):
+            return json.dumps({'complete': False, 'count': 0, 'items': []}).encode()
+
+    class Opener:
+        def open(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr(relay_sync, 'PROXIWARE_SLOT_FEED_URL', 'http://127.0.0.1:8100/internal/api/v1/proxiware-transfer-feed')
+    monkeypatch.setattr(relay_sync, 'RELAY_FEED_KEY', 'feed-secret')
+    monkeypatch.setattr(relay_sync, 'build_opener', lambda *_args: Opener())
+
+    with pytest.raises(ValueError, match='incomplete'):
+        relay_sync.fetch_slots()
+
+
+def test_proxiware_slot_sync_rejects_oversized_feed(monkeypatch):
+    import sync_proxiware as relay_sync
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, limit):
+            return b'x' * limit
+
+    class Opener:
+        def open(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr(relay_sync, 'PROXIWARE_SLOT_FEED_URL', 'http://127.0.0.1:8100/internal/api/v1/proxiware-transfer-feed')
+    monkeypatch.setattr(relay_sync, 'RELAY_FEED_KEY', 'feed-secret')
+    monkeypatch.setattr(relay_sync, 'MAX_FEED_BYTES', 10)
+    monkeypatch.setattr(relay_sync, 'build_opener', lambda *_args: Opener())
+
+    with pytest.raises(ValueError, match='too large'):
+        relay_sync.fetch_slots()
+
+
+def test_proxiware_slot_sync_propagates_feed_failure_without_running_database_sync(monkeypatch):
+    from urllib.error import URLError
+    import sync_proxiware as relay_sync
+
+    class Opener:
+        def open(self, *_args, **_kwargs):
+            raise URLError('provider feed unavailable')
+
+    monkeypatch.setattr(relay_sync, 'PROXIWARE_SLOT_FEED_URL', 'http://127.0.0.1:8100/internal/api/v1/proxiware-transfer-feed')
+    monkeypatch.setattr(relay_sync, 'RELAY_FEED_KEY', 'feed-secret')
+    monkeypatch.setattr(relay_sync, 'build_opener', lambda *_args: Opener())
+    monkeypatch.setattr(relay_sync, 'conn', lambda: pytest.fail('failed feed must not open the relay database'))
+
+    with pytest.raises(URLError):
+        relay_sync.run_sync()
+
+
 def test_prefixed_template_uses_prefixed_asset_and_navigation_paths(monkeypatch):
     import app as relay_app
 
@@ -56,6 +341,11 @@ def test_session_cookie_is_secure_httponly_and_samesite():
     assert app.config['SESSION_COOKIE_SAMESITE']=='Lax'
 def test_parse_colon():
     assert parse_proxy_line('host.example:8080:user:pass')['username']=='user'
+
+
+
+
+
 def test_parse_url():
     p=parse_proxy_line('socks5://u:p@host:9')
     assert p['protocol']=='socks5' and p['host']=='host' and p['username']=='u'

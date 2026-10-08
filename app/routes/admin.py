@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 import ipaddress
 import math
 import sqlite3
@@ -7,7 +9,8 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlencode
 
-from flask import Blueprint, abort, current_app, g, jsonify, redirect, render_template, request, url_for
+import requests
+from flask import Blueprint, Response, abort, current_app, g, jsonify, redirect, render_template, request, url_for
 
 from app.auth import admin_required
 from app.db import get_db
@@ -53,6 +56,7 @@ from app.services.proxiware_swap import (
     request_manual_swap,
     retry_swap,
 )
+from app.services.proxiware_transfer import TransferSlotError, load_proxiware_slots
 from app.services.relay_sso import create_relay_sso_token
 from app.services.settings import get_setting, set_setting
 from app.services.users import MAX_EMAIL_LENGTH, create_user
@@ -1352,6 +1356,121 @@ def proxiware_workspace(area: str = "overview"):
     )
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+@bp.get("/providers/proxiware/inventory/export/<scope>/<kind>")
+@admin_required
+def proxiware_inventory_export(scope: str, kind: str):
+    if scope not in {"all", "allow"} or kind not in {"raw", "transfer"}:
+        abort(404)
+    db = get_db()
+    try:
+        slots = load_proxiware_slots(db)
+    except TransferSlotError:
+        response = Response(
+            "Export unavailable: Proxiware inventory is incomplete or swap reconciliation is pending.\n",
+            status=409,
+            mimetype="text/plain",
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    except (TypeError, ValueError, sqlite3.Error):
+        response = Response(
+            "Export unavailable: Proxiware inventory could not be read.\n", status=503, mimetype="text/plain"
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    selected = [slot for slot in slots if scope == "all" or slot["qualification"] == "allow"]
+    relay_by_key: dict[str, list[dict[str, object]]] = {}
+    if kind == "transfer" and selected:
+        try:
+            from app.routes.internal_api import _relay_binding_rows
+
+            for binding in _relay_binding_rows():
+                if isinstance(binding, dict):
+                    relay_by_key.setdefault(str(binding.get("slot_key") or ""), []).append(binding)
+        except (requests.RequestException, ValueError, RuntimeError, TimeoutError):
+            current_app.logger.warning("Proxiware transfer export could not read Relay bindings")
+            response = Response(
+                "Transfer export unavailable: Relay bindings could not be verified.\n",
+                status=503,
+                mimetype="text/plain",
+            )
+            response.headers["Cache-Control"] = "no-store"
+            return response
+        unresolved = {
+            str(slot["slot_key"])
+            for slot in selected
+            if len(relay_by_key.get(str(slot["slot_key"]), [])) != 1
+            or not isinstance(relay_by_key[str(slot["slot_key"])][0].get("proxy"), str)
+            or not relay_by_key[str(slot["slot_key"])][0].get("proxy")
+            or relay_by_key[str(slot["slot_key"])][0].get("enabled") != 1
+            or relay_by_key[str(slot["slot_key"])][0].get("protocol") not in {"http", "socks5"}
+            or not isinstance(relay_by_key[str(slot["slot_key"])][0].get("relay_id"), int)
+            or relay_by_key[str(slot["slot_key"])][0].get("relay_id", 0) <= 0
+        }
+        for field in ("relay_id", "proxy"):
+            values: dict[object, list[str]] = {}
+            for slot in selected:
+                slot_key = str(slot["slot_key"])
+                matches = relay_by_key.get(slot_key, [])
+                if len(matches) == 1 and slot_key not in unresolved:
+                    values.setdefault(matches[0][field], []).append(slot_key)
+            for slot_keys in values.values():
+                if len(slot_keys) > 1:
+                    unresolved.update(slot_keys)
+        if unresolved:
+            response = Response(
+                f"Transfer export unavailable: {len(unresolved)} proxy slot(s) have missing or ambiguous Relay bindings. Sync Relay and resolve duplicate mappings.\n",
+                status=409,
+                mimetype="text/plain",
+            )
+            response.headers["Cache-Control"] = "no-store"
+            return response
+
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    proxy_column = "raw_proxy" if kind == "raw" else "transfer_proxy"
+    headers = [
+        "slot_key",
+        "subscription",
+        "current_assignment",
+        "qualification",
+        "live_status",
+        "exit_ip",
+        proxy_column,
+    ]
+    if kind == "transfer":
+        headers.insert(-1, "relay_status")
+    writer.writerow(headers)
+    for slot in selected:
+        values = [
+            _spreadsheet_safe_metadata(slot["slot_key"]),
+            _spreadsheet_safe_metadata(slot["subscription"]),
+            _spreadsheet_safe_metadata(slot["external_id"]),
+            _spreadsheet_safe_metadata(slot["qualification"]),
+            _spreadsheet_safe_metadata(slot["live_status"]),
+            _spreadsheet_safe_metadata(slot["exit_ip"]),
+        ]
+        if kind == "transfer":
+            binding = relay_by_key[str(slot["slot_key"])][0]
+            values.extend([_spreadsheet_safe_metadata(binding.get("status") or "unknown"), binding["proxy"]])
+        else:
+            values.append(slot["raw"])
+        writer.writerow(values)
+
+    response = Response(output.getvalue(), mimetype="text/csv; charset=utf-8")
+    response.headers["Content-Disposition"] = f'attachment; filename="proxiware-{scope}-{kind}.csv"'
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _spreadsheet_safe_metadata(value: object) -> str:
+    text = str(value or "")
+    if text.lstrip(" \t\r\n\ufeff").startswith(("=", "+", "-", "@")):
+        return "'" + text
+    return text
 
 
 @bp.get("/providers/proxiware/swaps/history")

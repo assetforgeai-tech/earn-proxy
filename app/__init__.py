@@ -55,6 +55,9 @@ def create_app(test_config: dict | None = None) -> Flask:
         WHITELIST_HOST=os.environ.get("EARN_PROXY_WHITELIST_HOST", "whitelist.proxy.acacondos.com"),
         WHITELIST_IP=os.environ.get("EARN_PROXY_WHITELIST_IP", "42.96.12.142"),
         RELAY_FEED_URL=os.environ.get("EARN_PROXY_RELAY_FEED_URL", "http://127.0.0.1:8000/internal/feed"),
+        RELAY_BINDINGS_URL=os.environ.get(
+            "EARN_PROXY_RELAY_BINDINGS_URL", "http://127.0.0.1:8000/internal/proxiware-bindings"
+        ),
         RELAY_FEED_KEY=os.environ.get("EARN_PROXY_RELAY_FEED_KEY", ""),
         RELAY_SSO_SECRET=os.environ.get("EARN_PROXY_RELAY_SSO_SECRET", ""),
         RELAY_PUBLIC_URL=os.environ.get("EARN_PROXY_RELAY_PUBLIC_URL", "https://transfer.proxy.acacondos.com"),

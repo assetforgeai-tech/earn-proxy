@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
@@ -13,11 +14,12 @@ from app.services.api_keys import authenticate_api_key
 from app.services.checks import checker_settings
 from app.services.proxies import reveal_proxy
 from app.services.proxiware_qualification import _ip as normalize_exit_ip
+from app.services.proxiware_transfer import TransferSlotError, load_proxiware_slots
 from app.services.settings import get_setting
 
 bp = Blueprint("internal_api", __name__, url_prefix="/internal/api/v1")
 api_bp = Blueprint("api", __name__, url_prefix="/api/v1")
-MAX_TRANSFER_FEED_BYTES = 5_000_000
+MAX_TRANSFER_FEED_BYTES = 15_000_000
 
 
 def _api_key_required() -> bool:
@@ -232,6 +234,42 @@ def _transfer_rows():
     return result
 
 
+def _relay_binding_rows():
+    target = str(current_app.config.get("RELAY_BINDINGS_URL") or "").strip()
+    key = str(current_app.config.get("RELAY_FEED_KEY") or "").strip()
+    parsed = urlparse(target)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Relay binding feed must be a loopback HTTP endpoint")
+    if not key:
+        raise RuntimeError("Relay binding feed is not configured")
+    response = requests.get(
+        target,
+        headers={"X-Relay-Feed-Key": key, "Accept": "application/json"},
+        timeout=(2, 5),
+        allow_redirects=False,
+    )
+    response.raise_for_status()
+    if len(response.content) > MAX_TRANSFER_FEED_BYTES:
+        raise RuntimeError("Relay binding feed response is too large")
+    payload = response.json()
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("complete") is not True
+        or not isinstance(items, list)
+        or payload.get("count") != len(items)
+    ):
+        raise RuntimeError("Relay binding feed returned an incomplete payload")
+    return items
+
+
 def _transfer_response():
     try:
         rows = _transfer_rows()
@@ -266,6 +304,40 @@ def list_transfer_proxies():
     if not _api_key_required():
         return Response("Unauthorized\n", status=401, mimetype="text/plain")
     return _transfer_response()
+
+
+@bp.get("/proxiware-transfer-feed")
+def proxiware_transfer_feed():
+    remote = str(request.remote_addr or "").strip()
+    supplied = str(request.headers.get("X-Relay-Feed-Key") or "")
+    expected = str(current_app.config.get("RELAY_FEED_KEY") or "").strip()
+    if remote not in {"127.0.0.1", "::1"}:
+        return jsonify(error="Forbidden"), 403
+    if not expected:
+        return jsonify(error="Transfer feed is not configured"), 503
+    if not hmac.compare_digest(supplied, expected):
+        return jsonify(error="Unauthorized"), 401
+    try:
+        slots = load_proxiware_slots(get_db())
+    except TransferSlotError:
+        current_app.logger.warning("Proxiware transfer feed rejected unsafe slot lineage")
+        return jsonify(error="Provider slot inventory is incomplete"), 503
+    items = [
+        {
+            "slot_key": slot["slot_key"],
+            "upstream": slot["upstream"],
+            "protocol": slot["protocol"],
+            "qualification": slot["qualification"],
+            "live_status": slot["live_status"],
+            "provider_eligible": slot["provider_eligible"],
+            "exit_ip": slot["exit_ip"],
+            "country": slot["country"],
+        }
+        for slot in slots
+    ]
+    response = jsonify(complete=True, count=len(items), items=items)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @bp.after_request

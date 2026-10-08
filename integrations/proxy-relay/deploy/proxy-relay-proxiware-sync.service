@@ -1,0 +1,13 @@
+[Unit]
+Description=Sync fixed Proxiware slots into Proxy Relay
+After=network-online.target proxy-relay.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/proxy-relay
+EnvironmentFile=/etc/proxy-relay.env
+ExecStart=/opt/proxy-relay/.venv/bin/python /opt/proxy-relay/sync_proxiware.py
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
