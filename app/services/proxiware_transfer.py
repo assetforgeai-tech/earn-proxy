@@ -11,7 +11,7 @@ class TransferSlotError(ValueError):
     pass
 
 
-def _slot_key(subscription_external_id: str, root_assignment_id: str) -> str:
+def _slot_key(subscription_external_id: str, root_assignment_id: int) -> str:
     identity = f"proxiware\0{subscription_external_id}\0{root_assignment_id}"
     return "pw1_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
@@ -22,7 +22,7 @@ def load_proxiware_slots(db) -> list[dict[str, object]]:
     ensure_proxiware_swap_schema(db)
     pending_swap = db.execute(
         "SELECT 1 FROM swap_jobs WHERE provider='proxiware' "
-        "AND state IN ('provider_applied','reconciliation_required') LIMIT 1"
+        "AND state IN ('mutating','provider_applied','reconciliation_required') LIMIT 1"
     ).fetchone()
     if pending_swap:
         raise TransferSlotError("Proxiware swap reconciliation is incomplete")
@@ -47,15 +47,26 @@ def load_proxiware_slots(db) -> list[dict[str, object]]:
         "AND trim(COALESCE(pa.host,''))<>'' AND pa.port BETWEEN 1 AND 65535 "
         "ORDER BY pa.subscription_id,pa.id"
     ).fetchall()
-    previous_assignment: dict[tuple[int, str], str] = {}
+    previous_assignment: dict[tuple[int, int], int] = {}
     for row in db.execute(
-        "SELECT sj.subscription_id,sm.old_assignment_external_id,sm.new_assignment_external_id "
+        "SELECT sj.subscription_id,sj.old_assignment_id,sj.new_assignment_id,"
+        "sm.old_assignment_external_id,sm.new_assignment_external_id "
         "FROM swap_mappings sm JOIN swap_jobs sj ON sj.id=sm.swap_job_id "
         "WHERE sj.provider='proxiware' AND sj.state='success'"
     ).fetchall():
-        key = (int(row["subscription_id"]), str(row["new_assignment_external_id"] or "").strip())
-        old = str(row["old_assignment_external_id"] or "").strip()
-        if not key[1] or not old or (key in previous_assignment and previous_assignment[key] != old):
+        old_id = row["old_assignment_id"]
+        new_id = row["new_assignment_id"]
+        if (
+            old_id is None
+            or new_id is None
+            or int(old_id) == int(new_id)
+            or not str(row["old_assignment_external_id"] or "").strip()
+            or not str(row["new_assignment_external_id"] or "").strip()
+        ):
+            raise TransferSlotError("Swap history is missing stable provider assignment lineage")
+        key = (int(row["subscription_id"]), int(new_id))
+        old = int(old_id)
+        if key in previous_assignment and previous_assignment[key] != old:
             raise TransferSlotError("Swap history has conflicting provider slot lineage")
         previous_assignment[key] = old
 
@@ -64,8 +75,8 @@ def load_proxiware_slots(db) -> list[dict[str, object]]:
     for row in assignments:
         subscription_id = int(row["subscription_id"])
         external_id = str(row["external_id"] or "").strip()
-        root_id = external_id
-        visited: set[str] = set()
+        root_id = int(row["id"])
+        visited: set[int] = set()
         while (subscription_id, root_id) in previous_assignment:
             if root_id in visited:
                 raise TransferSlotError("Swap history contains a provider slot cycle")

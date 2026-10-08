@@ -18,9 +18,9 @@ def _subscription(db, external_id: str) -> int:
     return int(db.execute("SELECT last_insert_rowid()").fetchone()[0])
 
 
-def _assignment(db, subscription_id: int, external_id: str, *, host: str) -> None:
+def _assignment(db, subscription_id: int, external_id: str, *, host: str) -> int:
     now = datetime.now(UTC).isoformat()
-    db.execute(
+    cursor = db.execute(
         "INSERT INTO provider_assignments(subscription_id,provider,external_id,host,port,username_encrypted,"
         "password_encrypted,status,qualification,live_status,protocol,created_at,updated_at) "
         "VALUES(?,'proxiware',?,?,9000,?,?,'active','allow','live','socks5',?,?)",
@@ -34,14 +34,23 @@ def _assignment(db, subscription_id: int, external_id: str, *, host: str) -> Non
             now,
         ),
     )
+    return int(cursor.lastrowid)
 
 
-def _successful_swap(db, subscription_id: int, old_external_id: str, new_external_id: str) -> None:
+def _successful_swap(
+    db,
+    subscription_id: int,
+    old_external_id: str,
+    new_external_id: str,
+    *,
+    old_assignment_id: int,
+    new_assignment_id: int,
+) -> None:
     now = datetime.now(UTC).isoformat()
     db.execute(
-        "INSERT INTO swap_jobs(provider,subscription_id,state,reason,created_at,updated_at) "
-        "VALUES('proxiware',?,'success','swapped',?,?)",
-        (subscription_id, now, now),
+        "INSERT INTO swap_jobs(provider,subscription_id,old_assignment_id,new_assignment_id,state,reason,created_at,updated_at) "
+        "VALUES('proxiware',?,?,?,'success','swapped',?,?)",
+        (subscription_id, old_assignment_id, new_assignment_id, now, now),
     )
     job_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.execute(
@@ -56,19 +65,33 @@ def test_transfer_slot_key_survives_one_and_multiple_confirmed_swaps(app):
         db = get_db()
         ensure_proxiware_swap_schema(db)
         subscription_id = _subscription(db, "subscription-1")
-        _assignment(db, subscription_id, "assignment-a", host="first.proxy.example")
+        first_id = _assignment(db, subscription_id, "assignment-a", host="first.proxy.example")
         db.commit()
         first = load_proxiware_slots(db)[0]
 
-        _successful_swap(db, subscription_id, "assignment-a", "assignment-b")
-        db.execute("DELETE FROM provider_assignments WHERE external_id='assignment-a'")
-        _assignment(db, subscription_id, "assignment-b", host="second.proxy.example")
+        second_id = _assignment(db, subscription_id, "assignment-b", host="second.proxy.example")
+        _successful_swap(
+            db,
+            subscription_id,
+            "assignment-a",
+            "assignment-b",
+            old_assignment_id=first_id,
+            new_assignment_id=second_id,
+        )
+        db.execute("DELETE FROM provider_assignments WHERE id=?", (first_id,))
         db.commit()
         second = load_proxiware_slots(db)[0]
 
-        _successful_swap(db, subscription_id, "assignment-b", "assignment-c")
-        db.execute("DELETE FROM provider_assignments WHERE external_id='assignment-b'")
-        _assignment(db, subscription_id, "assignment-c", host="third.proxy.example")
+        third_id = _assignment(db, subscription_id, "assignment-c", host="third.proxy.example")
+        _successful_swap(
+            db,
+            subscription_id,
+            "assignment-b",
+            "assignment-c",
+            old_assignment_id=second_id,
+            new_assignment_id=third_id,
+        )
+        db.execute("DELETE FROM provider_assignments WHERE id=?", (second_id,))
         db.commit()
         third = load_proxiware_slots(db)[0]
 
@@ -102,9 +125,24 @@ def test_transfer_feed_rejects_swap_lineage_cycles(app):
         db = get_db()
         ensure_proxiware_swap_schema(db)
         subscription_id = _subscription(db, "cycle-subscription")
-        _assignment(db, subscription_id, "cycle-a", host="cycle.proxy.example")
-        _successful_swap(db, subscription_id, "cycle-a", "cycle-b")
-        _successful_swap(db, subscription_id, "cycle-b", "cycle-a")
+        first_id = _assignment(db, subscription_id, "cycle-a", host="cycle.proxy.example")
+        second_id = _assignment(db, subscription_id, "cycle-b", host="cycle2.proxy.example")
+        _successful_swap(
+            db,
+            subscription_id,
+            "cycle-a",
+            "cycle-b",
+            old_assignment_id=first_id,
+            new_assignment_id=second_id,
+        )
+        _successful_swap(
+            db,
+            subscription_id,
+            "cycle-b",
+            "cycle-a",
+            old_assignment_id=second_id,
+            new_assignment_id=first_id,
+        )
         db.commit()
 
         try:
@@ -120,12 +158,26 @@ def test_transfer_feed_rejects_multiple_current_assignments_for_one_slot(app):
         db = get_db()
         ensure_proxiware_swap_schema(db)
         subscription_id = _subscription(db, "duplicate-lineage-subscription")
-        _assignment(db, subscription_id, "lineage-root", host="root.proxy.example")
-        _successful_swap(db, subscription_id, "lineage-root", "lineage-b")
-        _successful_swap(db, subscription_id, "lineage-root", "lineage-c")
-        db.execute("DELETE FROM provider_assignments WHERE external_id='lineage-root'")
-        _assignment(db, subscription_id, "lineage-b", host="b.proxy.example")
-        _assignment(db, subscription_id, "lineage-c", host="c.proxy.example")
+        root_id = _assignment(db, subscription_id, "lineage-root", host="root.proxy.example")
+        first_id = _assignment(db, subscription_id, "lineage-b", host="b.proxy.example")
+        second_id = _assignment(db, subscription_id, "lineage-c", host="c.proxy.example")
+        _successful_swap(
+            db,
+            subscription_id,
+            "lineage-root",
+            "lineage-b",
+            old_assignment_id=root_id,
+            new_assignment_id=first_id,
+        )
+        _successful_swap(
+            db,
+            subscription_id,
+            "lineage-root",
+            "lineage-c",
+            old_assignment_id=root_id,
+            new_assignment_id=second_id,
+        )
+        db.execute("DELETE FROM provider_assignments WHERE id=?", (root_id,))
         db.commit()
 
         try:
@@ -134,6 +186,86 @@ def test_transfer_feed_rejects_multiple_current_assignments_for_one_slot(app):
             assert "one provider slot" in str(error).lower()
         else:
             raise AssertionError("one transfer slot cannot have multiple current assignments")
+
+
+def test_transfer_slot_lineage_uses_assignment_ids_when_provider_reuses_external_id(app):
+    with app.app_context():
+        db = get_db()
+        ensure_proxiware_swap_schema(db)
+        subscription_id = _subscription(db, "reused-assignment-ids-subscription")
+        first_root = _assignment(db, subscription_id, "first-root", host="first-root.proxy.example")
+        first_reused = _assignment(db, subscription_id, "reused-id", host="first-reused.proxy.example")
+        _successful_swap(
+            db,
+            subscription_id,
+            "first-root",
+            "reused-id",
+            old_assignment_id=first_root,
+            new_assignment_id=first_reused,
+        )
+        db.execute("DELETE FROM provider_assignments WHERE id=?", (first_root,))
+
+        first_next = _assignment(db, subscription_id, "first-next", host="first-next.proxy.example")
+        _successful_swap(
+            db,
+            subscription_id,
+            "reused-id",
+            "first-next",
+            old_assignment_id=first_reused,
+            new_assignment_id=first_next,
+        )
+        db.execute("DELETE FROM provider_assignments WHERE id=?", (first_reused,))
+        db.commit()
+        stable_slot = load_proxiware_slots(db)[0]
+
+        second_root = _assignment(db, subscription_id, "second-root", host="second-root.proxy.example")
+        second_reused = _assignment(db, subscription_id, "reused-id", host="second-reused.proxy.example")
+        _successful_swap(
+            db,
+            subscription_id,
+            "second-root",
+            "reused-id",
+            old_assignment_id=second_root,
+            new_assignment_id=second_reused,
+        )
+        db.execute("DELETE FROM provider_assignments WHERE id=?", (second_root,))
+        db.commit()
+
+        slots = load_proxiware_slots(db)
+
+    assert len(slots) == 2
+    assert len({slot["slot_key"] for slot in slots}) == 2
+    assert next(slot for slot in slots if slot["external_id"] == "first-next")["slot_key"] == stable_slot["slot_key"]
+
+
+def test_transfer_feed_fails_closed_when_successful_swap_lacks_assignment_ids(app):
+    with app.app_context():
+        db = get_db()
+        ensure_proxiware_swap_schema(db)
+        subscription_id = _subscription(db, "missing-assignment-lineage-subscription")
+        old_id = _assignment(db, subscription_id, "missing-root", host="missing-root.proxy.example")
+        _assignment(db, subscription_id, "missing-successor", host="missing-successor.proxy.example")
+        now = datetime.now(UTC).isoformat()
+        db.execute(
+            "INSERT INTO swap_jobs(provider,subscription_id,state,reason,created_at,updated_at) "
+            "VALUES('proxiware',?,'success','swapped',?,?)",
+            (subscription_id, now, now),
+        )
+        job_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.execute(
+            "INSERT INTO swap_mappings(swap_job_id,old_assignment_external_id,new_assignment_external_id,"
+            "success_at,created_at) VALUES(?,?,?,?,?)",
+            (job_id, "missing-root", "missing-successor", now, now),
+        )
+        db.execute("DELETE FROM provider_assignments WHERE id=?", (old_id,))
+        db.commit()
+
+        try:
+            load_proxiware_slots(db)
+        except ValueError as error:
+            assert "stable provider assignment lineage" in str(error).lower()
+        else:
+            raise AssertionError("successful swaps without assignment IDs must not get a guessed slot")
 
 
 def test_transfer_feed_rejects_an_incomplete_active_assignment_instead_of_silently_omitting_it(app):
@@ -205,6 +337,28 @@ def test_transfer_feed_fails_closed_while_swap_reconciliation_is_pending(app):
             assert "reconciliation" in str(error).lower()
         else:
             raise AssertionError("unresolved swaps must not publish an incomplete current snapshot")
+
+
+def test_transfer_feed_fails_closed_while_provider_mutation_is_in_progress(app):
+    with app.app_context():
+        db = get_db()
+        ensure_proxiware_swap_schema(db)
+        subscription_id = _subscription(db, "mutating-swap-subscription")
+        _assignment(db, subscription_id, "mutating-assignment", host="mutating.proxy.example")
+        now = datetime.now(UTC).isoformat()
+        db.execute(
+            "INSERT INTO swap_jobs(provider,subscription_id,state,reason,created_at,updated_at) "
+            "VALUES('proxiware',?,'mutating','swap',?,?)",
+            (subscription_id, now, now),
+        )
+        db.commit()
+
+        try:
+            load_proxiware_slots(db)
+        except ValueError as error:
+            assert "reconciliation" in str(error).lower()
+        else:
+            raise AssertionError("provider mutation must not publish a moving assignment snapshot")
 
 
 def test_internal_transfer_feed_requires_loopback_key_and_never_splits_credentials(client, app, db):
