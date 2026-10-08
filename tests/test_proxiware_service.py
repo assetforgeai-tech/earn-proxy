@@ -93,6 +93,9 @@ def test_deployment_service_is_restartable_and_unprivileged():
     swap_service = Path("deploy/earn-proxy-proxiware-swap.service").read_text(encoding="utf-8")
     assert "Restart=always" in swap_service
     assert "User=earnproxy" in swap_service
+    assert "PartOf=earn-proxy-proxiware-chrome.service" in swap_service
+    browser_service = Path("deploy/earn-proxy-proxiware-browser.service").read_text(encoding="utf-8")
+    assert "PartOf=earn-proxy-proxiware-chrome.service" in browser_service
 
 
 def test_compose_has_healthchecks_for_provider_workers():
