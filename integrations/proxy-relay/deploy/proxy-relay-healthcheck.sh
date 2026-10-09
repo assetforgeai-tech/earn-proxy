@@ -15,13 +15,14 @@ for unit in proxy-relay.service proxy-relay-engine.service caddy.service; do
 done
 if ! curl --noproxy '*' --fail --silent --show-error --max-time 10 http://127.0.0.1:8000/healthz >/dev/null 2>&1; then failures+=("healthz failed"); fi
 
-read -r live entries listeners missing_ports < <(python3 - <<'PY'
+read -r online expected entries listeners missing_ports missing_online < <(python3 - <<'PY'
 import json
 import sqlite3
 import subprocess
 
 db = sqlite3.connect('/opt/proxy-relay/relay.db')
-live = db.execute("select count(*) from proxies where status in ('live','live_unverified') and enabled=1 and detected_protocol in ('http','socks5')").fetchone()[0]
+online = db.execute("select count(*) from proxies where status in ('live','live_unverified') and transfer_checked_at is not null and enabled=1 and detected_protocol in ('http','socks5')").fetchone()[0]
+expected = db.execute("select count(*) from proxies where enabled=1 and (status in ('live','live_unverified','checking') or (provider_slot_key is not null and status not in ('dead','blocked'))) and detected_protocol in ('http','socks5')").fetchone()[0]
 with open('/opt/proxy-relay/relay.json', encoding='utf-8') as handle:
     relay = json.load(handle)
 expected_ports = {int(entry['port']) for entry in relay.get('entries', [])}
@@ -35,11 +36,16 @@ for line in subprocess.check_output(["ss", "-ltnH"], text=True).splitlines():
     except (IndexError, ValueError):
         continue
 missing_ports = sorted(expected_ports - listening_ports)
-print(live, len(expected_ports), len(expected_ports & listening_ports), len(missing_ports))
+online_ports = {
+    int(row[0]) for row in db.execute("select case when provider_slot_key is not null and listener_port is not null then listener_port when detected_protocol='socks5' then socks_port else http_port end from proxies where status in ('live','live_unverified') and transfer_checked_at is not null and enabled=1 and detected_protocol in ('http','socks5')")
+}
+missing_online = sorted(online_ports - listening_ports)
+print(online, expected, len(expected_ports), len(expected_ports & listening_ports), len(missing_ports), len(missing_online))
 PY
 )
-if [[ "$live" != "$entries" ]]; then failures+=("database/listener config mismatch live=$live entries=$entries"); fi
+if [[ "$expected" != "$entries" ]]; then failures+=("database/config mismatch expected=$expected entries=$entries"); fi
 if ((missing_ports > 0)); then failures+=("socket/config mismatch listeners=$listeners entries=$entries missing=$missing_ports"); fi
+if ((missing_online > 0)); then failures+=("online rows missing end-to-end listeners=$missing_online"); fi
 
 read -r cpu_percent memory_percent disk_percent < <(python3 - <<'PY'
 import os
@@ -78,6 +84,6 @@ if ((${#failures[@]})); then
 else
     previous=$(cat "$STATE_FILE" 2>/dev/null || echo 0)
     printf '0\n' > "$STATE_FILE"
-    log "OK: services=3 healthz=ok live=$live entries=$entries listeners=$listeners cpu=${cpu_percent}% memory=${memory_percent}% disk=${disk_percent}% recovered_after=$previous"
+    log "OK: services=3 healthz=ok online=$online expected=$expected entries=$entries listeners=$listeners cpu=${cpu_percent}% memory=${memory_percent}% disk=${disk_percent}% recovered_after=$previous"
 fi
 exit 0

@@ -3,7 +3,6 @@ import csv
 import hashlib
 import hmac
 import io
-import ipaddress
 import json
 import os
 import re
@@ -15,7 +14,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import wraps
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 from checker import check_proxy
 from flask import Flask, Response, flash, jsonify, redirect, render_template, request, session
@@ -77,13 +76,22 @@ def login_client_ip():
 
 def conn():
     os.makedirs(ROOT,exist_ok=True); c=sqlite3.connect(DB,timeout=30); c.row_factory=sqlite3.Row
-    c.execute('''create table if not exists proxies(id integer primary key, host text not null, port integer not null, username text, password text, protocol text default 'auto', status text default 'unknown', detected_protocol text, exit_ip text, latency_ms integer, error text, http_port integer unique, socks_port integer unique, enabled integer default 1, created_at text default current_timestamp, checked_at text, import_batch_id integer, last_check_status text, failure_streak integer not null default 0, provider_slot_key text)''')
+    c.execute('''create table if not exists proxies(id integer primary key, host text not null, port integer not null, username text, password text, protocol text default 'auto', status text default 'unknown', detected_protocol text, exit_ip text, latency_ms integer, error text, http_port integer unique, socks_port integer unique, listener_port integer unique, enabled integer default 1, created_at text default current_timestamp, checked_at text, import_batch_id integer, last_check_status text, failure_streak integer not null default 0, provider_slot_key text, transfer_checked_at text)''')
     columns={row['name'] for row in c.execute('pragma table_info(proxies)')}
     if 'import_batch_id' not in columns: c.execute('alter table proxies add column import_batch_id integer')
     if 'last_check_status' not in columns: c.execute('alter table proxies add column last_check_status text')
     if 'failure_streak' not in columns: c.execute('alter table proxies add column failure_streak integer not null default 0')
     if 'provider_slot_key' not in columns: c.execute('alter table proxies add column provider_slot_key text')
+    if 'listener_port' not in columns: c.execute('alter table proxies add column listener_port integer')
+    if 'transfer_checked_at' not in columns:
+        try:
+            c.execute('alter table proxies add column transfer_checked_at text')
+        except sqlite3.OperationalError as exc:
+            if 'duplicate column name' not in str(exc).lower(): raise
+        c.execute("update proxies set status='unknown',last_check_status='unknown',exit_ip='',checked_at=null,failure_streak=0 where status in ('live','live_unverified')")
     c.execute('create unique index if not exists proxies_provider_slot_key_uidx on proxies(provider_slot_key) where provider_slot_key is not null and trim(provider_slot_key)!=\'\'')
+    c.execute('create unique index if not exists proxies_listener_port_uidx on proxies(listener_port) where provider_slot_key is not null and listener_port is not null')
+    c.execute("update proxies set listener_port=case when detected_protocol='socks5' then socks_port when detected_protocol='http' then http_port else socks_port end where provider_slot_key is not null and listener_port is null")
     c.execute('''create table if not exists import_batches(
         id integer primary key,
         created_at text default current_timestamp,
@@ -139,8 +147,17 @@ def latest_undo_batch(c):
         from import_batches b left join proxies p on p.import_batch_id=b.id
         where b.id=(select max(id) from import_batches) and b.undone_at is null
         group by b.id having count(p.id)>0''').fetchone()
+def client_port(row, protocol=None):
+    keys=row.keys()
+    if 'provider_slot_key' in keys and row['provider_slot_key'] and 'listener_port' in keys and row['listener_port'] is not None:
+        return row['listener_port']
+    protocol=protocol if protocol in {'http','socks5'} else row['detected_protocol']
+    if protocol=='socks5' or (protocol not in {'http','socks5'} and 'provider_slot_key' in keys and row['provider_slot_key']):
+        return row['socks_port']
+    return row['http_port']
 def format_endpoint(row, protocol, public_ip=PUBLIC_IP, user=CLIENT_USER, password=CLIENT_PASS):
-    port=row['http_port'] if protocol=='http' else row['socks_port']; return f'{public_ip}:{port}:{user}:{password}'
+    return f'{public_ip}:{client_port(row,protocol)}:{user}:{password}'
+app.jinja_env.globals['client_port']=client_port
 def format_raw_proxy(row):
     return f"{row['host']}:{row['port']}:{row['username'] or ''}:{row['password'] or ''}"
 def duplicate_raw_csv(rows):
@@ -151,7 +168,6 @@ def duplicate_raw_csv(rows):
     out=io.StringIO(); w=csv.writer(out); w.writerow(['duplicate_group','shared_exit_ip','total_raw_proxies']+[f'raw_proxy_{i}' for i in range(1,width+1)])
     for index,(exit_ip,proxies) in enumerate(groups.items(),1): w.writerow([f'GROUP-{index:03d}',exit_ip,len(proxies)]+proxies+['']*(width-len(proxies)))
     return out.getvalue()
-def client_port(row): return row['socks_port'] if row['detected_protocol']=='socks5' else row['http_port']
 def unique_exit_rows(rows):
     seen=set(); result=[]
     for row in rows:
@@ -321,8 +337,35 @@ def selected_ids(values):
     return [int(v) for v in values if str(v).isdigit()]
 def setting(c,key,default=''):
     row=c.execute('select value from settings where key=?',(key,)).fetchone(); return row['value'] if row else default
-def reload_relay():
-    c=conn(); rows=c.execute("select * from proxies where enabled=1 and (status in ('live','live_unverified') or (provider_slot_key is not null and status not in ('dead','blocked'))) and detected_protocol in ('http','socks5') order by id").fetchall(); data={'client_user':CLIENT_USER,'client_password':CLIENT_PASS,'entries':[{'id':r['id'],'port':client_port(r),'protocol':r['detected_protocol'],'host':r['host'],'upstream_port':r['port'],'username':r['username'],'password':r['password']} for r in rows]}; tmp=os.path.join(ROOT,'relay.json.tmp'); open(tmp,'w',encoding='utf8').write(json.dumps(data)); os.replace(tmp,os.path.join(ROOT,'relay.json')); subprocess.run(['systemctl','kill','-s','HUP','proxy-relay-engine'],capture_output=True,check=False)
+def reload_relay(*, wait=False, timeout=5):
+    c=conn(); rows=c.execute("select * from proxies where enabled=1 and (status in ('live','live_unverified','checking') or (provider_slot_key is not null and status not in ('dead','blocked'))) and detected_protocol in ('http','socks5') order by id").fetchall(); data={'client_user':CLIENT_USER,'client_password':CLIENT_PASS,'revision':uuid.uuid4().hex,'entries':[{'id':r['id'],'port':client_port(r),'protocol':r['detected_protocol'],'host':r['host'],'upstream_port':r['port'],'username':r['username'],'password':r['password']} for r in rows]}; c.close(); tmp=os.path.join(ROOT,'relay.json.tmp'); loaded=os.path.join(ROOT,'relay.json.loaded'); open(tmp,'w',encoding='utf8').write(json.dumps(data)); os.replace(tmp,os.path.join(ROOT,'relay.json'))
+    try: os.unlink(loaded)
+    except FileNotFoundError: pass
+    result=subprocess.run(['systemctl','kill','-s','HUP','proxy-relay-engine'],capture_output=True,check=False)
+    if result is not None and getattr(result,'returncode',1)!=0: return False
+    if not wait: return True
+    deadline=time.monotonic()+timeout
+    while time.monotonic()<deadline:
+        try:
+            if open(loaded,encoding='utf8').read()==data['revision']: return True
+        except OSError: pass
+        time.sleep(.05)
+    return False
+
+def check_relay_proxy(row, expected_exit_ip, timeout=10):
+    protocol=row.get('detected_protocol')
+    if protocol not in {'http','socks5'}:
+        return {'status':'inconclusive','protocol':'unknown','exit_ip':'','latency_ms':None,'error':'relay protocol is not known'}
+    endpoint={'host':'127.0.0.1','port':client_port(row),'username':quote(CLIENT_USER,safe=''),'password':quote(CLIENT_PASS,safe=''),'protocol':protocol}
+    result=check_proxy(endpoint,timeout=timeout)
+    if not is_usable_status(result.get('status')):
+        return result
+    actual_ip=result.get('exit_ip') or ''
+    if not expected_exit_ip or not actual_ip:
+        return {'status':'inconclusive','protocol':protocol,'exit_ip':actual_ip,'latency_ms':result.get('latency_ms'),'error':'relay egress identity could not be confirmed'}
+    if actual_ip!=expected_exit_ip:
+        return {'status':'inconclusive','protocol':protocol,'exit_ip':actual_ip,'latency_ms':result.get('latency_ms'),'error':'relay egress IP did not match the upstream probe'}
+    return result
 
 def sync_proxiware_bindings(c, items, *, reload=True):
     if not isinstance(items,list) or len(items)>50000: raise ValueError('invalid Proxiware slot feed size')
@@ -344,34 +387,41 @@ def sync_proxiware_bindings(c, items, *, reload=True):
         if not 1<=port<=65535 or len(username)>512 or len(password)>2048 or any(ord(char)<32 or ord(char)==127 for char in username+password): raise ValueError('invalid Proxiware proxy credentials')
         proto=str(item.get('protocol') or 'auto').strip().lower()
         if proto not in {'http','socks5','auto'}: proto='auto'
-        live=str(item.get('live_status') or '').strip().lower()
-        status='live' if live in {'live','online'} and proto in {'http','socks5'} else ('dead' if live in {'dead','offline'} else 'unknown')
-        try: exit_ip=str(ipaddress.ip_address(str(item.get('exit_ip') or '').strip()))
-        except ValueError: exit_ip=''
-        normalized.append((slot,{'host':host,'port':port,'username':username,'password':password},proto,status,exit_ip)); seen.add(slot)
+        provider_down=str(item.get('live_status') or '').strip().lower() in {'dead','offline'}
+        normalized.append((slot,{'host':host,'port':port,'username':username,'password':password},proto,provider_down)); seen.add(slot)
     changed=False; stats={'created':0,'adopted':0,'updated':0,'deactivated':0,'changed':False}
     with c:
-        for slot,parsed,proto,status,exit_ip in normalized:
+        for slot,parsed,proto,provider_down in normalized:
             row=c.execute('select * from proxies where provider_slot_key=?',(slot,)).fetchone()
             if row is None:
                 matches=c.execute("select * from proxies where provider_slot_key is null and host=? and port=? and coalesce(username,'')=? and coalesce(password,'')=?",(parsed['host'],parsed['port'],parsed['username'],parsed['password'])).fetchall()
                 if len(matches)>1: raise ValueError('ambiguous existing transfer proxy match')
                 if matches:
                     row=matches[0]
-                    c.execute('update proxies set provider_slot_key=? where id=?',(slot,row['id']))
+                    listener_port=row['listener_port'] or client_port(row,proto)
+                    c.execute('update proxies set provider_slot_key=?,listener_port=? where id=?',(slot,listener_port,row['id']))
                     stats['adopted']+=1; changed=True
                 else:
                     hp,sp=next_ports(c)
-                    c.execute('insert into proxies(host,port,username,password,protocol,status,detected_protocol,exit_ip,http_port,socks_port,provider_slot_key) values(?,?,?,?,?,?,?,?,?,?,?)',(parsed['host'],parsed['port'],parsed['username'],parsed['password'],proto,status,proto if proto in {'http','socks5'} else None,exit_ip,hp,sp,slot))
+                    listener_port=sp if proto in {'socks5','auto'} else hp
+                    initial_status='dead' if provider_down else 'unknown'
+                    c.execute('insert into proxies(host,port,username,password,protocol,status,detected_protocol,http_port,socks_port,listener_port,provider_slot_key,last_check_status,exit_ip) values(?,?,?,?,?,?,?,?,?,?,?,?,?)',(parsed['host'],parsed['port'],parsed['username'],parsed['password'],proto,initial_status,proto if proto in {'http','socks5'} else None,hp,sp,listener_port,slot,initial_status,''))
                     stats['created']+=1; changed=True; continue
             current=c.execute('select * from proxies where provider_slot_key=?',(slot,)).fetchone()
             protocol=proto if proto in {'http','socks5'} else current['protocol'] if current['protocol'] in {'http','socks5'} else 'auto'
             detected_protocol=proto if proto in {'http','socks5'} else current['detected_protocol'] if current['detected_protocol'] in {'http','socks5'} else None
-            values=(parsed['host'],parsed['port'],parsed['username'],parsed['password'],protocol,status,detected_protocol,exit_ip,slot,1)
-            old=(current['host'],current['port'],current['username'] or '',current['password'] or '',current['protocol'] or 'auto',current['status'],current['detected_protocol'],current['exit_ip'] or '',current['provider_slot_key'],int(current['enabled'] or 0))
+            endpoint_changed=(current['host'],int(current['port']),current['username'] or '',current['password'] or '',current['protocol'] or 'auto',current['detected_protocol'])!=(parsed['host'],parsed['port'],parsed['username'],parsed['password'],protocol,detected_protocol)
+            status='dead' if provider_down else 'unknown' if endpoint_changed else current['status']
+            last_check_status='dead' if provider_down else 'unknown' if endpoint_changed else current['last_check_status']
+            exit_ip='' if provider_down or endpoint_changed else (current['exit_ip'] or '')
+            listener_port=current['listener_port'] or (current['socks_port'] if protocol in {'socks5','auto'} else current['http_port'])
+            values=(parsed['host'],parsed['port'],parsed['username'],parsed['password'],protocol,status,detected_protocol,exit_ip,slot,1,last_check_status,int(current['failure_streak'] or 0) if not endpoint_changed and not provider_down else 0,current['checked_at'] if not endpoint_changed and not provider_down else None,current['transfer_checked_at'] if not endpoint_changed and not provider_down else None,current['error'] if not endpoint_changed and not provider_down else '',current['latency_ms'] if not endpoint_changed and not provider_down else None,listener_port)
+            old=(current['host'],current['port'],current['username'] or '',current['password'] or '',current['protocol'] or 'auto',current['status'],current['detected_protocol'],current['exit_ip'] or '',current['provider_slot_key'],int(current['enabled'] or 0),current['last_check_status'],int(current['failure_streak'] or 0),current['checked_at'],current['transfer_checked_at'],current['error'] or '',current['latency_ms'],current['listener_port'])
             if values!=old:
-                c.execute('update proxies set host=?,port=?,username=?,password=?,protocol=?,status=?,detected_protocol=?,exit_ip=?,provider_slot_key=?,enabled=? where id=?',(*values,current['id']))
+                c.execute('update proxies set host=?,port=?,username=?,password=?,protocol=?,status=?,detected_protocol=?,exit_ip=?,provider_slot_key=?,enabled=?,last_check_status=?,failure_streak=?,checked_at=?,transfer_checked_at=?,error=?,latency_ms=?,listener_port=? where id=?',(*values,current['id']))
                 stats['updated']+=1; changed=True
+            if endpoint_changed:
+                c.execute('update proxies set transfer_checked_at=null where id=?',(current['id'],))
         stale=c.execute("select id from proxies where provider_slot_key is not null and provider_slot_key not in (%s) and enabled=1"%(','.join('?' for _ in seen) if seen else "''"),sorted(seen)).fetchall()
         if stale:
             c.execute("update proxies set enabled=0,status='dead',last_check_status='dead' where provider_slot_key is not null and provider_slot_key not in (%s) and enabled=1"%(','.join('?' for _ in seen) if seen else "''"),sorted(seen))
@@ -383,45 +433,105 @@ def run_check_ids(ids=None, concurrency=32, job_id=None):
     c=conn(); query='select * from proxies where enabled=1'; params=[]
     if ids is not None: query += ' and id in (%s)'%(','.join('?'*len(ids)) if ids else '0'); params=ids
     rows=c.execute(query,params).fetchall(); c.close()
+    rows_by_id={row['id']:dict(row) for row in rows}
+    results=[]
     with ThreadPoolExecutor(max_workers=max(1,min(100,concurrency))) as pool:
-        futures={pool.submit(check_proxy,dict(r)):r['id'] for r in rows}; results=[]
-        for f in as_completed(futures):
+        futures={pool.submit(check_proxy,dict(row)):row['id'] for row in rows}
+        for future in as_completed(futures):
             if job_id:
                 with JOB_LOCK: stopped=job_should_stop(JOBS.get(job_id,{}))
                 if stopped:
-                    for pending in futures:
-                        pending.cancel()
+                    for pending in futures: pending.cancel()
                     break
-            try: result=f.result()
+            try: result=future.result()
             except Exception as exc: result={'status':'inconclusive','protocol':'unknown','exit_ip':'','latency_ms':None,'error':str(exc)[-500:]}
-            results.append((futures[f],result))
+            results.append((futures[future],result))
             if job_id:
+                shown=dict(result)
+                if is_usable_status(shown.get('status')): shown['status']='checking'
                 with JOB_LOCK:
-                    job=JOBS[job_id]
-                    job.setdefault('row_results',{})[futures[f]]=dict(result)
-                    job.update(done=len(results),**result_counts([x[1] for x in results]))
-    live_count=sum(1 for _,result in results if is_usable_status(result['status']))
-    blocked_count=sum(1 for _,result in results if result['status']=='blocked')
-    c=conn(); operational_changed=False
-    rows_by_id={row['id']:dict(row) for row in rows}
+                    job=JOBS[job_id]; job.setdefault('row_results',{})[futures[future]]=shown
+                    finalized=sum(1 for value in job['row_results'].values() if value.get('status')!='checking')
+                    job.update(done=finalized,**result_counts(list(job['row_results'].values())))
+
+    c=conn(); operational_changed=False; candidate_rows={}; direct_by_id={}
     for pid,result in results:
-        updates=apply_check_result(rows_by_id[pid],result)
         previous=rows_by_id[pid]
-        if updates['status'] != previous.get('status') or updates['detected_protocol'] != (previous.get('detected_protocol') or 'unknown') or updates['exit_ip'] != (previous.get('exit_ip') or ''):
+        updates=apply_check_result(previous,result)
+        direct_by_id[pid]=dict(result)
+        if is_usable_status(result.get('status')):
+            updates['status']='checking'
+            candidate_rows[pid]={**previous,**updates}
+        if (updates['status']!=previous.get('status') or updates['detected_protocol']!=(previous.get('detected_protocol') or 'unknown')
+            or updates['exit_ip']!=(previous.get('exit_ip') or '') or updates['last_check_status']!=(previous.get('last_check_status') or '')):
             operational_changed=True
         c.execute('''update proxies set status=?,detected_protocol=?,exit_ip=?,latency_ms=?,error=?,
             checked_at=current_timestamp,last_check_status=?,failure_streak=? where id=?''',
             (updates['status'],updates['detected_protocol'],updates['exit_ip'],updates['latency_ms'],updates['error'],updates['last_check_status'],updates['failure_streak'],pid))
-    c.commit()
-    if results and operational_changed: reload_relay()
+    c.commit(); c.close()
+    reload_ready=True
+    if candidate_rows:
+        reload_ready=reload_relay(wait=True)
+    elif results and operational_changed:
+        reload_relay()
+
+    transfer_results={}
+    stopped=job_id and job_should_stop(JOBS.get(job_id,{}))
+    relay_results={}
+    if candidate_rows and not stopped and reload_ready is False:
+        relay_results={pid:{'status':'inconclusive','protocol':direct_by_id[pid].get('protocol') or 'unknown','exit_ip':'','latency_ms':None,'error':'relay configuration was not acknowledged'} for pid in candidate_rows}
+    elif candidate_rows and not stopped:
+        with ThreadPoolExecutor(max_workers=max(1,min(100,concurrency))) as pool:
+            futures={pool.submit(check_relay_proxy,row,direct_by_id[pid].get('exit_ip') or ''):pid for pid,row in candidate_rows.items()}
+            for future in as_completed(futures):
+                pid=futures[future]
+                try: result=future.result()
+                except Exception as exc: result={'status':'inconclusive','protocol':'unknown','exit_ip':'','latency_ms':None,'error':str(exc)[-500:]}
+                relay_results[pid]=result
+    for pid,result in relay_results.items():
+        direct_exit=direct_by_id[pid].get('exit_ip') or ''
+        status=result.get('status') if result.get('status')=='blocked' else result.get('status') if is_usable_status(result.get('status')) else 'inconclusive'
+        final=apply_check_result(candidate_rows[pid],result)
+        final['status']=status
+        final_exit_ip=result.get('exit_ip') or direct_exit
+        if 'egress IP did not match' in (result.get('error') or ''):
+            final_exit_ip=''
+        c=conn()
+        c.execute('''update proxies set status=?,last_check_status=?,failure_streak=?,detected_protocol=?,exit_ip=?,
+            error=?,latency_ms=?,checked_at=current_timestamp,
+            transfer_checked_at=case when ? in ('live','live_unverified') then current_timestamp else null end
+            where id=?''',
+            (final['status'],final['last_check_status'],final['failure_streak'],final['detected_protocol'],final_exit_ip,
+             result.get('error') or '',result.get('latency_ms'),final['status'],pid))
+        c.commit(); c.close()
+        transfer_results[pid]={**direct_by_id[pid],**result,'status':final['status'],'exit_ip':final_exit_ip}
+        if status not in LIVE_STATUSES and not candidate_rows[pid].get('provider_slot_key'):
+            operational_changed=True
+        if job_id:
+            with JOB_LOCK:
+                job=JOBS[job_id]; job['row_results'][pid]=dict(transfer_results[pid])
+                finalized=sum(1 for value in job['row_results'].values() if value.get('status')!='checking')
+                job.update(done=finalized,**result_counts(list(job['row_results'].values())))
+
+    if stopped and job_id:
+        c=conn()
+        for pid,row in candidate_rows.items():
+            c.execute('update proxies set status=? where id=?',(rows_by_id[pid].get('status') or 'unknown',pid))
+        c.commit(); c.close()
+    if operational_changed and candidate_rows and not stopped:
+        reload_relay()
+
+    final_results=[transfer_results.get(pid,result) for pid,result in results]
+    live_count=sum(1 for result in final_results if is_usable_status(result.get('status')))
+    blocked_count=sum(1 for result in final_results if result.get('status')=='blocked')
     if job_id and results and not live_count:
-        message='All checks hit a provider captive portal; blocked results were recorded.' if blocked_count==len(results) and results else 'No proxy reached Live quorum; transient results were recorded without immediately closing existing listeners.'
+        message='All checks hit a provider captive portal; blocked results were recorded.' if blocked_count==len(results) and results else 'No proxy passed end-to-end verification; unverified listeners are not counted online.'
         with JOB_LOCK: JOBS[job_id].update(status='warning',error=message)
     if job_id:
         with JOB_LOCK:
             if JOBS[job_id].get('stop_requested'): JOBS[job_id].update(status='stopped')
-            elif JOBS[job_id].get('status') != 'warning': JOBS[job_id].update(status='done')
-            JOBS[job_id].update(done=len(results))
+            elif JOBS[job_id].get('status')!='warning': JOBS[job_id].update(status='done')
+            JOBS[job_id].update(done=len(final_results))
 def start_check(ids, concurrency):
     if not ids: return ''
     with JOB_LOCK:

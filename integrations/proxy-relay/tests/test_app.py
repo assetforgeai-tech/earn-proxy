@@ -48,7 +48,7 @@ def test_proxiware_binding_sync_creates_once_then_updates_same_listener(monkeypa
     first = {'slot_key': slot, 'raw': 'first.proxy.example:9000:user:pass', 'protocol': 'socks5', 'live_status': 'live', 'qualification': 'allow', 'exit_ip': '198.51.100.10'}
     created = sync_proxiware_bindings(c, [first], reload=False)
     original = c.execute('select * from proxies where provider_slot_key=?', (slot,)).fetchone()
-    changed = {'slot_key': slot, 'raw': 'second.proxy.example:9001:user2:pass2', 'protocol': 'socks5', 'live_status': 'live', 'qualification': 'risk', 'exit_ip': '198.51.100.11'}
+    changed = {'slot_key': slot, 'raw': 'second.proxy.example:9001:user2:pass2', 'protocol': 'http', 'live_status': 'live', 'qualification': 'risk', 'exit_ip': '198.51.100.11'}
     updated = sync_proxiware_bindings(c, [changed], reload=False)
     current = c.execute('select * from proxies where provider_slot_key=?', (slot,)).fetchone()
 
@@ -56,8 +56,75 @@ def test_proxiware_binding_sync_creates_once_then_updates_same_listener(monkeypa
     assert updated['updated'] == 1
     assert current['id'] == original['id']
     assert (current['http_port'], current['socks_port']) == (original['http_port'], original['socks_port'])
+    assert current['listener_port'] == original['socks_port']
+    assert relay_app.client_port(current) == original['socks_port']
+    assert current['detected_protocol'] == 'http'
+    assert relay_app.format_endpoint(current, 'http', '42.96.12.142', 'client', 'secret') == f"42.96.12.142:{original['socks_port']}:client:secret"
     assert (current['host'], current['port'], current['username'], current['password']) == ('second.proxy.example', 9001, 'user2', 'pass2')
     assert c.execute('select count(*) from proxies where provider_slot_key=?', (slot,)).fetchone()[0] == 1
+    c.close()
+
+
+def test_proxiware_provider_live_metadata_does_not_mark_transfer_online(monkeypatch, tmp_path):
+    import app as relay_app
+
+    monkeypatch.setattr(relay_app, 'ROOT', str(tmp_path))
+    monkeypatch.setattr(relay_app, 'DB', str(tmp_path / 'relay.db'))
+    c = relay_app.conn()
+    slot = 'pw1_' + 'c' * 64
+    sync_proxiware_bindings(c, [{'slot_key': slot, 'raw': 'proxy.example:9000:user:pass', 'protocol': 'socks5', 'live_status': 'live'}], reload=False)
+
+    row = c.execute('select status,last_check_status,exit_ip from proxies where provider_slot_key=?', (slot,)).fetchone()
+    assert tuple(row) == ('unknown', 'unknown', '')
+    c.close()
+
+
+def test_proxiware_upstream_change_invalidates_online_check_but_keeps_listener_ports(monkeypatch, tmp_path):
+    import app as relay_app
+
+    monkeypatch.setattr(relay_app, 'ROOT', str(tmp_path))
+    monkeypatch.setattr(relay_app, 'DB', str(tmp_path / 'relay.db'))
+    c = relay_app.conn()
+    slot = 'pw1_' + 'd' * 64
+    sync_proxiware_bindings(c, [{'slot_key': slot, 'raw': 'old.proxy.example:9000:user:pass', 'protocol': 'socks5', 'live_status': 'live'}], reload=False)
+    c.execute("update proxies set status='live',last_check_status='live',exit_ip='203.0.113.8',checked_at=current_timestamp where provider_slot_key=?", (slot,))
+    original = c.execute('select id,http_port,socks_port from proxies where provider_slot_key=?', (slot,)).fetchone()
+
+    sync_proxiware_bindings(c, [{'slot_key': slot, 'raw': 'new.proxy.example:9001:user2:pass2', 'protocol': 'socks5', 'live_status': 'live'}], reload=False)
+
+    current = c.execute('select id,http_port,socks_port,status,last_check_status,exit_ip,checked_at from proxies where provider_slot_key=?', (slot,)).fetchone()
+    assert tuple(current[:3]) == tuple(original)
+    assert tuple(current[3:]) == ('unknown', 'unknown', '', None)
+    c.close()
+
+
+def test_legacy_live_rows_are_reset_once_for_end_to_end_migration(monkeypatch, tmp_path):
+    import sqlite3
+    import app as relay_app
+
+    db_path = tmp_path / 'relay.db'
+    legacy = sqlite3.connect(db_path)
+    legacy.execute('''create table proxies(
+        id integer primary key,host text not null,port integer not null,username text,password text,
+        protocol text default 'auto',status text default 'unknown',detected_protocol text,exit_ip text,
+        latency_ms integer,error text,http_port integer unique,socks_port integer unique,enabled integer default 1,
+        created_at text default current_timestamp,checked_at text,import_batch_id integer,last_check_status text,
+        failure_streak integer not null default 0,provider_slot_key text)''')
+    legacy.execute("insert into proxies(host,port,status,detected_protocol,exit_ip,http_port,socks_port,last_check_status) values('old.example',1080,'live','socks5','203.0.113.80',20080,30080,'live')")
+    legacy.commit()
+    legacy.close()
+    monkeypatch.setattr(relay_app, 'ROOT', str(tmp_path))
+    monkeypatch.setattr(relay_app, 'DB', str(db_path))
+
+    c = relay_app.conn()
+    row = c.execute('select status,last_check_status,exit_ip,checked_at,transfer_checked_at from proxies').fetchone()
+    assert tuple(row) == ('unknown', 'unknown', '', None, None)
+    c.execute("update proxies set status='live',transfer_checked_at=current_timestamp where id=1")
+    c.commit()
+    c.close()
+
+    c = relay_app.conn()
+    assert c.execute('select status from proxies where id=1').fetchone()['status'] == 'live'
     c.close()
 
 
@@ -99,7 +166,7 @@ def test_proxiware_swap_keeps_listener_during_pending_protocol_recheck(monkeypat
     assert (current['id'], current['http_port'], current['socks_port']) == tuple(original)
     assert current['detected_protocol'] == 'socks5'
     assert [(entry['host'], entry['protocol'], entry['port']) for entry in runtime['entries']] == [
-        ('new.proxy.example', 'socks5', original['socks_port'])
+        ('new.proxy.example', 'socks5', original['socks_port']),
     ]
     assert dead_status == 'dead'
 
@@ -372,6 +439,7 @@ def test_duplicate_raw_csv_groups_proxies_by_exit_ip():
 
 def test_client_port_keeps_stored_protocol_port():
     assert client_port({'detected_protocol':'socks5','http_port':20017,'socks_port':30017}) == 30017
+    assert client_port({'detected_protocol':'socks5','http_port':20017,'socks_port':30017},'auto') == 30017
     assert client_port({'detected_protocol':'http','http_port':20017,'socks_port':30017}) == 20017
 
 def test_job_snapshot_includes_percentage():
@@ -567,6 +635,9 @@ def test_web_service_is_loopback_only_and_health_monitor_is_installed():
     assert 'reverse_proxy 127.0.0.1:8000' in caddy
     assert 'proxy-relay-healthcheck.timer' in installer
     assert 'caddy' in installer
+    assert 'for unit in proxy-relay-engine proxy-relay; do' in installer
+    assert 'systemctl restart "$unit"' in installer
+    assert 'go build -trimpath -o /usr/local/bin/proxy-relay-engine .' in installer
 
 def test_health_monitor_uses_consecutive_failures_and_resource_thresholds():
     root=pathlib.Path(__file__).parents[1]
@@ -659,7 +730,7 @@ def test_empty_check_selection_is_a_noop_not_check_all(monkeypatch,tmp_path):
     monkeypatch.setattr(relay_app,'DB',str(tmp_path/'relay.db'))
     calls=[]
     monkeypatch.setattr(relay_app,'check_proxy',lambda proxy:calls.append(proxy) or {'status':'dead','protocol':'unknown','exit_ip':'','latency_ms':None,'error':'unexpected'})
-    monkeypatch.setattr(relay_app,'reload_relay',lambda:None)
+    monkeypatch.setattr(relay_app,'reload_relay',lambda **_kwargs:True)
     c=relay_app.conn(); c.execute("insert into proxies(host,port,status,detected_protocol,http_port,socks_port) values('upstream',8080,'live','socks5',20001,30001)"); c.commit(); c.close()
     relay_app.JOBS['empty']={'status':'running','total':0,'done':0,'ids':[],'row_results':{}}
     relay_app.run_check_ids([],concurrency=1,job_id='empty')
@@ -718,8 +789,8 @@ def test_all_tls_unverified_batch_is_committed_as_usable(monkeypatch,tmp_path):
     import app as relay_app
     monkeypatch.setattr(relay_app,'ROOT',str(tmp_path))
     monkeypatch.setattr(relay_app,'DB',str(tmp_path/'relay.db'))
-    monkeypatch.setattr(relay_app,'check_proxy',lambda proxy:{'status':'live_unverified','protocol':'socks5','exit_ip':'203.0.113.30','latency_ms':15,'error':'TLS certificate verification failed'})
-    monkeypatch.setattr(relay_app,'reload_relay',lambda:None)
+    monkeypatch.setattr(relay_app,'check_proxy',lambda proxy,**_kwargs:{'status':'live_unverified','protocol':'socks5','exit_ip':'203.0.113.30','latency_ms':15,'error':'TLS certificate verification failed'})
+    monkeypatch.setattr(relay_app,'reload_relay',lambda **_kwargs:True)
     c=relay_app.conn(); ids=[]
     for index in range(2):
         cur=c.execute("insert into proxies(host,port,status,http_port,socks_port) values(?,?,?,?,?)",(f'upstream-{index}',9000+index,'unknown',20001+index,30001+index)); ids.append(cur.lastrowid)
@@ -734,6 +805,65 @@ def test_all_tls_unverified_batch_is_committed_as_usable(monkeypatch,tmp_path):
     assert relay_app.JOBS['tls-batch']['status']=='done'
     assert relay_app.JOBS['tls-batch']['live']==2
     assert relay_app.JOBS['tls-batch']['live_unverified']==2
+    assert all(row['transfer_checked_at'] for row in relay_app.conn().execute('select transfer_checked_at from proxies'))
+
+
+def test_direct_live_result_stays_non_online_when_transfer_probe_fails(monkeypatch, tmp_path):
+    import app as relay_app
+
+    monkeypatch.setattr(relay_app, 'ROOT', str(tmp_path))
+    monkeypatch.setattr(relay_app, 'DB', str(tmp_path / 'relay.db'))
+    monkeypatch.setattr(relay_app, 'check_proxy', lambda _proxy, **_kwargs: {'status': 'live', 'protocol': 'socks5', 'exit_ip': '203.0.113.70', 'latency_ms': 20, 'error': ''})
+    monkeypatch.setattr(relay_app, 'check_relay_proxy', lambda *_args, **_kwargs: {'status': 'inconclusive', 'protocol': 'socks5', 'exit_ip': '', 'latency_ms': None, 'error': 'relay connect failed'}, raising=False)
+    monkeypatch.setattr(relay_app, 'reload_relay', lambda **_kwargs: True)
+    c = relay_app.conn()
+    proxy_id = c.execute("insert into proxies(host,port,protocol,status,detected_protocol,http_port,socks_port) values(?,?,?,?,?,?,?)", ('upstream.example', 1080, 'socks5', 'unknown', 'socks5', 20001, 30001)).lastrowid
+    c.commit()
+    c.close()
+
+    relay_app.run_check_ids([proxy_id], concurrency=1)
+
+    row = relay_app.conn().execute('select status,last_check_status,exit_ip from proxies where id=?', (proxy_id,)).fetchone()
+    assert tuple(row) == ('inconclusive', 'inconclusive', '203.0.113.70')
+
+
+def test_proxy_is_online_only_after_listener_probe_matches_upstream_egress(monkeypatch, tmp_path):
+    import app as relay_app
+
+    monkeypatch.setattr(relay_app, 'ROOT', str(tmp_path))
+    monkeypatch.setattr(relay_app, 'DB', str(tmp_path / 'relay.db'))
+    monkeypatch.setattr(relay_app, 'reload_relay', lambda **_kwargs: True)
+    def check(proxy, **_kwargs):
+        return {'status':'live','protocol':'socks5','exit_ip':'203.0.113.71','latency_ms':12,'error':''}
+    monkeypatch.setattr(relay_app, 'check_proxy', check)
+    c = relay_app.conn()
+    proxy_id = c.execute("insert into proxies(host,port,protocol,status,detected_protocol,http_port,socks_port) values(?,?,?,?,?,?,?)", ('upstream.example', 1080, 'socks5', 'unknown', 'socks5', 20002, 30002)).lastrowid
+    c.commit()
+    c.close()
+
+    relay_app.run_check_ids([proxy_id], concurrency=1)
+
+    row = relay_app.conn().execute('select status,last_check_status,exit_ip,transfer_checked_at from proxies where id=?', (proxy_id,)).fetchone()
+    assert row['status'] == 'live'
+    assert row['last_check_status'] == 'live'
+    assert row['exit_ip'] == '203.0.113.71'
+    assert row['transfer_checked_at']
+
+
+def test_listener_probe_rejects_different_egress_identity(monkeypatch):
+    import app as relay_app
+
+    calls = []
+    monkeypatch.setattr(relay_app, 'check_proxy', lambda proxy, **_kwargs: calls.append(proxy) or {
+        'status':'live','protocol':'socks5','exit_ip':'203.0.113.99','latency_ms':10,'error':''
+    })
+    row={'detected_protocol':'socks5','provider_slot_key':'pw1_'+'f'*64,'listener_port':30123,'socks_port':30123,'http_port':20123}
+
+    result=relay_app.check_relay_proxy(row,'203.0.113.71')
+
+    assert result['status']=='inconclusive'
+    assert 'did not match' in result['error']
+    assert calls[0]['host']=='127.0.0.1' and calls[0]['port']==30123
 
 def test_reload_relay_includes_verified_and_tls_unverified_rows(monkeypatch,tmp_path):
     import app as relay_app
@@ -758,6 +888,31 @@ def test_reload_relay_includes_verified_and_tls_unverified_rows(monkeypatch,tmp_
         ('verified.example','http',20001),('tls.example','socks5',30002),
     ]
     assert calls and calls[0][-1]=='proxy-relay-engine'
+
+
+def test_reload_relay_waits_for_matching_engine_revision(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    import json
+    import app as relay_app
+
+    monkeypatch.setattr(relay_app, 'ROOT', str(tmp_path))
+    monkeypatch.setattr(relay_app, 'DB', str(tmp_path / 'relay.db'))
+
+    def acknowledge(_command, **_kwargs):
+        config = json.loads((tmp_path / 'relay.json').read_text())
+        (tmp_path / 'relay.json.loaded').write_text(config['revision'])
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(relay_app.subprocess, 'run', acknowledge)
+    c = relay_app.conn()
+    c.execute("insert into proxies(host,port,status,detected_protocol,http_port,socks_port) values('upstream',8080,'checking','socks5',20001,30001)")
+    c.commit()
+    c.close()
+
+    assert relay_app.reload_relay(wait=True, timeout=0.2) is True
+    (tmp_path / 'relay.json.loaded').write_text('stale-revision')
+    monkeypatch.setattr(relay_app.subprocess, 'run', lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
+    assert relay_app.reload_relay(wait=True, timeout=0.05) is False
 
 def test_exports_include_tls_unverified_client_endpoint(monkeypatch,tmp_path):
     import app as relay_app
