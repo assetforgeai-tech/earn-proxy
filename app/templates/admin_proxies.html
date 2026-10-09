@@ -5,9 +5,12 @@
   <div>
     <p class="eyebrow">GLOBAL INVENTORY</p>
     <h1>Proxy inventory</h1>
-    <p class="muted">Every contributor endpoint in one credential-safe view. Use the duplicate workspace for egress investigations.</p>
+    <p class="muted">Every contributor endpoint. Credentials stay hidden here; export downloads raw credentials for active Allow proxies.</p>
   </div>
-  <a class="button ghost" href="{{ inventory.duplicate_groups_url }}">Duplicate egress</a>
+  <div class="admin-proxy-head-actions">
+    <a class="button ghost" href="{{ inventory.duplicate_groups_url }}">Duplicate egress</a>
+    <a class="button primary" href="{{ url_for('admin.export_allow_raw_proxies') }}" aria-label="Export raw credentials for all active Allow proxies">Export raw Allow</a>
+  </div>
 </div>
 
 <section class="admin-proxy-overview" aria-label="Proxy inventory summary">
@@ -22,7 +25,7 @@
   <div class="panel-head">
     <div>
       <h2 id="proxy-inventory-title">All proxies</h2>
-      <p class="muted">{{ inventory.total_count }} total proxies in this scope. Credentials are never displayed. Exit IP appears only when backed by a trusted attestation.</p>
+      <p class="muted">{{ inventory.total_count }} total proxies in this scope. Credentials stay hidden in the table. Exit IP appears only when backed by a trusted attestation.</p>
     </div>
     <span class="badge {{ 'archived' if inventory.query.archived == 'archived' else 'active' }}">{{ inventory.total_count }} {{ 'archived' if inventory.query.archived == 'archived' else 'records' if inventory.query.archived == 'all' else 'active' }}</span>
   </div>

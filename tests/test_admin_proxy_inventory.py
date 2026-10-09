@@ -132,6 +132,8 @@ def test_admin_proxy_inventory_is_global_credential_safe_and_paginated(app, clie
     assert "archived.example:9003" not in page
     assert "private-a" not in page
     assert "secret-a" not in page
+    assert "Export raw Allow" in page
+    assert 'href="/admin/proxies/export/allow-raw"' in page
     assert 'data-nav="proxies" aria-current="page"' in page
 
 
@@ -340,3 +342,71 @@ def test_admin_proxy_inventory_query_never_selects_secret_columns(app):
     assert all("SELECT p.*" not in statement for statement in inventory_queries)
     assert all("username_encrypted" not in statement for statement in inventory_queries)
     assert all("password_encrypted" not in statement for statement in inventory_queries)
+
+
+def test_admin_proxy_inventory_exports_all_active_allow_proxies_as_raw(app, client):
+    _seed_admin_inventory(app)
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "export-owner@example.com", "password", status="active")
+        _seed_proxy(
+            db,
+            user_id,
+            "archived-allow.example:9010:archived-user:archived-pass",
+            status="online",
+            eligibility="allow",
+            archived_at=datetime.now(UTC).isoformat(),
+        )
+        _seed_proxy(
+            db,
+            user_id,
+            "offline-allow.example:9011:offline-user:offline-pass",
+            status="offline",
+            eligibility="allow",
+        )
+        db.commit()
+    login_admin(client)
+
+    response = client.get("/admin/proxies/export/allow-raw?q=no-match")
+
+    assert response.status_code == 200
+    assert response.mimetype == "text/plain"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert 'attachment; filename="raw-proxies-allow.txt"' in response.headers["Content-Disposition"]
+    lines = response.get_data(as_text=True).splitlines()
+    assert lines == [
+        "us-canonical.example:9000:private-a:secret-a",
+        "us-duplicate.example:9001:private-b:secret-b",
+        "offline-allow.example:9011:offline-user:offline-pass",
+    ]
+
+
+def test_admin_proxy_inventory_export_fails_closed_on_undecryptable_credentials(app, client):
+    with app.app_context():
+        db = get_db()
+        user_id = create_user(db, "broken-export@example.com", "password", status="active")
+        proxy_id = _seed_proxy(
+            db,
+            user_id,
+            "broken.example:9000:user:pass",
+            status="online",
+            eligibility="allow",
+        )
+        db.execute("UPDATE proxies SET password_encrypted='not-encrypted' WHERE id=?", (proxy_id,))
+        db.commit()
+    login_admin(client)
+
+    response = client.get("/admin/proxies/export/allow-raw")
+
+    assert response.status_code == 503
+    assert response.get_data(as_text=True) == (
+        "Export unavailable: one or more proxy credentials could not be decrypted.\n"
+    )
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_admin_proxy_inventory_export_is_admin_only(client):
+    register(client, "export-member@example.com", "member-password")
+    login(client, "export-member@example.com", "member-password")
+
+    assert client.get("/admin/proxies/export/allow-raw").status_code == 403

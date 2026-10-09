@@ -32,6 +32,7 @@ from app.services.checks import (
     operational_stats,
 )
 from app.services.payouts import approve_payout, mark_payout_sent
+from app.services.proxies import reveal_proxy
 from app.services.proxiware import (
     ProxiwareClient,
     enqueue_sync_run,
@@ -2034,6 +2035,35 @@ def proxies():
         )
     )
     response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@bp.get("/proxies/export/allow-raw")
+@admin_required
+def export_allow_raw_proxies():
+    rows = (
+        get_db()
+        .execute(
+            "SELECT host,port,protocol_hint,username_encrypted,password_encrypted FROM proxies "
+            "WHERE archived_at IS NULL AND eligibility='allow' ORDER BY id"
+        )
+        .fetchall()
+    )
+    try:
+        raw_proxies = [reveal_proxy(row).raw for row in rows]
+    except (TypeError, ValueError):
+        response = Response(
+            "Export unavailable: one or more proxy credentials could not be decrypted.\n",
+            status=503,
+            mimetype="text/plain",
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    response = Response("\n".join(raw_proxies), mimetype="text/plain")
+    response.headers["Content-Disposition"] = 'attachment; filename="raw-proxies-allow.txt"'
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
     return response
 
 

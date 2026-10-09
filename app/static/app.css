@@ -616,6 +616,7 @@ form[aria-busy="true"] .button {
 .proxiware-table { min-width: 920px; }
 .proxiware-action-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
 .proxiware-action-row form { margin: 0; }
+.admin-proxy-head-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 @media (max-width: 900px) {
   .proxiware-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .proxiware-count-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
