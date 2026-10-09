@@ -150,6 +150,41 @@ def test_auto_swap_runner_queues_an_eligible_subscription_before_claiming(app):
     assert tuple(row) == ("provider_applied", 1)
 
 
+def test_auto_swap_idle_does_not_restore_browser_session_without_claimable_jobs(app, monkeypatch):
+    from app.proxiware_swap_service import ProxiwareSwapRunner
+    from app.services.proxiware_credentials import store_provider_session
+
+    calls = []
+
+    class Adapter:
+        allow_mutation = True
+
+        def restore_session(self, _cookies):
+            calls.append("restore")
+
+        def close(self):
+            calls.append("close")
+
+    with app.app_context():
+        db = get_db()
+        set_setting(db, "proxiware_auto_swap", "1")
+        set_setting(db, "proxiware_auto_swap_intent", "1")
+        set_setting(db, "proxiware_allow_mutation", "1")
+        store_provider_session(
+            db, [{"name": "session", "value": "opaque"}], expires_at=datetime.now(UTC) + timedelta(hours=1)
+        )
+    app.config.update(PROXIWARE_BROWSER_ENABLED=True, PROXIWARE_BROWSER_ALLOW_MUTATION=True)
+    monkeypatch.setattr(
+        "app.proxiware_swap_service.build_browser_adapter",
+        lambda **_kwargs: calls.append("build") or Adapter(),
+    )
+
+    result = ProxiwareSwapRunner(app=app).run_once()
+
+    assert result == {"status": "idle"}
+    assert calls == []
+
+
 def test_swap_runner_defers_stale_dashboard_job_and_requests_refresh(app):
     from app.proxiware_swap_service import ProxiwareSwapRunner
 

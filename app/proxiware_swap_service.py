@@ -35,6 +35,7 @@ from app.services.proxiware_health import (
 )
 from app.services.proxiware_swap import (
     MANUAL_ACTION_CODES,
+    PROVIDER,
     begin_swap_batch_mutation,
     claim_next_swap,
     claim_next_swap_batch,
@@ -482,6 +483,16 @@ class ProxiwareSwapRunner:
                 record_swap_mutation_readiness(db, False, error_code="mutation_disabled")
                 record_worker_heartbeat(db, "swap_worker", "mutation_disabled", error_code="mutation_disabled")
                 return {"status": "mutation_disabled"}
+            if not allow_manual and job_id is None and auto_swap_enabled:
+                queue_eligible_swaps(db)
+                claimable = db.execute(
+                    "SELECT 1 FROM swap_jobs WHERE provider=? AND state='pending' AND batch_id IS NULL "
+                    "AND (claimed_until IS NULL OR claimed_until<=?) LIMIT 1",
+                    (PROVIDER, datetime.now(UTC).isoformat()),
+                ).fetchone()
+                if claimable is None:
+                    record_worker_heartbeat(db, "swap_worker", "idle")
+                    return {"status": "idle"}
             configured_adapter = None
             if self._uses_configured_adapter:
                 if (
