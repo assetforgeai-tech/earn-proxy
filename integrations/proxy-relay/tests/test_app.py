@@ -664,6 +664,14 @@ def test_health_monitor_uses_consecutive_failures_and_resource_thresholds():
     assert 'cpu_percent' in script and 'memory_percent' in script and 'disk_percent' in script
     assert 'StateDirectory=proxy-relay-monitor' in unit
 
+def test_health_monitor_detects_backup_and_provider_sync_failures():
+    root=pathlib.Path(__file__).parents[1]
+    script=root.joinpath('deploy','proxy-relay-healthcheck.sh').read_text()
+    assert 'proxy-relay-backup.timer' in script
+    assert 'proxy-relay-proxiware-sync.timer' in script
+    assert 'systemctl is-failed --quiet proxy-relay-backup.service' in script
+    assert 'systemctl is-failed --quiet proxy-relay-proxiware-sync.service' in script
+
 
 def test_health_monitor_matches_configured_ports_instead_of_counting_every_socket():
     root=pathlib.Path(__file__).parents[1]

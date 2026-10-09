@@ -10,9 +10,11 @@ DISK_WARN=85
 STATE_FILE=/var/lib/proxy-relay-monitor/consecutive-failures
 install -d -m 0700 "${STATE_FILE%/*}"
 
-for unit in proxy-relay.service proxy-relay-engine.service caddy.service; do
+for unit in proxy-relay.service proxy-relay-engine.service caddy.service proxy-relay-backup.timer proxy-relay-proxiware-sync.timer; do
     if ! systemctl is-active --quiet "$unit"; then failures+=("$unit inactive"); fi
 done
+if systemctl is-failed --quiet proxy-relay-backup.service; then failures+=("proxy-relay-backup.service failed"); fi
+if systemctl is-failed --quiet proxy-relay-proxiware-sync.service; then failures+=("proxy-relay-proxiware-sync.service failed"); fi
 if ! curl --noproxy '*' --fail --silent --show-error --max-time 10 http://127.0.0.1:8000/healthz >/dev/null 2>&1; then failures+=("healthz failed"); fi
 
 read -r online expected entries listeners missing_ports missing_online < <(python3 - <<'PY'
