@@ -27,5 +27,5 @@ install -m 0644 /etc/systemd/system/proxy-relay.service "$DEST/proxy-relay.servi
 install -m 0644 /etc/systemd/system/proxy-relay-engine.service "$DEST/proxy-relay-engine.service"
 ufw status numbered > "$DEST/ufw-status.txt"
 chmod 0600 "$DEST/ufw-status.txt"
-find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -mtime +14 -depth -delete
+find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex '.*/[0-9]{8}T[0-9]{6}Z' -mtime +14 -exec rm -rf -- {} +
 logger -t proxy-relay-backup -- "OK: backup=$DEST"

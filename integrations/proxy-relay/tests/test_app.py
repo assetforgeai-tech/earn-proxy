@@ -1,4 +1,4 @@
-import sys, pathlib, sqlite3
+import os, sys, pathlib, sqlite3, shutil, subprocess, time
 import pytest
 sys.path.insert(0,str(pathlib.Path(__file__).parents[1]))
 from app import app, parse_proxy_line, format_endpoint, format_raw_proxy, duplicate_raw_csv, selected_ids, unique_exit_rows, client_port, job_snapshot
@@ -678,6 +678,24 @@ def test_installer_enables_daily_backup_timer():
     timer=root.joinpath('deploy','proxy-relay-backup.timer').read_text()
     assert 'proxy-relay-backup.timer' in installer
     assert 'OnCalendar=daily' in timer
+
+def test_backup_retention_recursively_removes_only_expired_daily_snapshots(tmp_path):
+    bash=shutil.which('bash') if os.name != 'nt' else None
+    if not bash:
+        pytest.skip('backup retention uses GNU find on Linux')
+    root=pathlib.Path(__file__).parents[1]
+    script=root.joinpath('deploy','proxy-relay-backup.sh').read_text()
+    retention_line=next(line for line in script.splitlines() if line.startswith('find "$BACKUP_ROOT"'))
+    expired=tmp_path/'20260101T000000Z'; (expired/'nested').mkdir(parents=True); (expired/'nested'/'backup').write_text('old')
+    manual=tmp_path/'checker-fix-20260101T000000Z'; manual.mkdir(); (manual/'backup').write_text('keep')
+    recent=tmp_path/'20261008T000000Z'; recent.mkdir(); (recent/'backup').write_text('keep')
+    old=time.time()-30*86400
+    os.utime(expired,(old,old)); os.utime(manual,(old,old))
+    command=f'BACKUP_ROOT="$1"\n{retention_line}'
+    result=subprocess.run([bash,'-c',command,'test-backups',str(tmp_path)],text=True,capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert not expired.exists()
+    assert manual.exists() and recent.exists()
 
 def test_login_limiter_locks_after_repeated_failures():
     import app as relay_app
