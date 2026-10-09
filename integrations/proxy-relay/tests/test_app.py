@@ -79,6 +79,23 @@ def test_proxiware_provider_live_metadata_does_not_mark_transfer_online(monkeypa
     c.close()
 
 
+def test_proxiware_binding_sync_is_idempotent_when_error_is_null(monkeypatch, tmp_path):
+    import app as relay_app
+
+    monkeypatch.setattr(relay_app, 'ROOT', str(tmp_path))
+    monkeypatch.setattr(relay_app, 'DB', str(tmp_path / 'relay.db'))
+    c = relay_app.conn()
+    slot = 'pw1_' + 'e' * 64
+    item = {'slot_key': slot, 'raw': 'proxy.example:9000:user:pass', 'protocol': 'socks5', 'live_status': 'live'}
+    sync_proxiware_bindings(c, [item], reload=False)
+
+    result = sync_proxiware_bindings(c, [item], reload=False)
+
+    assert result['changed'] is False
+    assert result['updated'] == 0
+    c.close()
+
+
 def test_proxiware_upstream_change_invalidates_online_check_but_keeps_listener_ports(monkeypatch, tmp_path):
     import app as relay_app
 
