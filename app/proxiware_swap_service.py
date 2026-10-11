@@ -513,12 +513,6 @@ class ProxiwareSwapRunner:
                     record_worker_heartbeat(db, "swap_worker", "manual_action_required", error_code=code)
                     return {"status": "manual_action_required", "error_code": code}
                 cookies, session_error = self._configured_session(db)
-                if not allow_manual and not auto_swap_enabled and not session_error:
-                    # A live session plus a paused runtime gate means the
-                    # operator paused auto-swap for another reason. Do not
-                    # silently resume it merely because intent is retained.
-                    record_worker_heartbeat(db, "swap_worker", "disabled")
-                    return {"status": "disabled"}
                 if session_error:
                     cookies, session_error = self._renew_configured_session(db, configured_adapter)
                 if session_error:
@@ -526,10 +520,10 @@ class ProxiwareSwapRunner:
                     mark_manual_action_required(db, session_error)
                     record_worker_heartbeat(db, "swap_worker", "manual_action_required", error_code=session_error)
                     return {"status": "manual_action_required", "error_code": session_error}
-                if not allow_manual and auto_swap_intent:
-                    restore_auto_swap_intent(db)
+                if not allow_manual and auto_swap_intent and not auto_swap_enabled:
+                    auto_swap_enabled = restore_auto_swap_intent(db)
                     mutation_enabled = get_setting(db, "proxiware_allow_mutation", "0") == "1"
-                if not allow_manual and get_setting(db, "proxiware_auto_swap", "0") != "1":
+                if not allow_manual and not auto_swap_enabled:
                     record_worker_heartbeat(db, "swap_worker", "disabled")
                     return {"status": "disabled"}
                 if not allow_manual and not mutation_enabled:

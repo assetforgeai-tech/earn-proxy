@@ -389,10 +389,23 @@ def test_swap_runner_does_not_claim_jobs_when_auto_swap_is_off(app):
     assert tuple(row) == ("pending", 0)
 
 
-def test_runtime_pause_with_live_session_does_not_restore_auto_swap_intent(app):
+def test_runtime_pause_with_live_session_restores_auto_swap_intent_when_reconciliation_is_clear(app, monkeypatch):
+    from app.proxiware_swap_service import ProxiwareSwapRunner
     from app.services.proxiware_credentials import store_provider_session
 
     _queue(app)
+    calls = []
+
+    class Adapter:
+        allow_mutation = True
+
+        def restore_session(self, _cookies):
+            calls.append("restore")
+
+        def swap(self, _job):
+            calls.append("swap")
+            return {"old_assignment_external_id": "old-worker", "new_assignment_address": "198.51.100.9"}
+
     with app.app_context():
         store_provider_session(
             get_db(), [{"name": "session", "value": "opaque"}], expires_at=datetime.now(UTC) + timedelta(hours=1)
@@ -400,16 +413,61 @@ def test_runtime_pause_with_live_session_does_not_restore_auto_swap_intent(app):
         set_setting(get_db(), "proxiware_auto_swap", "0")
         set_setting(get_db(), "proxiware_auto_swap_intent", "1")
     app.config.update(PROXIWARE_BROWSER_ENABLED=True, PROXIWARE_BROWSER_ALLOW_MUTATION=True)
+    monkeypatch.setattr("app.proxiware_swap_service.build_browser_adapter", lambda **_kwargs: Adapter())
 
-    result = (
-        __import__("app.proxiware_swap_service", fromlist=["ProxiwareSwapRunner"])
-        .ProxiwareSwapRunner(app=app)
-        .run_once()
-    )
+    result = ProxiwareSwapRunner(app=app).run_once()
+
+    assert result["status"] == "reconciliation_required"
+    assert calls == ["restore", "swap"]
+    with app.app_context():
+        settings = dict(
+            get_db()
+            .execute("SELECT key,value FROM settings WHERE key IN ('proxiware_auto_swap','proxiware_allow_mutation')")
+            .fetchall()
+        )
+    assert settings == {"proxiware_auto_swap": "1", "proxiware_allow_mutation": "1"}
+
+
+def test_runtime_pause_does_not_restore_while_swap_reconciliation_is_pending(app, monkeypatch):
+    from app.proxiware_swap_service import ProxiwareSwapRunner
+    from app.services.proxiware_credentials import store_provider_session
+
+    _queue(app)
+    calls = []
+
+    class Adapter:
+        allow_mutation = True
+
+        def restore_session(self, _cookies):
+            calls.append("restore")
+
+        def swap(self, _job):
+            calls.append("swap")
+            raise AssertionError("unresolved mutation must block new swaps")
+
+    with app.app_context():
+        db = get_db()
+        store_provider_session(
+            db, [{"name": "session", "value": "opaque"}], expires_at=datetime.now(UTC) + timedelta(hours=1)
+        )
+        set_setting(db, "proxiware_auto_swap", "0")
+        set_setting(db, "proxiware_auto_swap_intent", "1")
+        db.execute("UPDATE swap_jobs SET state='reconciliation_required',error_code='provider_timeout'")
+        db.commit()
+    app.config.update(PROXIWARE_BROWSER_ENABLED=True, PROXIWARE_BROWSER_ALLOW_MUTATION=True)
+    monkeypatch.setattr("app.proxiware_swap_service.build_browser_adapter", lambda **_kwargs: Adapter())
+
+    result = ProxiwareSwapRunner(app=app).run_once()
 
     assert result == {"status": "disabled"}
+    assert calls == []
     with app.app_context():
-        assert get_db().execute("SELECT value FROM settings WHERE key='proxiware_auto_swap'").fetchone()[0] == "0"
+        settings = dict(
+            get_db()
+            .execute("SELECT key,value FROM settings WHERE key IN ('proxiware_auto_swap','proxiware_allow_mutation')")
+            .fetchall()
+        )
+    assert settings == {"proxiware_auto_swap": "0", "proxiware_allow_mutation": "0"}
 
 
 def test_configured_swap_runner_does_not_claim_when_mutation_adapter_is_disabled(app):
