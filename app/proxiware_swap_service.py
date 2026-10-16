@@ -18,7 +18,7 @@ from typing import Any, Callable
 
 from app import create_worker_app
 from app.db import get_db
-from app.services.proxiware_browser import build_browser_adapter
+from app.services.proxiware_browser import SwapConnectionsLimit, build_browser_adapter
 from app.services.proxiware_captcha import TwoCaptchaAdapter
 from app.services.proxiware_credentials import (
     get_provider_secret,
@@ -34,6 +34,7 @@ from app.services.proxiware_health import (
     record_worker_heartbeat,
 )
 from app.services.proxiware_swap import (
+    GUARD_ERROR_CODES,
     MANUAL_ACTION_CODES,
     PROVIDER,
     begin_swap_batch_mutation,
@@ -42,6 +43,7 @@ from app.services.proxiware_swap import (
     mark_provider_applied,
     mark_reconciliation_required,
     mark_swap_blocked,
+    mark_swap_blocked_before_provider_request,
     mark_swap_failed,
     queue_eligible_swaps,
     recover_interrupted_swap_batches,
@@ -56,10 +58,10 @@ PROVIDER_RESPONSE_CODES = frozenset({"provider_mutation_rejected", "provider_res
 
 def safe_swap_error(exc: BaseException) -> str:
     code = str(getattr(exc, "error_code", "") or "").strip().lower()
-    if code in MANUAL_ACTION_CODES or code in PROVIDER_RESPONSE_CODES:
+    if code in MANUAL_ACTION_CODES or code in PROVIDER_RESPONSE_CODES or code in GUARD_ERROR_CODES:
         return code
     message = str(exc).lower()
-    for candidate in MANUAL_ACTION_CODES:
+    for candidate in MANUAL_ACTION_CODES | GUARD_ERROR_CODES:
         if candidate in message:
             return candidate
     if "quota" in message:
@@ -414,6 +416,13 @@ class ProxiwareSwapRunner:
                 release_swap_batch(db, batch_id=batch_id, claim_token=claim_token, error_code=code)
                 record_worker_heartbeat(db, "swap_worker", "blocked", error_code=code)
                 return response("blocked", error_code=code)
+            if isinstance(exc, SwapConnectionsLimit):
+                for job in jobs if "jobs" in locals() else []:
+                    mark_swap_blocked_before_provider_request(
+                        db, int(job["id"]), error_code=code, claim_token=claim_token
+                    )
+                record_worker_heartbeat(db, "swap_worker", "blocked", error_code=code)
+                return response("rejected", error_code=code)
             for job in jobs if "jobs" in locals() else []:
                 current = db.execute("SELECT state FROM swap_jobs WHERE id=?", (int(job["id"]),)).fetchone()
                 if current is not None and str(current["state"]) == "mutating":
@@ -640,7 +649,15 @@ class ProxiwareSwapRunner:
                 return {"status": "reconciliation_required", "job_id": int(job["id"])}
             except Exception as exc:  # noqa: BLE001 - worker boundary must isolate adapters
                 code = safe_swap_error(exc)
-                if mutation_started:
+                if mutation_started and isinstance(exc, SwapConnectionsLimit):
+                    mark_swap_blocked_before_provider_request(
+                        db,
+                        int(job["id"]),
+                        error_code=code,
+                        claim_token=job["claim_token"],
+                    )
+                    state = "blocked"
+                elif mutation_started:
                     mark_reconciliation_required(
                         db,
                         int(job["id"]),

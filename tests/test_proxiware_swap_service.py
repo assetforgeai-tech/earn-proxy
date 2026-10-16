@@ -869,6 +869,54 @@ def test_swap_runner_revalidates_assignment_before_calling_adapter(app):
     assert tuple(row) == ("blocked", "guard_failed", "not_risk")
 
 
+def test_swap_runner_blocks_a_provider_connection_race_without_reconciliation_or_pause(app):
+    from app.proxiware_swap_service import ProxiwareSwapRunner
+    from app.services.proxiware_browser import SwapConnectionsLimit
+
+    _queue(app)
+
+    class Adapter:
+        allow_mutation = True
+
+        def swap_assignments(self, _jobs):
+            raise SwapConnectionsLimit()
+
+    result = ProxiwareSwapRunner(app=app, adapter_factory=lambda: Adapter()).run_once()
+
+    assert result["status"] == "rejected"
+    assert result["error_code"] == "connections_limit"
+    with app.app_context():
+        db = get_db()
+        job = db.execute("SELECT state,error_code,mutation_started_at FROM swap_jobs").fetchone()
+        auto_swap = get_setting(db, "proxiware_auto_swap", "0")
+        assert db.execute("SELECT COUNT(*) FROM provider_sync_runs WHERE provider='proxiware'").fetchone()[0] == 0
+    assert tuple(job) == ("blocked", "connections_limit", None)
+    assert auto_swap == "1"
+
+
+def test_manual_swap_runner_blocks_provider_connection_race_without_reconciliation(app):
+    from app.proxiware_swap_service import ProxiwareSwapRunner
+    from app.services.proxiware_browser import SwapConnectionsLimit
+
+    sub_id = _queue(app)
+    with app.app_context():
+        job_id = int(get_db().execute("SELECT id FROM swap_jobs WHERE subscription_id=?", (sub_id,)).fetchone()["id"])
+
+    class Adapter:
+        allow_mutation = True
+
+        def swap(self, _job):
+            raise SwapConnectionsLimit()
+
+    result = ProxiwareSwapRunner(app=app, adapter_factory=lambda: Adapter()).run_job(job_id)
+
+    assert result["status"] == "blocked"
+    assert result["error_code"] == "connections_limit"
+    with app.app_context():
+        job = get_db().execute("SELECT state,error_code,mutation_started_at FROM swap_jobs WHERE id=?", (job_id,)).fetchone()
+    assert tuple(job) == ("blocked", "connections_limit", None)
+
+
 def test_swap_runner_revalidates_provider_threshold_before_calling_adapter(app):
     from app.proxiware_swap_service import ProxiwareSwapRunner
 

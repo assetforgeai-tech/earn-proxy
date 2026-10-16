@@ -50,6 +50,7 @@ SAFE_ERROR_CODES = frozenset(
         "provider_error",
         "worker_restart_during_mutation",
         "dashboard_stale",
+        "connections_limit",
         "reconciliation_required",
         "reconciled_no_provider_change",
     }
@@ -2268,6 +2269,47 @@ def mark_swap_blocked(
         _refresh_swap_batch(db, active["batch_id"] if active else None, now=current)
 
 
+def mark_swap_blocked_before_provider_request(
+    db,
+    job_id: int,
+    *,
+    error_code: str,
+    blocked_at: datetime | None = None,
+    claim_token: str,
+) -> None:
+    """Close a fenced job only when the adapter proves no mutation request was sent."""
+
+    ensure_proxiware_swap_schema(db)
+    current = _now(blocked_at)
+    safe_error = _safe_guard_code(error_code)
+    if safe_error != "connections_limit":
+        raise ValueError("Only provider pre-request guards may use this transition")
+    with _write_transaction(db):
+        job = db.execute(
+            "SELECT state,claim_token,batch_id,subscription_id FROM swap_jobs WHERE id=? AND provider=?",
+            (int(job_id), PROVIDER),
+        ).fetchone()
+        if (
+            job is None
+            or str(job["state"] or "") != "mutating"
+            or str(job["claim_token"] or "") != str(claim_token or "")
+        ):
+            raise ValueError("Swap job claim is stale")
+        db.execute(
+            "UPDATE swap_jobs SET state='blocked',reason='provider_blocked',error_code=?,blocked_at=?,"
+            "batch_id=NULL,claim_token=NULL,claimed_until=NULL,mutation_started_at=NULL,"
+            "mutation_old_assignment_external_id=NULL,mutation_old_assignment_address=NULL,"
+            "mutation_dashboard_assignment_id=NULL,mutation_subscription_external_id=NULL,updated_at=? "
+            "WHERE id=? AND provider=? AND state='mutating' AND claim_token=?",
+            (safe_error, current.isoformat(), current.isoformat(), int(job_id), PROVIDER, str(claim_token)),
+        )
+        db.execute(
+            "UPDATE provider_subscriptions SET dashboard_next_observe_at=?,updated_at=? WHERE id=? AND provider=?",
+            (current.isoformat(), current.isoformat(), int(job["subscription_id"]), PROVIDER),
+        )
+        _refresh_swap_batch(db, job["batch_id"], now=current)
+
+
 def mark_swap_failed(
     db,
     job_id: int,
@@ -2408,6 +2450,7 @@ __all__ = [
     "claim_next_swap",
     "ensure_proxiware_swap_schema",
     "mark_swap_blocked",
+    "mark_swap_blocked_before_provider_request",
     "mark_swap_failed",
     "mark_provider_applied",
     "mark_reconciliation_required",

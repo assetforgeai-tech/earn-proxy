@@ -18,6 +18,8 @@ from urllib.parse import urlparse
 
 from app.services.proxiware_dashboard import ProxiwareDashboardObserver, normalize_dashboard_address
 
+SWAP_CONNECTION_LIMIT = 1000
+
 
 class BrowserAdapterUnavailable(RuntimeError):
     """Raised when no approved browser adapter is configured."""
@@ -34,6 +36,7 @@ class BrowserAdapterUnavailable(RuntimeError):
                 "browser_session_missing",
                 "browser_transport_missing",
                 "captcha_required",
+                "connections_limit",
                 "endpoint_mismatch",
                 "fingerprint_failed",
                 "invalid_session",
@@ -48,6 +51,13 @@ class BrowserAdapterUnavailable(RuntimeError):
             else "manual_action_required"
         )
         super().__init__(self.error_code)
+
+
+class SwapConnectionsLimit(BrowserAdapterUnavailable):
+    """The live provider row exceeded the swap limit before any mutation request."""
+
+    def __init__(self) -> None:
+        super().__init__("connections_limit")
 
 
 class BrowserProviderResponseError(RuntimeError):
@@ -572,6 +582,11 @@ class CdpProxiwareBrowser:
             scoped_ids = [str(row.assignment_id) for row in rows]
             if any(scoped_ids.count(assignment_id) != 1 for assignment_id in identities):
                 raise BrowserAdapterUnavailable("subscription_scope_mismatch")
+            matching = [row for row in rows if str(row.assignment_id) in identities]
+            if any(row.connections is None for row in matching):
+                raise BrowserAdapterUnavailable("manual_action_required")
+            if any(int(row.connections) >= SWAP_CONNECTION_LIMIT for row in matching):
+                raise SwapConnectionsLimit()
             result = self._fetch(
                 client,
                 path="/api/static/networks/isp/proxies/swap",
@@ -647,6 +662,10 @@ class CdpProxiwareBrowser:
             matching = [row for row in scoped_rows if str(row.assignment_id) == response_assignment_id]
             if len(matching) != 1:
                 raise BrowserAdapterUnavailable("subscription_scope_mismatch")
+            if matching[0].connections is None:
+                raise BrowserAdapterUnavailable("manual_action_required")
+            if int(matching[0].connections) >= SWAP_CONNECTION_LIMIT:
+                raise SwapConnectionsLimit()
             result = self._fetch(
                 client,
                 path="/api/static/networks/isp/proxies/swap",
