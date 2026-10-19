@@ -17,7 +17,7 @@ from app.checker import check_proxy
 from app.db import get_db
 from app.earnapp_probe import probe_earnapp_proxy
 from app.services.proxiware_health import is_proxiware_automation_paused, record_worker_heartbeat
-from app.services.proxiware_qualification import qualify_proxiware_assignment
+from app.services.proxiware_qualification import qualify_proxiware_assignment, reconcile_proxiware_duplicates
 from app.services.proxiware_swap import ensure_proxiware_swap_schema
 from app.services.settings import get_setting
 
@@ -112,15 +112,17 @@ class ProxiwareQualificationRunner:
         ).fetchone()
         if pending is not None:
             return True
-        return (
-            db.execute(
-                "SELECT 1 FROM provider_assignments "
-                "WHERE provider='proxiware' AND missing_at IS NULL "
-                "AND status IN ('active','current') AND replacement_ready_at IS NOT NULL "
-                "AND qualification='pending' AND qualification_attempts<3 LIMIT 1"
-            ).fetchone()
-            is not None
-        )
+        current = _utc_now().isoformat()
+        return db.execute(
+            "SELECT 1 FROM provider_assignments "
+            "WHERE provider='proxiware' AND missing_at IS NULL "
+            "AND status IN ('active','current') AND qualification='pending' AND ("
+            "(replacement_ready_at IS NOT NULL AND qualification_attempts<3) "
+            "OR (replacement_ready_at IS NULL AND qualification_next_check_at IS NULL) "
+            "OR (qualification_next_check_at IS NOT NULL AND qualification_next_check_at<=?)"
+            ") LIMIT 1",
+            (current,),
+        ).fetchone() is not None
 
     def _wait_for_handoff(self, seconds: float) -> None:
         """Sleep until the interval or wake when auto-swap handoff work appears."""
@@ -306,6 +308,16 @@ class ProxiwareQualificationRunner:
                                 index = futures.index(pending)
                                 if pending.cancel():
                                     self._release_claim(*claims[index])
+            # Reconcile the global egress namespace once after the batch.  Doing
+            # this per assignment turns a bounded batch into N full-inventory
+            # writes and lets SQLite writers deadlock each other.
+            with self.app.app_context():
+                try:
+                    reconcile_proxiware_duplicates(get_db())
+                except Exception:  # noqa: BLE001 - one reconciliation failure must not lose the batch result
+                    if get_db().in_transaction:
+                        get_db().rollback()
+                    logger.warning("provider duplicate reconciliation failed", exc_info=True)
         finally:
             heartbeat_stop.set()
             heartbeat_thread.join(timeout=max(1.0, self.heartbeat_interval_seconds * 2))

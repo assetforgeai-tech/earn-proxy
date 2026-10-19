@@ -366,6 +366,75 @@ def test_runner_polls_for_new_replacements_when_auto_swap_is_enabled(app):
     assert waits == [5.0]
 
 
+def test_runner_wakes_for_new_pending_assignments_when_auto_swap_is_enabled(app):
+    from app.services.settings import set_setting
+
+    with app.app_context():
+        db = get_db()
+        set_setting(db, "proxiware_auto_swap", "1")
+        _assignment(db, "qual-worker-new-assignment")
+        assert ProxiwareQualificationRunner._handoff_pending(db) is True
+
+
+def test_runner_wakes_for_due_pending_retry_when_auto_swap_is_enabled(app):
+    from app.services.settings import set_setting
+
+    with app.app_context():
+        db = get_db()
+        set_setting(db, "proxiware_auto_swap", "1")
+        assignment_id = _assignment(db, "qual-worker-due-retry")
+        db.execute(
+            "UPDATE provider_assignments SET qualification_next_check_at=? WHERE id=?",
+            ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(), assignment_id),
+        )
+        db.commit()
+        assert ProxiwareQualificationRunner._handoff_pending(db) is True
+
+
+def test_runner_reconciles_provider_duplicates_once_per_batch(app, monkeypatch):
+    from app.services.proxiware_qualification import reconcile_proxiware_duplicates
+
+    with app.app_context():
+        db = get_db()
+        first = _assignment(db, "qual-worker-batch-1")
+        subscription_id = db.execute(
+            "SELECT subscription_id FROM provider_assignments WHERE id=?", (first,)
+        ).fetchone()[0]
+        now = datetime.now(UTC).isoformat()
+        db.execute(
+            "INSERT INTO provider_assignments(subscription_id,provider,external_id,host,port,status,qualification,"
+            "provider_eligible,live_status,assigned_at,last_seen_at,created_at,updated_at) "
+            "VALUES(?,'proxiware','qual-worker-batch-2','worker-2.example',8080,'active','pending',1,'pending',?,?,?,?)",
+            (subscription_id, now, now, now, now),
+        )
+        db.commit()
+
+    calls = 0
+
+    def count_reconcile(db, *, commit=True):
+        nonlocal calls
+        calls += 1
+        return reconcile_proxiware_duplicates(db, commit=commit)
+
+    monkeypatch.setattr("app.services.proxiware_qualification_service.reconcile_proxiware_duplicates", count_reconcile)
+    runner = ProxiwareQualificationRunner(
+        app=app,
+        probe=lambda _proxy: {
+            "status": "live",
+            "protocol": "socks5",
+            "exit_ip": "198.51.100.90",
+            "egress_trusted": True,
+        },
+        eligibility=lambda _proxy: {"verdict": "CID_SET"},
+        concurrency=2,
+    )
+
+    outcome = runner.run_once()
+
+    assert outcome["checked"] == 2
+    assert calls == 1
+
+
 def test_runner_wakes_when_replacement_arrives_during_idle_wait(app):
     from app.services.settings import set_setting
 

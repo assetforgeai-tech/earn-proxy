@@ -21,9 +21,32 @@ class FakeClient:
         return [{"id": "api-assignment", "host": "51.194.85.8", "port": 1337, "protocol": "socks5"}]
 
 
+class TwoSubscriptionClient:
+    def list_subscriptions(self, _network="isp"):
+        return [
+            {"id": 39277, "network": "isp", "location": "us", "quantity": 1},
+            {"id": 40270, "network": "isp", "location": "vn", "quantity": 1},
+        ]
+
+    def list_subscription_proxies(self, subscription_id):
+        return [
+            {
+                "id": f"api-assignment-{subscription_id}",
+                "host": "51.194.85.8",
+                "port": 1337,
+                "protocol": "socks5",
+            }
+        ]
+
+
 def _seed_inventory(app, now: datetime) -> None:
     with app.app_context():
         sync_proxiware_inventory(get_db(), FakeClient(), now=now)
+
+
+def _seed_two_subscription_inventory(app, now: datetime) -> None:
+    with app.app_context():
+        sync_proxiware_inventory(get_db(), TwoSubscriptionClient(), now=now)
 
 
 def _seed_session(app, now: datetime) -> None:
@@ -373,6 +396,30 @@ def test_browser_runner_transport_failure_is_degraded_without_expiring_session(a
     with app.app_context():
         session = get_db().execute("SELECT state FROM provider_sessions WHERE provider='proxiware'").fetchone()
     assert session["state"] == "active"
+
+
+def test_browser_runner_continues_after_one_subscription_provider_error(app):
+    now = datetime(2026, 9, 25, 8, 0, tzinfo=UTC)
+    _seed_two_subscription_inventory(app, now)
+    _seed_session(app, now)
+
+    class Adapter:
+        def restore_session(self, _cookies):
+            return None
+
+        def observe_dashboard(self, *, subscription_id):
+            if subscription_id == "39277":
+                raise RuntimeError("one subscription failed")
+            return [DashboardAssignment("dashboard-2", subscription_id, "51.194.85.8:1337", True, 1, now)]
+
+    result = ProxiwareBrowserRunner(app=app, adapter_factory=lambda: Adapter(), now=lambda: now).run_once()
+
+    assert result == {"status": "degraded", "observed": 1, "subscriptions": 2, "error_code": "provider_error"}
+    with app.app_context():
+        row = get_db().execute(
+            "SELECT dashboard_assignment_id FROM provider_assignments WHERE external_id='api-assignment-40270'"
+        ).fetchone()
+    assert row["dashboard_assignment_id"] == "dashboard-2"
 
 
 def test_browser_runner_refreshes_heartbeat_while_observation_is_active(app):

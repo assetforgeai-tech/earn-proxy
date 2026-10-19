@@ -149,7 +149,10 @@ def test_browser_worker_is_isolated_and_mutation_is_disabled_by_default():
     assert "NoNewPrivileges=true" in unit
     assert "ProtectSystem=strict" in unit
     assert "PrivateDevices=true" in unit
-    assert "earn-proxy-proxiware-chrome.service" in unit
+    assert "Wants=earn-proxy-proxiware-chrome.service" in unit
+    assert "Requires=earn-proxy-proxiware-chrome.service" not in unit
+    assert "BindsTo=earn-proxy-proxiware-chrome.service" not in unit
+    assert "PartOf=earn-proxy-proxiware-chrome.service" not in unit
     assert "User=earnproxy-chrome" in chrome_unit
     assert "Group=earnproxy-chrome" in chrome_unit
     assert "EnvironmentFile=/etc/earn-proxy.env" not in chrome_unit
@@ -193,9 +196,11 @@ def test_cdp_acl_is_required_before_chrome_and_stops_with_it():
     assert "Type=oneshot" in acl_unit
     assert "RemainAfterExit=yes" in acl_unit
     assert "--user earnproxy-browser" in acl_unit
-    assert "Requires=earn-proxy-proxiware-chrome.service" in browser_unit
+    assert "Wants=earn-proxy-proxiware-chrome.service" in browser_unit
+    assert "Requires=earn-proxy-proxiware-chrome.service" not in browser_unit
     assert "User=earnproxy-browser" in swap_unit
-    assert "Requires=earn-proxy-proxiware-chrome.service" in swap_unit
+    assert "Wants=earn-proxy-proxiware-chrome.service" in swap_unit
+    assert "Requires=earn-proxy-proxiware-chrome.service" not in swap_unit
 
 
 def test_cdp_acl_only_allows_the_browser_uid():

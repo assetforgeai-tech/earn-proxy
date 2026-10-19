@@ -337,6 +337,8 @@ class ProxiwareBrowserRunner:
                 record_worker_heartbeat(db, "browser_worker", "running")
                 restore(cookies)
                 observed = 0
+                degraded_code = ""
+                scope_mismatch = False
                 for subscription_id in subscriptions:
                     try:
                         snapshots = observe(subscription_id=subscription_id)
@@ -352,10 +354,29 @@ class ProxiwareBrowserRunner:
                         apply_dashboard_snapshot(db, subscription_id, snapshots, now=current)
                         self._schedule(db, subscription_id, current)
                         observed += len(snapshots)
-                    except Exception as exc:
+                    except BrowserAdapterUnavailable:
+                        # Session/transport failures invalidate the shared
+                        # browser context; preserve the fail-closed boundary.
+                        self._schedule(db, subscription_id, current, error_code="provider_error")
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - isolate one subscription observation
                         code = self._safe_degraded_code(exc)
                         self._schedule(db, subscription_id, current, error_code=code)
-                        raise
+                        if isinstance(exc, DashboardObservationError) and "scope mismatch" in str(exc).lower():
+                            scope_mismatch = True
+                        elif not degraded_code:
+                            degraded_code = code
+                        continue
+                if scope_mismatch:
+                    return self._manual(db, "manual_action_required", subscriptions=len(subscriptions))
+                if degraded_code:
+                    record_worker_heartbeat(db, "browser_worker", "degraded", error_code=degraded_code)
+                    return {
+                        "status": "degraded",
+                        "observed": observed,
+                        "subscriptions": len(subscriptions),
+                        "error_code": degraded_code,
+                    }
                 record_worker_heartbeat(db, "browser_worker", "ok", last_success=True)
                 return {"status": "ok", "observed": observed, "subscriptions": len(subscriptions)}
             except BrowserAdapterUnavailable as exc:

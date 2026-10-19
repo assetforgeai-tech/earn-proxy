@@ -376,9 +376,6 @@ def qualify_proxiware_assignment(
         db.rollback()
         raise LookupError("Provider assignment identity changed")
     db.commit()
-    # Reconcile all provider rows after each successful observation so a late
-    # user/provider arrival cannot leave a stale distributable flag behind.
-    reconcile_proxiware_duplicates(db)
     return QualificationResult(
         int(assignment_id),
         live_status,
