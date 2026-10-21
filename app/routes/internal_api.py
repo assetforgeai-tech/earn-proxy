@@ -100,7 +100,7 @@ def _raw_rows():
                   AND pa.status IN ('active','current') AND pa.live_status='live'
                   AND pa.qualification IN ({placeholders}) AND pa.provider_eligible=1
                   AND pa.protocol IN ('http','socks5')
-                  AND pa.distribution_enabled=1 AND pa.duplicate_egress=0
+                  AND pa.duplicate_egress=0
                   AND pa.dashboard_assignment_id IS NOT NULL AND trim(pa.dashboard_assignment_id)<>''
                   AND pa.dashboard_source='provider_dashboard' AND pa.dashboard_eligible=1
                   AND pa.dashboard_connections IS NOT NULL

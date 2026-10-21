@@ -82,6 +82,20 @@ def test_provider_proxy_is_exported_only_when_admin_distribution_toggle_is_on(ap
     ]
 
 
+def test_provider_export_does_not_depend_on_cached_distribution_flag(app, client):
+    with app.app_context():
+        db = get_db()
+        _assignment(db)
+        db.execute("UPDATE provider_assignments SET distribution_enabled=0")
+        db.commit()
+        set_setting(db, "proxiware_distribution_enabled", "1")
+
+    response = client.get("/api/v1/proxy-raw", headers={"X-API-Key": "internal-test-key"})
+
+    assert response.status_code == 200
+    assert response.get_data(as_text=True).strip() == "provider-feed.example:9000:provider-user:provider-pass"
+
+
 def test_provider_duplicate_or_risk_proxy_is_never_exported(app, client):
     with app.app_context():
         db = get_db()

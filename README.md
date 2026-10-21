@@ -114,7 +114,7 @@ GET https://proxy.acacondos.com/api/v1/proxy-raw
 GET https://proxy.acacondos.com/api/v1/proxy-transfer
 ```
 
-`proxy-raw` returns contributor upstream credentials for systems that connect directly to the provider. `proxy-transfer` returns fixed VPS listener credentials for clients that must connect through the relay. Both support newline-delimited text and `?format=json`; all responses are authenticated and marked `Cache-Control: no-store`. Only online, canonical proxies belonging to active users are returned. Existing clients may continue using `/api/v1/proxies` or `/internal/api/v1/proxies`, which remain raw-feed compatibility aliases.
+`proxy-raw` returns contributor upstream credentials plus qualified Proxiware assignments when the admin enables `Provider distribution`; Proxiware rows still require fresh health/dashboard evidence and pass duplicate, eligibility, connection-limit, and active-swap guards. `proxy-transfer` returns fixed VPS listener credentials for clients that must connect through the relay. Both support newline-delimited text and `?format=json`; all responses are authenticated and marked `Cache-Control: no-store`. User proxies must be online, canonical, and owned by active users. Existing clients may continue using `/api/v1/proxies` or `/internal/api/v1/proxies`, which remain raw-feed compatibility aliases.
 
 Administrators manage multiple revocable API keys at `/admin/integrations/api-keys`. A newly created or rotated token is revealed once; only its digest, prefix, and operational metadata are retained in SQLite.
 
