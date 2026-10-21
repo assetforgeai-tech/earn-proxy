@@ -96,17 +96,43 @@ def test_provider_export_does_not_depend_on_cached_distribution_flag(app, client
     assert response.get_data(as_text=True).strip() == "provider-feed.example:9000:provider-user:provider-pass"
 
 
-def test_provider_duplicate_or_risk_proxy_is_never_exported(app, client):
+def test_provider_raw_export_includes_active_inventory_without_quality_guards(app, client):
+    with app.app_context():
+        db = get_db()
+        _assignment(db, qualification="inconclusive", duplicate=1)
+        db.execute(
+            "UPDATE provider_assignments SET live_status='offline', provider_eligible=0, "
+            "dashboard_eligible=0, dashboard_connections=1000, dashboard_assignment_id=NULL, "
+            "dashboard_observed_at=NULL, egress_verified_at=NULL, last_checked_at=NULL"
+        )
+        db.commit()
+        set_setting(db, "proxiware_distribution_enabled", "1")
+
+    response = client.get("/api/v1/proxy-raw?format=json", headers={"X-API-Key": "internal-test-key"})
+
+    assert response.status_code == 200
+    assert response.get_json() == [
+        {
+            "endpoint": "provider-feed.example:9000",
+            "protocol": "socks5",
+            "raw": "provider-feed.example:9000:provider-user:provider-pass",
+            "status": "Inconclusive",
+            "type": "raw",
+        }
+    ]
+
+
+def test_provider_duplicate_egress_proxy_is_included_in_raw_inventory(app, client):
     with app.app_context():
         db = get_db()
         _assignment(db, duplicate=1)
         set_setting(db, "proxiware_distribution_enabled", "1")
 
     response = client.get("/api/v1/proxy-raw", headers={"X-API-Key": "internal-test-key"})
-    assert response.get_data(as_text=True) == ""
+    assert response.get_data(as_text=True).strip() == "provider-feed.example:9000:provider-user:provider-pass"
 
 
-def test_distribution_query_fails_closed_for_late_user_egress_duplicate(app, client):
+def test_provider_raw_inventory_is_not_filtered_by_user_egress_duplicate(app, client):
     with app.app_context():
         db = get_db()
         _assignment(db, exit_ip="198.51.100.81")
@@ -121,10 +147,10 @@ def test_distribution_query_fails_closed_for_late_user_egress_duplicate(app, cli
         set_setting(db, "proxiware_distribution_enabled", "1")
 
     response = client.get("/api/v1/proxy-raw", headers={"X-API-Key": "internal-test-key"})
-    assert response.get_data(as_text=True) == ""
+    assert response.get_data(as_text=True).strip() == "provider-feed.example:9000:provider-user:provider-pass"
 
 
-def test_provider_proxy_in_replacement_cooldown_is_never_exported(app, client):
+def test_provider_raw_inventory_includes_replacement_cooldown_assignment(app, client):
     with app.app_context():
         db = get_db()
         _assignment(db)
@@ -136,10 +162,10 @@ def test_provider_proxy_in_replacement_cooldown_is_never_exported(app, client):
         set_setting(db, "proxiware_distribution_enabled", "1")
 
     response = client.get("/api/v1/proxy-raw", headers={"X-API-Key": "internal-test-key"})
-    assert response.get_data(as_text=True) == ""
+    assert response.get_data(as_text=True).strip() == "provider-feed.example:9000:provider-user:provider-pass"
 
 
-def test_provider_proxy_with_active_swap_job_is_never_exported(app, client):
+def test_provider_raw_inventory_includes_assignment_with_active_swap_job(app, client):
     with app.app_context():
         db = get_db()
         _assignment(db)
@@ -157,10 +183,10 @@ def test_provider_proxy_with_active_swap_job_is_never_exported(app, client):
         set_setting(db, "proxiware_distribution_enabled", "1")
 
     response = client.get("/api/v1/proxy-raw", headers={"X-API-Key": "internal-test-key"})
-    assert response.get_data(as_text=True) == ""
+    assert response.get_data(as_text=True).strip() == "provider-feed.example:9000:provider-user:provider-pass"
 
 
-def test_active_swap_job_does_not_hide_allow_sibling_assignment(app, client):
+def test_active_swap_job_does_not_hide_provider_raw_inventory(app, client):
     with app.app_context():
         db = get_db()
         _assignment(db)
@@ -203,10 +229,13 @@ def test_active_swap_job_does_not_hide_allow_sibling_assignment(app, client):
     response = client.get("/api/v1/proxy-raw?format=json", headers={"X-API-Key": "internal-test-key"})
 
     assert response.status_code == 200
-    assert [row["endpoint"] for row in response.get_json()] == ["provider-feed.example:9000"]
+    assert [row["endpoint"] for row in response.get_json()] == [
+        "provider-feed.example:9000",
+        "provider-risk.example:9001",
+    ]
 
 
-def test_provider_proxy_without_fresh_dashboard_evidence_is_never_exported(app, client):
+def test_provider_raw_inventory_includes_stale_dashboard_observation(app, client):
     with app.app_context():
         db = get_db()
         _assignment(db)
@@ -221,19 +250,21 @@ def test_provider_proxy_without_fresh_dashboard_evidence_is_never_exported(app, 
 
     response = client.get("/api/v1/proxy-raw", headers={"X-API-Key": "internal-test-key"})
 
-    assert response.get_data(as_text=True) == ""
+    assert response.get_data(as_text=True).strip() == "provider-feed.example:9000:provider-user:provider-pass"
 
 
-def test_provider_proxy_honors_global_allow_and_risk_toggles(app, client):
+def test_provider_raw_inventory_is_not_limited_by_user_allow_risk_toggles(app, client):
     with app.app_context():
         db = get_db()
         _assignment(db)
         set_setting(db, "proxiware_distribution_enabled", "1")
         set_setting(db, "api_include_allow", "0")
-        set_setting(db, "api_include_risk", "1")
+        set_setting(db, "api_include_risk", "0")
 
     headers = {"X-API-Key": "internal-test-key"}
-    assert client.get("/api/v1/proxy-raw", headers=headers).get_data(as_text=True) == ""
+    assert client.get("/api/v1/proxy-raw", headers=headers).get_data(as_text=True).strip() == (
+        "provider-feed.example:9000:provider-user:provider-pass"
+    )
 
     with app.app_context():
         db = get_db()
@@ -256,18 +287,19 @@ def test_provider_proxy_with_inactive_parent_subscription_is_never_exported(app,
     assert response.get_data(as_text=True) == ""
 
 
-def test_provider_proxy_with_unknown_protocol_is_never_exported(app, client):
+def test_provider_raw_inventory_includes_unknown_protocol(app, client):
     with app.app_context():
         db = get_db()
         _assignment(db, protocol="unknown")
         set_setting(db, "proxiware_distribution_enabled", "1")
 
-    response = client.get("/api/v1/proxy-raw", headers={"X-API-Key": "internal-test-key"})
+    response = client.get("/api/v1/proxy-raw?format=json", headers={"X-API-Key": "internal-test-key"})
 
-    assert response.get_data(as_text=True) == ""
+    assert response.status_code == 200
+    assert response.get_json()[0]["protocol"] == "unknown"
 
 
-def test_provider_proxy_with_future_health_or_dashboard_timestamp_is_never_exported(app, client):
+def test_provider_raw_inventory_includes_future_health_or_dashboard_timestamps(app, client):
     with app.app_context():
         db = get_db()
         _assignment(db)
@@ -281,10 +313,10 @@ def test_provider_proxy_with_future_health_or_dashboard_timestamp_is_never_expor
 
     response = client.get("/api/v1/proxy-raw", headers={"X-API-Key": "internal-test-key"})
 
-    assert response.get_data(as_text=True) == ""
+    assert response.get_data(as_text=True).strip() == "provider-feed.example:9000:provider-user:provider-pass"
 
 
-def test_provider_proxy_with_future_health_timestamp_is_never_exported(app, client):
+def test_provider_raw_inventory_includes_future_egress_timestamps(app, client):
     with app.app_context():
         db = get_db()
         _assignment(db)
@@ -295,4 +327,4 @@ def test_provider_proxy_with_future_health_timestamp_is_never_exported(app, clie
 
     response = client.get("/api/v1/proxy-raw", headers={"X-API-Key": "internal-test-key"})
 
-    assert response.get_data(as_text=True) == ""
+    assert response.get_data(as_text=True).strip() == "provider-feed.example:9000:provider-user:provider-pass"

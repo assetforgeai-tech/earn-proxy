@@ -13,7 +13,6 @@ from app.proxy_parser import ParsedProxy
 from app.services.api_keys import authenticate_api_key
 from app.services.checks import checker_settings
 from app.services.proxies import reveal_proxy
-from app.services.proxiware_qualification import _ip as normalize_exit_ip
 from app.services.proxiware_transfer import TransferSlotError, load_proxiware_slots
 from app.services.settings import get_setting
 
@@ -52,28 +51,23 @@ def _raw_rows():
         enabled.append("allow")
     if get_setting(db, "api_include_risk", "1") == "1":
         enabled.append("risk")
-    if not enabled:
-        return []
-    placeholders = ",".join("?" for _ in enabled)
     stale_cutoff = (current - timedelta(minutes=checker_settings(db).health_stale_minutes)).isoformat()
-    try:
-        dashboard_max_age = max(60, int(get_setting(db, "proxiware_dashboard_max_age_seconds", "900")))
-    except ValueError:
-        dashboard_max_age = 900
-    dashboard_cutoff = (current - timedelta(seconds=dashboard_max_age)).isoformat()
     future_cutoff = (current + timedelta(seconds=60)).isoformat()
-    rows = db.execute(
-        f"""
-        SELECT p.* FROM proxies p JOIN users u ON u.id=p.user_id
-        WHERE p.archived_at IS NULL AND p.status='online' AND p.duplicate_of IS NULL
-          AND p.eligibility IN ({placeholders}) AND u.status='active'
-          AND p.exit_ip IS NOT NULL AND trim(p.exit_ip) <> ''
-          AND p.egress_attestation_source IN ('https_quorum','earnapp_tls')
-          AND p.last_success_at IS NOT NULL AND p.last_success_at >= ? AND p.last_success_at <= ?
-        ORDER BY p.id
-        """,
-        [*enabled, stale_cutoff, future_cutoff],
-    ).fetchall()
+    rows = []
+    if enabled:
+        placeholders = ",".join("?" for _ in enabled)
+        rows = db.execute(
+            f"""
+            SELECT p.* FROM proxies p JOIN users u ON u.id=p.user_id
+            WHERE p.archived_at IS NULL AND p.status='online' AND p.duplicate_of IS NULL
+              AND p.eligibility IN ({placeholders}) AND u.status='active'
+              AND p.exit_ip IS NOT NULL AND trim(p.exit_ip) <> ''
+              AND p.egress_attestation_source IN ('https_quorum','earnapp_tls')
+              AND p.last_success_at IS NOT NULL AND p.last_success_at >= ? AND p.last_success_at <= ?
+            ORDER BY p.id
+            """,
+            [*enabled, stale_cutoff, future_cutoff],
+        ).fetchall()
     distributable = []
     for row in rows:
         try:
@@ -81,84 +75,37 @@ def _raw_rows():
         except ValueError:
             current_app.logger.error("Skipping proxy %s because its credential cannot be decrypted", row["id"])
     if get_setting(db, "proxiware_distribution_enabled", "0") == "1":
-        provider_columns = {
-            str(row["name"]) for row in db.execute('PRAGMA table_info("provider_assignments")').fetchall()
-        }
-        required = {
-            "distribution_enabled",
-            "duplicate_egress",
-            "egress_verified_at",
-            "protocol",
-        }
-        if required.issubset(provider_columns):
-            provider_rows = db.execute(
-                f"""
-                SELECT pa.*, ps.expires_at AS parent_expires_at FROM provider_assignments pa
-                JOIN provider_subscriptions ps ON ps.id=pa.subscription_id AND ps.provider='proxiware'
-                WHERE pa.provider='proxiware' AND pa.missing_at IS NULL
-                  AND ps.missing_at IS NULL AND ps.status IN ('active','ready')
-                  AND pa.status IN ('active','current') AND pa.live_status='live'
-                  AND pa.qualification IN ({placeholders}) AND pa.provider_eligible=1
-                  AND pa.protocol IN ('http','socks5')
-                  AND pa.duplicate_egress=0
-                  AND pa.dashboard_assignment_id IS NOT NULL AND trim(pa.dashboard_assignment_id)<>''
-                  AND pa.dashboard_source='provider_dashboard' AND pa.dashboard_eligible=1
-                  AND pa.dashboard_connections IS NOT NULL
-                  AND pa.dashboard_connections>=0 AND pa.dashboard_connections<1000
-                  AND pa.dashboard_observed_at BETWEEN ? AND ?
-                  AND pa.exit_ip IS NOT NULL AND trim(pa.exit_ip)<>''
-                  AND pa.egress_verified_at BETWEEN ? AND ?
-                  AND pa.last_checked_at BETWEEN ? AND ?
-                  AND (pa.replacement_ready_at IS NULL OR pa.replacement_ready_at<=?)
-                  AND NOT EXISTS (
-                      SELECT 1 FROM swap_jobs sj
-                      WHERE sj.provider='proxiware' AND sj.old_assignment_id=pa.id
-                        AND sj.state IN ('pending','running','mutating','provider_applied','reconciliation_required')
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM proxies p
-                      WHERE p.archived_at IS NULL AND p.exit_ip=pa.exit_ip
-                        AND p.duplicate_of IS NULL
-                        AND p.egress_attestation_source IN ('https_quorum','earnapp_tls')
-                  )
-                  AND pa.id = COALESCE(
-                      (SELECT MIN(pa2.id) FROM provider_assignments pa2
-                       WHERE pa2.provider='proxiware' AND pa2.missing_at IS NULL
-                         AND pa2.exit_ip=pa.exit_ip
-                         AND pa2.live_status='live' AND pa2.egress_verified_at IS NOT NULL), pa.id
-                  )
-                ORDER BY pa.id
-                """,
-                [
-                    *enabled,
-                    dashboard_cutoff,
-                    future_cutoff,
-                    stale_cutoff,
-                    future_cutoff,
-                    stale_cutoff,
-                    future_cutoff,
-                    current.isoformat(),
-                ],
-            ).fetchall()
-            for row in provider_rows:
-                if _provider_subscription_expired(row["parent_expires_at"], current):
-                    continue
-                if not normalize_exit_ip(row["exit_ip"]):
-                    continue
-                try:
-                    parsed = ParsedProxy(
-                        str(row["protocol"] or "auto"),
-                        str(row["host"]),
-                        int(row["port"]),
-                        decrypt_secret(str(row["username_encrypted"] or "")) if row["username_encrypted"] else "",
-                        decrypt_secret(str(row["password_encrypted"] or "")) if row["password_encrypted"] else "",
-                    )
-                    distributable.append((row, parsed))
-                except (TypeError, ValueError):
-                    current_app.logger.error(
-                        "Skipping provider assignment %s because its credential cannot be decrypted",
-                        row["id"],
-                    )
+        provider_rows = db.execute(
+            """
+            SELECT pa.*, ps.expires_at AS parent_expires_at FROM provider_assignments pa
+            JOIN provider_subscriptions ps ON ps.id=pa.subscription_id AND ps.provider='proxiware'
+            WHERE pa.provider='proxiware' AND pa.missing_at IS NULL
+              AND ps.missing_at IS NULL AND ps.status IN ('active','ready')
+              AND pa.status IN ('active','current')
+            ORDER BY pa.id
+            """,
+            [],
+        ).fetchall()
+        for row in provider_rows:
+            if _provider_subscription_expired(row["parent_expires_at"], current):
+                continue
+            try:
+                protocol = str(row["protocol"] or "auto").lower() if "protocol" in row else "auto"
+                if protocol not in {"auto", "http", "https", "socks5"}:
+                    protocol = "auto"
+                parsed = ParsedProxy(
+                    protocol,
+                    str(row["host"]),
+                    int(row["port"]),
+                    decrypt_secret(str(row["username_encrypted"] or "")) if row["username_encrypted"] else "",
+                    decrypt_secret(str(row["password_encrypted"] or "")) if row["password_encrypted"] else "",
+                )
+                distributable.append((row, parsed))
+            except (TypeError, ValueError):
+                current_app.logger.error(
+                    "Skipping provider assignment %s because its credential cannot be decrypted",
+                    row["id"],
+                )
     return distributable
 
 
@@ -168,8 +115,20 @@ def _raw_response(*, include_type: bool = False):
         payload = []
         for row, parsed in distributable:
             row_keys = set(row.keys())
-            qualification = str(row["qualification"] if "qualification" in row_keys else row["eligibility"])
-            protocol = str(row["protocol"] if "protocol" in row_keys else row["detected_protocol"])
+            qualification = str(
+                row["qualification"]
+                if "qualification" in row_keys
+                else row["eligibility"]
+                if "eligibility" in row_keys
+                else "unknown"
+            )
+            protocol = str(
+                row["protocol"]
+                if "protocol" in row_keys
+                else row["detected_protocol"]
+                if "detected_protocol" in row_keys
+                else "auto"
+            )
             item = {
                 "raw": parsed.raw,
                 "status": qualification.capitalize(),

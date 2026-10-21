@@ -20,7 +20,7 @@ def test_qualification_rejects_non_public_egress(exit_ip, app):
         assert _ip("198.51.100.80") == "198.51.100.80"
 
 
-def test_internal_distribution_rejects_non_public_egress(app, client):
+def test_raw_provider_inventory_does_not_require_a_public_egress_attestation(app, client):
     with app.app_context():
         db = get_db()
         _ensure_columns(db)
@@ -58,4 +58,4 @@ def test_internal_distribution_rejects_non_public_egress(app, client):
 
     response = client.get("/api/v1/proxy-raw", headers={"X-API-Key": "internal-test-key"})
     assert response.status_code == 200
-    assert response.get_data(as_text=True) == ""
+    assert response.get_data(as_text=True).strip() == "provider-feed.example:9000:provider-user:provider-pass"
